@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environment and secrets — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Local agent workspaces (isolated checkouts of target repositories)
+.workspaces/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
