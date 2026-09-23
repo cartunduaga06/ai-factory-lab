@@ -64,7 +64,30 @@ enforcement.
   variables via `FactoryConfig.from_env()`. `.env` is git-ignored; `.env.example`
   contains placeholders only.
 - **No credential leakage.** `FactoryConfig.redacted()` masks every credential.
-  Logging must use it; raw `asdict()` on config must not be logged.
+  Logging must use it; raw `asdict()` on config must not be logged. The CLI also
+  redacts the configured token from any exception text before printing it.
+- **Read-only intake.** `GitHubIssueSource` performs `GET` requests only. It
+  never adds or removes labels, closes or reopens issues, comments, changes
+  repository settings or permissions, or touches a product repository. The
+  `GitHubClient` exposes no write method at all.
+- **Write-free eligibility.** Whether an issue is eligible is decided by reading
+  its labels; the factory does not label issues to claim them.
+- **Duplicate protection is enforced in storage.** The `tasks` table carries
+  `UNIQUE(source_provider, source_repository, source_issue_number)`, so a bug in
+  application-level checks cannot create two tasks for one issue.
+
+## Credential separation
+
+Two different credentials exist around this project and must never be conflated:
+
+| Credential | Owner | Purpose |
+|---|---|---|
+| `GITHUB_TOKEN` (factory runtime) | the AI Factory application | READ GitHub Issues during intake |
+| The OpenHands execution credential | the development/execution environment | push feature branches and open development PRs |
+
+The factory runtime credential requires no write scope. The execution credential
+is used only by the environment that builds the factory; it is never written into
+configuration, code, test fixtures, documentation, logs or a git remote URL.
 
 ## Secrets handling
 
@@ -76,6 +99,12 @@ enforcement.
   configuration.
 - The factory is expected to receive narrowly scoped tokens (a bot account with
   the minimum scopes its tasks require) — not a personal administrator token.
+- Intake needs read access to Issues only. A token with write or administration
+  scope is over-privileged for this phase.
+- Git remotes must not embed credentials. Use a clean
+  `https://github.com/<owner>/<repo>.git` remote and let the environment supply
+  authentication out of band. An embedded token in `.git/config` is a finding to
+  report and sanitize, not a convenience to rely on.
 
 ## Human checkpoints
 

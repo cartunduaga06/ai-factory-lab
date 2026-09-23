@@ -5,12 +5,17 @@ Every test passes an explicit mapping so no real environment or secret is read.
 
 from __future__ import annotations
 
+import pytest
+
 from factory.infrastructure.config import (
+    DEFAULT_DATABASE_PATH,
     DEFAULT_GITHUB_API_URL,
     DEFAULT_WORKSPACE_ROOT,
+    DatabaseScheme,
     Environment,
     FactoryConfig,
     LogFormat,
+    UnsupportedDatabaseError,
 )
 
 
@@ -82,3 +87,91 @@ def test_unknown_enum_values_fall_back_to_defaults() -> None:
     config = FactoryConfig.from_env({"FACTORY_ENV": "banana", "FACTORY_LOG_FORMAT": "xml"})
     assert config.environment is Environment.DEVELOPMENT
     assert config.logging.fmt is LogFormat.TEXT
+
+
+# -- database URL parsing --------------------------------------------------
+
+
+def test_sqlite_url_is_parsed() -> None:
+    config = FactoryConfig.from_env({"DATABASE_URL": "sqlite:///./factory.db"})
+    parsed = config.database
+    assert parsed.scheme is DatabaseScheme.SQLITE
+    assert parsed.path == "./factory.db"
+    assert parsed.url == "sqlite:///./factory.db"
+
+
+def test_sqlalchemy_style_sqlite_url_is_accepted() -> None:
+    config = FactoryConfig.from_env({"DATABASE_URL": "sqlite+pysqlite:///./factory.db"})
+    assert config.database.path == "./factory.db"
+
+
+def test_absolute_sqlite_path_is_preserved() -> None:
+    config = FactoryConfig.from_env({"DATABASE_URL": "sqlite:////var/lib/factory.db"})
+    assert config.database.path == "/var/lib/factory.db"
+
+
+def test_missing_database_url_defaults_to_local_sqlite() -> None:
+    config = FactoryConfig.from_env({})
+    assert config.database.scheme is DatabaseScheme.SQLITE
+    assert config.database.path == DEFAULT_DATABASE_PATH
+
+
+def test_unsupported_database_scheme_is_rejected() -> None:
+    config = FactoryConfig.from_env({"DATABASE_URL": "postgresql://localhost/factory"})
+    with pytest.raises(UnsupportedDatabaseError):
+        _ = config.database
+
+
+def test_malformed_database_url_is_rejected() -> None:
+    config = FactoryConfig.from_env({"DATABASE_URL": "not-a-url"})
+    with pytest.raises(UnsupportedDatabaseError):
+        _ = config.database
+
+
+def test_sqlite_url_without_path_is_rejected() -> None:
+    config = FactoryConfig.from_env({"DATABASE_URL": "sqlite:///"})
+    with pytest.raises(UnsupportedDatabaseError):
+        _ = config.database
+
+
+def test_loading_config_does_not_require_a_valid_database_url() -> None:
+    # Parsing is deferred: reading config alone must never raise.
+    config = FactoryConfig.from_env({"DATABASE_URL": "postgresql://localhost/factory"})
+    assert config.database_url == "postgresql://localhost/factory"
+
+
+# -- github runtime configuration ------------------------------------------
+
+
+def test_missing_github_token_means_github_is_disabled() -> None:
+    config = FactoryConfig.from_env({})
+    assert config.github.token is None
+    assert config.github.enabled is False
+
+
+def test_github_repository_settings_load() -> None:
+    config = FactoryConfig.from_env(
+        {
+            "GITHUB_TOKEN": "ghp_example",
+            "FACTORY_GITHUB_REPO": "cartunduaga06/ai-factory-lab",
+            "FACTORY_TARGET_REPO": "cartunduaga06/finanza-ia",
+        }
+    )
+    assert config.github.enabled is True
+    assert config.github.control_plane_repo == "cartunduaga06/ai-factory-lab"
+    assert config.github.target_repo == "cartunduaga06/finanza-ia"
+
+
+def test_redacted_database_url_does_not_leak_a_token() -> None:
+    config = FactoryConfig.from_env({"DATABASE_URL": "sqlite:///./factory.db"})
+    assert config.redacted()["database_url"] == "sqlite:///./factory.db"
+
+
+def test_redacted_database_url_masks_embedded_userinfo() -> None:
+    config = FactoryConfig.from_env(
+        {"DATABASE_URL": "postgresql://user:supersecret@db.internal:5432/factory"}
+    )
+    redacted = config.redacted()["database_url"]
+    assert "supersecret" not in str(redacted)
+    assert "user" not in str(redacted)
+    assert "db.internal:5432/factory" in str(redacted)
