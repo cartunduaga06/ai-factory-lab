@@ -78,9 +78,11 @@ class RunTrackingService:
     def refresh(self, run_id: str, adapter: AgentAdapter) -> RunRefresh:
         """Collect ``run_id`` from ``adapter``, persist it and advance the task.
 
-        A run that is already terminal in storage is returned unchanged: it has
-        already been collected, its gates have already been evaluated, and
-        re-running them would be neither idempotent nor cheap.
+        A run that is already terminal in storage is *not* re-collected and its
+        gates are not re-run, but the task lifecycle is still reconciled: a crash
+        between persisting the terminal run and applying the task transition must
+        be recoverable. The terminal path is therefore idempotent — a second pass
+        changes nothing.
 
         Raises:
             KeyError: if the run is unknown.
@@ -89,6 +91,7 @@ class RunTrackingService:
         if run is None:
             raise KeyError(run_id)
         if run.is_terminal:
+            self._reconcile_terminal(run)
             return self._result(run)
 
         adapter.collect(run)
@@ -98,6 +101,41 @@ class RunTrackingService:
         self._runs.update_run(run)
         self._drive_task(run)
         return self._result(run)
+
+    def _reconcile_terminal(self, run: AgentRun) -> None:
+        """Drive the task from a run that was already terminal in storage.
+
+        This closes the crash window: a run can be stored terminal while the
+        matching task transition has not yet been applied (the process died in
+        between). Re-running that reconciliation is safe — :meth:`_drive_task`
+        is a no-op once the task is already in the target state.
+
+        An already-successful run is normally trusted as-is. The one recovery
+        case is a ``SUCCEEDED`` run with no persisted gates while gates are
+        configured: rather than leaving the run permanently unvalidated, the
+        gates are evaluated once and persisted. With no gate specs configured the
+        factory invents nothing — an empty gate list is the documented result.
+
+        Only the task's latest run may drive the task. A superseded terminal run
+        (the task was retried and now has a newer run) must not rewind the
+        lifecycle, so it is left alone.
+        """
+        if not self._is_latest_run(run):
+            return
+        if run.status is RunStatus.SUCCEEDED and not run.gates and self._gate_specs:
+            run.gates = self._evaluate_gates(run)
+            self._runs.update_run(run)
+        self._drive_task(run)
+
+    def _is_latest_run(self, run: AgentRun) -> bool:
+        """Whether ``run`` is the most recent run for its task.
+
+        ``list_runs`` is oldest-first, so the last entry is the newest. A run that
+        is not the newest is historical: a later attempt (or a completed retry)
+        owns the task now, and this run must not drive its lifecycle.
+        """
+        runs = self._runs.list_runs(run.task_id)
+        return bool(runs) and runs[-1].run_id == run.run_id
 
     # -- internals ---------------------------------------------------------
 

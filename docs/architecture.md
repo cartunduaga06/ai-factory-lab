@@ -528,8 +528,22 @@ concrete engine or runner, and never on `AgentKind`.
 | `FAILED` | Task moves through the existing legal failure edge. |
 | `CANCELLED` | Task moves through the existing legal cancellation edge. |
 
-A terminal run already in storage is returned unchanged on a second refresh: it
-was already collected and its gates already evaluated.
+A terminal run already in storage is **not re-collected** on a later refresh and
+its gates are **not re-run**, but the task lifecycle is still reconciled from it.
+This closes the crash window between persisting the terminal run and applying the
+matching task transition: if the process died in between, the run is terminal in
+storage while the task is still `RUNNING`. Reconciliation re-applies the
+transition, and re-running it is a no-op once the task is already in the target
+state, so repeated refreshes add no transition history, no gate executions and
+no run writes.
+
+Two guards make reconciliation safe and deterministic:
+
+- only the task's **latest** run may drive the lifecycle, so a superseded run
+  from an earlier attempt never rewinds a task that has since been retried;
+- a `SUCCEEDED` run with no persisted gates while gate specs *are* configured is
+  evaluated once and its gates persisted (the one recovery case). With no gate
+  specs configured the factory invents nothing and only reconciles.
 
 `CLAIMED → RUNNING` happens only *after* the run is durable, so a task is never
 `RUNNING` without a run behind it.
