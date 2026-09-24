@@ -417,7 +417,10 @@ holds an LLM key. The session key (`OPENHANDS_SESSION_API_KEY`) authenticates
 factory→server requests and is distinct from any LLM credential. `--show-config`
 redacts both. No token, header, raw response body or credential-bearing URL can
 leave the integration: failures are translated to sanitized errors that carry no
-cause or context, matching the Phase 2B boundary.
+cause or context, matching the Phase 2B boundary. Remote HTTP error-body text
+(`detail`, `message`, `error`, ...) is discarded at the client boundary rather
+than partially redacted — the client cannot know every credential a server or LLM
+provider might echo — so only the trusted numeric status leaves the client.
 
 ## Planned evolution
 

@@ -94,6 +94,7 @@ def test_http_error_is_sanitized() -> None:
     message = str(caught.value)
     assert SESSION_KEY not in message
     assert "500" in message
+    assert caught.value.status == 500
 
 
 def test_response_without_a_json_object_is_rejected() -> None:
@@ -156,15 +157,45 @@ def test_network_failure_never_reveals_the_url_or_key() -> None:
         assert BASE_URL not in formatted
 
 
-def test_error_body_secrets_are_scrubbed_from_the_message() -> None:
+ARBITRARY_SECRET = "MY_PRIVATE_LLM_PASSWORD_93726"
+
+
+def test_arbitrary_error_body_secret_is_discarded() -> None:
+    # This value matches no known token shape and is not the session key, so
+    # partial redaction could never have been safe. It must be discarded whole.
     transport = FakeTransport(
-        [ServerResponse(401, {"message": f"invalid key {SESSION_KEY} for sk-another"})]
+        [
+            ServerResponse(
+                500,
+                {"detail": f"provider rejected credential {ARBITRARY_SECRET}"},
+            )
+        ]
     )
     with pytest.raises(OpenHandsRequestError) as caught:
-        _client(transport).get_conversation(CONVERSATION_ID)
-    text = str(caught.value)
-    assert SESSION_KEY not in text
-    assert "sk-another" not in text
+        _client(transport).create_conversation({"workspace": {}})
+
+    error = caught.value
+    assert error.status == 500
+    assert ARBITRARY_SECRET not in str(error)
+    assert ARBITRARY_SECRET not in repr(error)
+    assert all(ARBITRARY_SECRET not in repr(value) for value in vars(error).values())
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert ARBITRARY_SECRET not in "".join(traceback.format_exception(error))
+    # No remote body text is retained under any attribute.
+    assert not any("provider rejected" in repr(value) for value in vars(error).values())
+
+
+def test_remote_error_body_text_is_not_retained() -> None:
+    transport = FakeTransport(
+        [ServerResponse(422, {"detail": "some remote diagnostic text", "message": "more"})]
+    )
+    with pytest.raises(OpenHandsRequestError) as caught:
+        _client(transport).create_conversation({"workspace": {}})
+    message = str(caught.value)
+    assert "some remote diagnostic text" not in message
+    assert "more" not in message
+    assert message == "OpenHands agent server returned status 422"
 
 
 def test_non_string_error_detail_is_discarded() -> None:
@@ -175,11 +206,12 @@ def test_non_string_error_detail_is_discarded() -> None:
     assert "loc" not in str(caught.value)
 
 
-def test_verbose_error_body_is_bounded() -> None:
+def test_verbose_error_body_is_discarded() -> None:
     transport = FakeTransport([ServerResponse(500, {"detail": "y" * 5000})])
     with pytest.raises(OpenHandsRequestError) as caught:
         _client(transport).create_conversation({"workspace": {}})
     assert len(str(caught.value)) < 400
+    assert "yyy" not in str(caught.value)
 
 
 def test_payload_is_json_encoded() -> None:

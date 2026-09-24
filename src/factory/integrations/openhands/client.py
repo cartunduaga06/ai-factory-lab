@@ -11,8 +11,9 @@ Two properties matter here:
   tests supply an in-memory fake and never touch the network.
 * **Nothing raw escapes.** The session key lives in a private attribute and is
   never placed in a URL, a ``repr``, a log line, an exception message or a
-  chained exception. Response bodies are never surfaced verbatim: only a bounded,
-  credential-scrubbed detail is ever attached to an error.
+  chained exception. Remote HTTP error-body text is discarded at this boundary
+  rather than truncated or redacted: only trusted local data (the numeric HTTP
+  status) is attached to an error.
 
 Authentication (when the server requires it) uses the ``X-Session-API-Key``
 header understood by OpenHands Agent Server v1.
@@ -65,13 +66,16 @@ class OpenHandsConnectionError(OpenHandsError):
 
 
 class OpenHandsRequestError(OpenHandsError):
-    """The agent server answered with an unexpected HTTP status."""
+    """The agent server answered with an unexpected HTTP status.
 
-    def __init__(self, status: int, detail: str | None = None) -> None:
-        message = f"OpenHands agent server returned status {status}"
-        if detail:
-            message = f"{message}: {detail}"
-        super().__init__(message)
+    Built from trusted local data only: the numeric status. Remote error-body
+    text (``detail``, ``message``, ``error``, ...) is discarded at the client
+    boundary and never stored, echoed or chained, because the client cannot know
+    every credential or sensitive value a server or LLM provider might echo.
+    """
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"OpenHands agent server returned status {status}")
         self.status = status
 
 
@@ -312,23 +316,10 @@ class OpenHandsClient:
     def _raise_for_status(self, response: ServerResponse) -> None:
         if response.ok:
             return
-        raise OpenHandsRequestError(response.status, self._safe_detail(response.body))
-
-    def _safe_detail(self, body: object) -> str | None:
-        """Extract a bounded, credential-scrubbed detail from an error body.
-
-        The raw body never crosses this boundary: only a short message field is
-        considered, and it is scrubbed of known secrets and token shapes. A
-        structured or verbose payload is discarded rather than echoed.
-        """
-        mapping = _as_mapping(body)
-        if mapping is None:
-            return None
-        for key in ("detail", "message", "error"):
-            value = mapping.get(key)
-            if isinstance(value, str) and value.strip():
-                return bound(redact(value, self.secret_values()))
-        return None
+        # Only the trusted numeric status crosses the boundary. Any remote
+        # error-body text is discarded here: it is untrusted and may embed a
+        # credential the client cannot recognize.
+        raise OpenHandsRequestError(response.status)
 
 
 __all__ = [
