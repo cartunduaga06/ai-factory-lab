@@ -59,22 +59,28 @@ class TaskStateChangedError(FactoryError):
 class DuplicateRunError(FactoryError):
     """An agent run would duplicate existing run state.
 
-    Raised by persistence when a run with the same ``run_id`` already exists, or
-    when the task already has an active (non-terminal) run. The unique index over
-    active runs is the defense-in-depth guard behind dispatch idempotency: even
-    if two dispatchers slip past the application-level check, storage refuses the
-    second active run.
+    Raised by persistence when a run with the same ``run_id`` already exists,
+    when the task already has an active (non-terminal) run, or when another run
+    already owns the workspace the run points at. The unique indexes over active
+    runs and over run workspaces are the defense-in-depth guards behind dispatch
+    idempotency and the one-workspace-per-run isolation invariant: even if two
+    dispatchers slip past the application-level check, storage refuses the
+    duplicate.
     """
 
-    def __init__(self, run_id: str, task_id: str | None = None) -> None:
-        message = (
-            f"task {task_id} already has an active run"
-            if task_id is not None
-            else f"run {run_id} already exists"
-        )
+    def __init__(
+        self, run_id: str, task_id: str | None = None, workspace_id: str | None = None
+    ) -> None:
+        if task_id is not None:
+            message = f"task {task_id} already has an active run"
+        elif workspace_id is not None:
+            message = f"run {run_id} would reuse a workspace owned by another run"
+        else:
+            message = f"run {run_id} already exists"
         super().__init__(message)
         self.run_id = run_id
         self.task_id = task_id
+        self.workspace_id = workspace_id
 
 
 class DispatchError(FactoryError):
@@ -123,7 +129,51 @@ class AgentDispatchError(DispatchError):
         self.run_id = run_id
 
 
+class AgentCollectError(FactoryError):
+    """The agent adapter failed while collecting an active run.
+
+    Run tracking is engine-agnostic, so it cannot trust an adapter to sanitize
+    its own errors: a defective or future adapter may raise a raw provider
+    exception whose message embeds a credential. The adapter's exception is
+    therefore discarded at this boundary and never retained as
+    ``__cause__``/``__context__`` — chaining it would let Python render it in the
+    traceback, and a token in the message could then reach factory logs, the CLI
+    or an exception report. The message is built from factory-domain identifiers
+    only (``run_id``, ``task_id``), so this error is safe to log verbatim.
+
+    Nothing is persisted when collection fails: the stored run keeps its previous
+    (non-terminal) status and the task stays ``RUNNING``, so a later refresh can
+    simply retry collection.
+    """
+
+    def __init__(self, run_id: str, task_id: str) -> None:
+        super().__init__(f"adapter failed to collect run {run_id} for task {task_id}")
+        self.run_id = run_id
+        self.task_id = task_id
+
+
+class WorkspaceProvisioningError(DispatchError):
+    """The physical workspace for a run could not be prepared.
+
+    Sanitized like every other dispatch failure: the message is built from
+    factory-domain data only (the workspace id), and the underlying git or
+    process exception is deliberately not retained as ``__cause__`` or
+    ``__context__``. Git writes credentials into stderr for some failures, so
+    chaining the raw error would render it in the traceback; discarding it keeps
+    command lines, remote URLs and tokens out of logs, exceptions and the CLI.
+
+    The task remains ``CLAIMED``: the READY→CLAIMED claim already committed, and
+    the legal recovery is the existing ``BLOCKED``/``CANCELLED`` path, not a
+    silent rollback that would rewrite history.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} could not be prepared")
+        self.workspace_id = workspace_id
+
+
 __all__ = [
+    "AgentCollectError",
     "AgentDispatchError",
     "DispatchConflictError",
     "DispatchError",
@@ -134,4 +184,5 @@ __all__ = [
     "TaskNotReadyError",
     "TaskSourceError",
     "TaskStateChangedError",
+    "WorkspaceProvisioningError",
 ]

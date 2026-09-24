@@ -19,11 +19,13 @@ Design notes:
   ``NOT NULL`` because the domain rejects a workspace without one.
 * ``agent_runs`` records one dispatch attempt. ``adapter`` stores the
   :class:`~factory.domain.enums.AgentKind` value, and ``workspace_id`` links the
-  run to its workspace. The partial unique index
+  run to its workspace. Two partial unique indexes guard the invariants:
   ``uq_agent_runs_active_task`` allows at most one *active* (non-terminal) run
-  per task: that is the storage-level guard behind dispatch idempotency.
-  Terminal statuses are excluded from the index, so retries after a finished run
-  are still possible.
+  per task — the storage-level guard behind dispatch idempotency — and
+  ``uq_agent_runs_workspace`` allows at most one run per non-null workspace, the
+  storage-level guard behind the Phase 4 one-workspace-per-run isolation
+  invariant. Terminal statuses are excluded from the active-run index, so retries
+  after a finished run are still possible.
 """
 
 from __future__ import annotations
@@ -123,6 +125,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_{AGENT_RUNS_TABLE}_active_task
  WHERE status IN ({", ".join(repr(status) for status in ACTIVE_RUN_STATUSES)});
 """
 
+#: One workspace per run. This is the storage-level guard behind the Phase 4
+#: isolation invariant: no two runs may point at the same working tree, even if
+#: an application-level check is bypassed. Runs without a workspace are exempt
+#: (SQLite treats NULLs as distinct), so a run that never had one is unaffected.
+CREATE_AGENT_RUNS_WORKSPACE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS uq_{AGENT_RUNS_TABLE}_workspace
+    ON {AGENT_RUNS_TABLE} (workspace_id)
+ WHERE workspace_id IS NOT NULL;
+"""
+
 #: Statements applied, in order, by :func:`initialize_schema`.
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS,
@@ -134,6 +146,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TRANSITIONS_TASK_INDEX,
     CREATE_AGENT_RUNS_TASK_INDEX,
     CREATE_AGENT_RUNS_ACTIVE_INDEX,
+    CREATE_AGENT_RUNS_WORKSPACE_INDEX,
 )
 
 __all__ = [

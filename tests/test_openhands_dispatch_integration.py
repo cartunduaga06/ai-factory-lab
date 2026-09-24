@@ -19,6 +19,7 @@ from factory.integrations.openhands.client import OpenHandsClient, ServerRespons
 from factory.integrations.openhands.execution import OpenHandsExecution
 from factory.orchestration import DispatchService
 from tests.fake_openhands import FakeTransport
+from tests.fake_workspace import FakeWorkspaceProvisioner
 
 BASE_URL = "http://localhost:60000"
 CONVERSATION_ID = "24e054d8-7e5d-4749-b9c3-ee020248f84b"
@@ -57,10 +58,12 @@ def test_dispatch_then_collect_through_the_real_adapter(tmp_path: Path) -> None:
     assert isinstance(adapter, AgentAdapter)
 
     task = _ready_task(tasks)
-    run = DispatchService(tasks, runs).dispatch(task.task_id, adapter)
+    run = DispatchService(
+        tasks, runs, provisioner=FakeWorkspaceProvisioner(), workspace_root=str(tmp_path / "ws")
+    ).dispatch(task.task_id, adapter)
 
-    # The factory owns the lifecycle: the task is CLAIMED, and the run is durable.
-    assert tasks.get(task.task_id).status is TaskStatus.CLAIMED
+    # The factory owns the lifecycle: the task is RUNNING, and the run is durable.
+    assert tasks.get(task.task_id).status is TaskStatus.RUNNING
     assert run.adapter is AgentKind.OPENHANDS
     assert run.run_id == CONVERSATION_ID
     assert runs.get_run(CONVERSATION_ID) is not None
