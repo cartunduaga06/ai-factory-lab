@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from factory.domain.enums import QualityGateStatus, RunStatus, TaskStatus, ValidationOutcome
-from factory.domain.errors import FactoryError
+from factory.domain.errors import AgentCollectError, FactoryError
 from factory.domain.models import (
     AgentAdapter,
     AgentRun,
@@ -86,6 +86,12 @@ class RunTrackingService:
 
         Raises:
             KeyError: if the run is unknown.
+            AgentCollectError: if the adapter failed to collect the active run.
+                The engine's own exception is discarded at this boundary rather
+                than chained, so no provider message can leak through the error's
+                text, cause or traceback. Nothing is persisted on this path: the
+                run keeps its previous status and the task stays ``RUNNING``, so a
+                later refresh retries collection.
         """
         run = self._runs.get_run(run_id)
         if run is None:
@@ -94,7 +100,23 @@ class RunTrackingService:
             self._reconcile_terminal(run)
             return self._result(run)
 
-        adapter.collect(run)
+        collection_failed = False
+        try:
+            adapter.collect(run)
+        except Exception:  # noqa: BLE001 - deliberately discarded, see below
+            # The engine's exception is intentionally NOT captured. Its message
+            # may embed a credential or a provider URL, and retaining it as
+            # ``__cause__`` or ``__context__`` would expose that value to any
+            # traceback or exception log. Only the fact of failure crosses this
+            # boundary; the ``except`` block exits before the sanitized error is
+            # raised, so the discarded exception leaves no chain behind. Nothing
+            # is persisted here, so the stored run and task are unchanged and the
+            # attempt stays retryable.
+            collection_failed = True
+
+        if collection_failed:
+            raise AgentCollectError(run.run_id, run.task_id)
+
         if run.status is RunStatus.SUCCEEDED:
             run.gates = self._evaluate_gates(run)
 

@@ -7,11 +7,13 @@ The service is exercised with a real SQLite repository, a real
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 import pytest
 
 from factory.domain.enums import QualityGateStatus, RunStatus, TaskStatus, ValidationOutcome
+from factory.domain.errors import AgentCollectError
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
@@ -550,3 +552,90 @@ def test_superseded_terminal_run_does_not_drive_the_task(db_path: str, tmp_path:
     # The stale run neither changed the task nor added history.
     assert tasks.get(task.task_id).status is TaskStatus.RUNNING
     assert _transition_edges(tasks, task.task_id) == before
+
+
+# -- collect-failure security boundary -------------------------------------
+
+
+def _run_snapshot(runs: SqliteRunRepository, run_id: str) -> dict:
+    run = runs.get_run(run_id)
+    assert run is not None
+    return {
+        "status": run.status,
+        "summary": run.summary,
+        "finished_at": run.finished_at,
+        "gates": run.gates,
+    }
+
+
+def test_collect_failure_is_sanitized_and_leaves_no_trace(db_path: str, tmp_path: Path) -> None:
+    # An engine-agnostic boundary must stay safe even when a defective adapter
+    # raises a raw provider exception carrying a credential and a URL.
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    boom = RuntimeError("provider exploded with ghp_supersecret at https://credential@example.com")
+    adapter = FakeAgentAdapter(collect_fail_with=boom)
+
+    with pytest.raises(AgentCollectError) as caught:
+        _service(db_path).refresh(run.run_id, adapter)
+
+    error = caught.value
+    assert error.run_id == run.run_id
+    assert error.task_id == task.task_id
+
+    formatted = "".join(traceback.format_exception(error))
+    for leak in ("ghp_supersecret", "https://credential@example.com", "provider exploded"):
+        assert leak not in str(error)
+        assert leak not in repr(error)
+        assert leak not in formatted
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def test_collect_failure_preserves_state_and_never_runs_gates(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    before = _run_snapshot(_runs(db_path), run.run_id)
+    boom = RuntimeError("provider exploded with ghp_supersecret")
+    runner = FakeQualityGateRunner()
+    adapter = FakeAgentAdapter(collect_fail_with=boom)
+
+    with pytest.raises(AgentCollectError):
+        _service(db_path, gate_specs=specs("tests"), runner=runner).refresh(run.run_id, adapter)
+
+    # Collection was attempted exactly once; no success was invented.
+    assert adapter.collected == 1
+    assert runner.calls == []
+    # Task preserved, run preserved, no transition toward VALIDATING.
+    assert tasks.get(task.task_id).status is TaskStatus.RUNNING
+    assert _run_snapshot(_runs(db_path), run.run_id) == before
+    edges = _transition_edges(tasks, task.task_id)
+    assert (TaskStatus.RUNNING, TaskStatus.VALIDATING) not in edges
+
+
+def test_collect_failure_is_retryable(db_path: str, tmp_path: Path) -> None:
+    # The failure is not terminal: a later refresh with a healthy adapter resumes
+    # the normal lifecycle, gates included.
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    boom = RuntimeError("provider exploded with ghp_supersecret")
+    service = _service(db_path, gate_specs=specs("tests"), runner=FakeQualityGateRunner())
+
+    with pytest.raises(AgentCollectError):
+        service.refresh(run.run_id, FakeAgentAdapter(collect_fail_with=boom))
+    assert tasks.get(task.task_id).status is TaskStatus.RUNNING
+
+    healthy = FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    result = service.refresh(run.run_id, healthy)
+
+    assert healthy.collected == 1
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+    assert result.task_status is TaskStatus.VALIDATING
+    assert result.outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+    stored = _runs(db_path).get_run(run.run_id)
+    assert stored is not None
+    assert stored.status is RunStatus.SUCCEEDED
+    assert [gate.name for gate in stored.gates] == ["tests"]

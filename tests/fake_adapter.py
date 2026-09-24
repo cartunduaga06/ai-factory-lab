@@ -27,6 +27,7 @@ class FakeAgentAdapter:
         fail_with: Exception | None = None,
         collect_status: RunStatus | None = None,
         collect_summary: str | None = None,
+        collect_fail_with: Exception | None = None,
     ) -> None:
         self._kind = kind
         self._status = status
@@ -34,6 +35,7 @@ class FakeAgentAdapter:
         self._fail_with = fail_with
         self._collect_status = collect_status
         self._collect_summary = collect_summary
+        self._collect_fail_with = collect_fail_with
         self.dispatched: list[tuple[str, str]] = []
         #: For each dispatch, whether the workspace path physically existed.
         self.path_existed_at_dispatch: list[bool] = []
@@ -62,6 +64,8 @@ class FakeAgentAdapter:
 
     def collect(self, run: AgentRun) -> AgentRun:
         self.collected += 1
+        if self._collect_fail_with is not None:
+            raise self._collect_fail_with
         if self._collect_status is not None:
             run.status = self._collect_status
         if self._collect_summary is not None:

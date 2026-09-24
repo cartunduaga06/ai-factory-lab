@@ -129,6 +129,29 @@ class AgentDispatchError(DispatchError):
         self.run_id = run_id
 
 
+class AgentCollectError(FactoryError):
+    """The agent adapter failed while collecting an active run.
+
+    Run tracking is engine-agnostic, so it cannot trust an adapter to sanitize
+    its own errors: a defective or future adapter may raise a raw provider
+    exception whose message embeds a credential. The adapter's exception is
+    therefore discarded at this boundary and never retained as
+    ``__cause__``/``__context__`` — chaining it would let Python render it in the
+    traceback, and a token in the message could then reach factory logs, the CLI
+    or an exception report. The message is built from factory-domain identifiers
+    only (``run_id``, ``task_id``), so this error is safe to log verbatim.
+
+    Nothing is persisted when collection fails: the stored run keeps its previous
+    (non-terminal) status and the task stays ``RUNNING``, so a later refresh can
+    simply retry collection.
+    """
+
+    def __init__(self, run_id: str, task_id: str) -> None:
+        super().__init__(f"adapter failed to collect run {run_id} for task {task_id}")
+        self.run_id = run_id
+        self.task_id = task_id
+
+
 class WorkspaceProvisioningError(DispatchError):
     """The physical workspace for a run could not be prepared.
 
@@ -150,6 +173,7 @@ class WorkspaceProvisioningError(DispatchError):
 
 
 __all__ = [
+    "AgentCollectError",
     "AgentDispatchError",
     "DispatchConflictError",
     "DispatchError",

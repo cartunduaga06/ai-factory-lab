@@ -548,6 +548,25 @@ Two guards make reconciliation safe and deterministic:
 `CLAIMED → RUNNING` happens only *after* the run is durable, so a task is never
 `RUNNING` without a run behind it.
 
+### Collection security boundary
+
+`AgentAdapter.collect()` is called under the same boundary as `dispatch`. Run
+tracking is engine-agnostic and cannot assume an adapter sanitizes its own
+errors, so a raw engine failure is discarded at this seam rather than chained:
+
+```
+AgentAdapter.collect()  ──►  raw engine failure discarded
+                    └──►  AgentCollectError(run_id, task_id)
+```
+
+`AgentCollectError` is built from factory-domain identifiers only. The adapter's
+exception is not retained as `__cause__` or `__context__` — chaining it would let
+Python render it in the traceback, and a token or credential-bearing URL in the
+engine's message could then reach factory logs or the CLI. Nothing is persisted
+when collection fails: the stored run keeps its previous non-terminal status and
+the task stays `RUNNING`, so a later refresh simply retries collection. The
+terminal reconciliation path above is unaffected — it does not call `collect`.
+
 ### Validation behaviour, and the Phase 4 stop line
 
 When the agent succeeds the task reaches `VALIDATING` and gates are attached to
