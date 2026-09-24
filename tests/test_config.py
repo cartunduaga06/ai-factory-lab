@@ -72,6 +72,7 @@ def test_redacted_never_leaks_credentials() -> None:
         {
             "GITHUB_TOKEN": "ghp_example_value",
             "OPENHANDS_API_KEY": "oh_example_value",
+            "OPENHANDS_SESSION_API_KEY": "session_example_value",
             "CODEX_API_KEY": "codex_example_value",
         }
     )
@@ -79,8 +80,35 @@ def test_redacted_never_leaks_credentials() -> None:
     serialized = repr(redacted)
     assert "ghp_example_value" not in serialized
     assert "oh_example_value" not in serialized
+    assert "session_example_value" not in serialized
     assert "codex_example_value" not in serialized
     assert redacted["github"]["token"] == "***"  # type: ignore[index]
+
+
+# -- openhands session configuration ---------------------------------------
+
+
+def test_openhands_session_key_is_optional() -> None:
+    config = FactoryConfig.from_env({"OPENHANDS_BASE_URL": "http://localhost:60000"})
+    assert config.openhands.session_api_key is None
+    assert config.openhands.base_url == "http://localhost:60000"
+
+
+def test_openhands_session_key_loads() -> None:
+    config = FactoryConfig.from_env({"OPENHANDS_SESSION_API_KEY": "session_example_value"})
+    assert config.openhands.session_api_key == "session_example_value"
+
+
+def test_openhands_session_placeholder_is_treated_as_unset() -> None:
+    config = FactoryConfig.from_env({"OPENHANDS_SESSION_API_KEY": "<your-session-key>"})
+    assert config.openhands.session_api_key is None
+
+
+def test_redacted_masks_the_openhands_session_key() -> None:
+    config = FactoryConfig.from_env({"OPENHANDS_SESSION_API_KEY": "session_example_value"})
+    redacted = config.redacted()["openhands"]  # type: ignore[index]
+    assert redacted["session_api_key"] == "***"
+    assert "session_example_value" not in repr(config.redacted())
 
 
 def test_unknown_enum_values_fall_back_to_defaults() -> None:

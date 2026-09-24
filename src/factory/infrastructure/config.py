@@ -95,14 +95,29 @@ class GitHubConfig:
 
 @dataclass(slots=True, frozen=True)
 class AgentConfig:
-    """Connection details for a single agent execution engine."""
+    """Connection details for a single agent execution engine.
+
+    ``api_key`` is the engine's own execution credential (an LLM key). It is
+    distinct from ``session_api_key``: a self-hosted agent server such as
+    OpenHands authenticates *requests* with a session key (the
+    ``X-Session-API-Key`` header) that is unrelated to any LLM credential.
+    Either may be absent — a local server can be unauthenticated, and an agent
+    server that holds its own LLM configuration needs no key from the factory.
+    """
 
     api_key: str | None
     base_url: str | None = None
+    session_api_key: str | None = None
+    agent_profile_id: str | None = None
 
     @property
     def enabled(self) -> bool:
-        return self.api_key is not None
+        """Whether the factory can reach this engine at all.
+
+        A configured ``base_url`` is what the Phase 3 OpenHands adapter needs; an
+        ``api_key`` alone does not make the engine dispatchable.
+        """
+        return self.api_key is not None or self.base_url is not None
 
 
 @dataclass(slots=True, frozen=True)
@@ -202,6 +217,8 @@ class FactoryConfig:
             openhands=AgentConfig(
                 api_key=_clean(source.get("OPENHANDS_API_KEY")),
                 base_url=_clean(source.get("OPENHANDS_BASE_URL")),
+                session_api_key=_clean(source.get("OPENHANDS_SESSION_API_KEY")),
+                agent_profile_id=_clean(source.get("OPENHANDS_AGENT_PROFILE_ID")),
             ),
             codex=AgentConfig(api_key=_clean(source.get("CODEX_API_KEY"))),
             database_url=_clean(source.get("DATABASE_URL")),
@@ -224,7 +241,9 @@ class FactoryConfig:
             },
             "openhands": {
                 "base_url": self.openhands.base_url,
+                "agent_profile_id": self.openhands.agent_profile_id,
                 "api_key": "***" if self.openhands.api_key else None,
+                "session_api_key": "***" if self.openhands.session_api_key else None,
             },
             "codex": {"api_key": "***" if self.codex.api_key else None},
             "database_url": _redact_url(self.database_url),

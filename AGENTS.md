@@ -40,7 +40,9 @@ integrations  ──┼──► orchestration ──► domain
 - `factory/orchestration` — lifecycle and dispatch. May depend on `domain`.
   **Must not import a concrete agent engine** — only the `AgentAdapter` protocol.
 - `factory/integrations` — GitHub, OpenHands, Codex adapters. Translates external
-  APIs into domain types.
+  APIs into domain types. `integrations/openhands/` talks to the OpenHands Agent
+  Server over HTTP through an injectable transport; the factory never imports the
+  OpenHands SDK, and no OpenHands code belongs in `domain` or `orchestration`.
 - `factory/infrastructure` — configuration, logging, persistence. May not import
   `orchestration`. Core-domain `ports` live in `domain/ports.py`:
   `IssueSource` and `TaskRepository`. Concrete GitHub behaviour belongs in

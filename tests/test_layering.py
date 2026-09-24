@@ -65,6 +65,27 @@ def test_orchestration_does_not_import_integrations_or_infrastructure() -> None:
     assert violations == []
 
 
+def test_openhands_lives_only_in_integrations() -> None:
+    # The concrete OpenHands integration may not be referenced from the domain or
+    # the orchestration layer: those layers depend on the AgentAdapter protocol,
+    # never a concrete engine package.
+    violations: list[str] = []
+    for layer in ("domain", "orchestration"):
+        violations += _violations(layer, "factory.integrations.openhands")
+    assert violations == []
+
+
+def test_no_layer_imports_the_openhands_sdk() -> None:
+    # The factory talks to the agent server over HTTP, not by importing OpenHands.
+    violations: list[str] = []
+    for layer in ("domain", "orchestration", "integrations", "infrastructure"):
+        for path in _modules(layer):
+            for module in _imports_in(path):
+                if module == "openhands" or module.startswith("openhands."):
+                    violations.append(f"{path.relative_to(SRC)} imports {module}")
+    assert violations == []
+
+
 def test_escalation_free_orchestration_imports_no_concrete_agent_engine() -> None:
     # Orchestration may only see the AgentAdapter protocol, never a concrete
     # engine module (openhands / codex integrations).

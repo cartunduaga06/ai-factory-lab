@@ -88,7 +88,9 @@ Two repositories are involved and must stay separate:
 ┌───────────────────────────┴───────────────────────────────────┐
 │                        integrations                           │
 │  GitHub: GitHubClient (read-only) · GitHubIssueSource         │
-│  PullRequestSink · AgentAdapterBase (no agent engine yet)     │
+│  OpenHands: OpenHandsClient · OpenHandsExecution · status     │
+│  mapping · OpenHandsAdapter (AgentAdapter implementation)     │
+│  PullRequestSink · AgentAdapterBase                           │
 └───────────────────────────▲───────────────────────────────────┘
                             │ depends on
 ┌───────────────────────────┴───────────────────────────────────┐
@@ -121,9 +123,14 @@ src/factory/
 │   └── transitions.py       # TaskLifecycleService (state machine + persistence)
 ├── integrations/
 │   ├── base.py              # PullRequestSink, AgentAdapterBase
-│   └── github/
-│       ├── client.py        # read-only REST client, injectable transport
-│       └── issues.py        # GitHubIssueSource (IssueSource implementation)
+│   ├── github/
+│   │   ├── client.py        # read-only REST client, injectable transport
+│   │   └── issues.py        # GitHubIssueSource (IssueSource implementation)
+│   └── openhands/
+│       ├── client.py        # Agent Server HTTP client, injectable transport
+│       ├── execution.py     # task -> conversation request + instruction
+│       ├── status.py        # execution_status -> RunStatus (single source)
+│       └── adapter.py       # OpenHandsAdapter (AgentAdapter implementation)
 └── infrastructure/
     ├── config.py            # FactoryConfig.from_env + redaction + DatabaseConfig
     ├── logging.py           # configure_logging
@@ -353,13 +360,75 @@ nothing and exits before the error is raised, so the resulting
 no engine text. The failed attempt is still recorded as a terminal `FAILED` run
 so it stays auditable.
 
+## OpenHands adapter (Phase 3)
+
+OpenHands is the factory's first real *execution engine*. It stays on the
+outside of the architecture: the factory owns intake, task, dispatch, run
+tracking and lifecycle; OpenHands only runs the implementation step.
+
+```
+FactoryTask + Workspace            (domain)
+      ↓  DispatchService           (orchestration — AgentAdapter only)
+      ↓  AgentAdapter.dispatch     (protocol)
+      ↓  OpenHandsAdapter          (integrations/openhands)
+      ↓  OpenHandsClient           (HTTP, injectable transport)
+      ↓  POST /api/conversations   (OpenHands Agent Server)
+   conversation id ──────────────► AgentRun.run_id
+```
+
+### Detected interface
+
+The adapter targets the OpenHands **Agent Server v1** HTTP API. On the machine
+used for this phase that is a local server (v1.49.5) exposing `/health`,
+`/ready`, `/server_info` and `/api/*`, with request authentication through the
+`X-Session-API-Key` header. The factory does not bundle or import the OpenHands
+SDK; it speaks HTTP through a small injectable transport, so the integration has
+no new runtime dependency and is fully testable offline.
+
+### Run identity and status mapping
+
+The OpenHands conversation id *is* `AgentRun.run_id` — one-to-one, with no
+provider-specific domain field. Engine execution states are normalized by
+`integrations/openhands/status.py`, which is the single source of truth:
+
+| OpenHands `execution_status` | Factory `RunStatus` |
+|---|---|
+| `idle` | `PENDING` |
+| `running`, `paused`, `waiting_for_confirmation` | `RUNNING` |
+| `finished` | `SUCCEEDED` |
+| `error`, `stuck` | `FAILED` |
+| `deleting` | `CANCELLED` |
+
+An unrecognized state raises `OpenHandsStatusError`. It is never guessed — in
+particular never mapped to `SUCCEEDED`.
+
+### Cancel
+
+`cancel` requests an interrupt on the conversation. It is idempotent: a run that
+is already terminal from the factory's point of view is left alone, and a
+conversation that no longer exists (`404`) is treated as already cancelled. Any
+other API failure is raised, never converted into success.
+
+### Credentials
+
+The adapter prefers a **server-side agent profile** (`OPENHANDS_AGENT_PROFILE_ID`):
+the agent server resolves the LLM and its credential itself, so the factory never
+holds an LLM key. The session key (`OPENHANDS_SESSION_API_KEY`) authenticates
+factory→server requests and is distinct from any LLM credential. `--show-config`
+redacts both. No token, header, raw response body or credential-bearing URL can
+leave the integration: failures are translated to sanitized errors that carry no
+cause or context, matching the Phase 2B boundary. Remote HTTP error-body text
+(`detail`, `message`, `error`, ...) is discarded at the client boundary rather
+than partially redacted — the client cannot know every credential a server or LLM
+provider might echo — so only the trusted numeric status leaves the client.
+
 ## Planned evolution
 
 | Phase | Addition |
 |---|---|
 | 2A | ✅ GitHub Issue intake + SQLite task/transition persistence |
 | 2B | ✅ Run lifecycle persistence (`AgentRun`, `Workspace`) + `DispatchService` |
-| 3 | OpenHands `AgentAdapter`; workspace provisioning |
-| 4 | Gate evaluation inside `VALIDATING` |
+| 3 | ✅ OpenHands `AgentAdapter` (dispatch, collect, cancel) |
+| 4 | Workspace provisioning (branch/worktree creation); gate evaluation inside `VALIDATING` |
 | 5 | PR creation, `WAITING_HUMAN` handoff; Codex adapter |
 | 6 | API / dashboard over the orchestrator |
