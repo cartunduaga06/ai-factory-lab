@@ -173,7 +173,8 @@ multiple agents coexist. Full diagram and rationale:
 
 **Phase 1 — repository baseline. Complete.**
 **Phase 2A — GitHub issue intake + persistence. Complete.**
-**Phase 2B — run lifecycle and dispatch. Implemented on this branch.**
+**Phase 2B — run lifecycle and dispatch. Complete.**
+**Phase 3 — OpenHands adapter. Implemented on this branch.**
 
 Present today:
 
@@ -195,19 +196,29 @@ Present today:
 - **SQLite persistence for workspaces and agent runs**
   (`SqliteRunRepository`), with one-active-run-per-task enforced by a partial
   unique index.
+- **An `OpenHandsAdapter`** (`factory/integrations/openhands/`) that drives a real
+  OpenHands Agent Server conversation through the `AgentAdapter` protocol:
+  `dispatch` creates the conversation for a task's workspace, `collect`
+  normalizes its execution state back to `RunStatus`, and `cancel` interrupts it
+  idempotently. Run identity is the OpenHands conversation id. No OpenHands SDK
+  dependency: the adapter speaks HTTP through an injectable transport.
 
 Not present yet — deliberately deferred:
 
-- **A real agent engine.** No OpenHands or Codex integration, no branch creation
-  in target repositories, no PR creation. The `AgentAdapter` seam is exercised
-  only by a deterministic fake adapter in tests.
+- **Codex and other engines.** OpenHands is the only concrete engine; the
+  `AgentAdapter` seam still admits others.
+- **Branch creation in target repositories, commits, pushes and PR creation.**
+  The factory records the branch a workspace intends to use but creates nothing
+  on GitHub.
+- **Quality-gate evaluation.** `QualityGate` exists in the model but is not yet
+  evaluated.
 - **A scheduler or daemon.** Intake is a single manual run; dispatch is called
   programmatically.
 - **A dashboard, API or FastAPI service.**
 - **PostgreSQL.** Persistence is SQLite only; `DATABASE_URL` rejects other
   schemes.
 
-These are Phase 3 and later work. See the [roadmap](#7-planned-roadmap).
+These are Phase 4 and later work. See the [roadmap](#7-planned-roadmap).
 
 ## 5. Local development setup
 
@@ -266,8 +277,8 @@ policy is stated in full — with the reasoning behind each boundary — in
 | 1 ✅ | Repository baseline: structure, domain model, state machine, config, tooling |
 | 2A ✅ | GitHub Issue intake → `FactoryTask`; SQLite task + transition persistence |
 | 2B ✅ | Run lifecycle persistence (`AgentRun`, `Workspace`); `DispatchService` over the `AgentAdapter` protocol |
-| 3 | `AgentAdapter` implementation for OpenHands; isolated workspaces |
-| 4 | Quality gates (lint/tests/type checks) evaluated as part of the run |
+| 3 ✅ | `OpenHandsAdapter`: real OpenHands Agent Server dispatch, collect and cancel |
+| 4 | Workspace provisioning; quality gates (lint/tests/type checks) evaluated as part of the run |
 | 5 | PR creation and `WAITING_HUMAN` handoff; Codex adapter as a second engine |
 | 6 | API / dashboard on top of the orchestrator |
 
