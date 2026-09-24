@@ -467,6 +467,14 @@ physical checkout is created by the injected
 `WorkspaceProvisioner`, so neither the domain nor orchestration touches the
 filesystem or git.
 
+The invariant is enforced at the persistence boundary too, not only during
+dispatch. A persisted run's workspace association is immutable: `update_run()`
+cannot move a run to another workspace or clear one, and a partial unique index
+(`uq_agent_runs_workspace`) refuses two runs that point at the same non-null
+`workspace_id`. Even if an application-level check were bypassed, storage rejects
+the duplicate. Runs without a workspace are exempt, so the guard never affects a
+run that never had one.
+
 ### The Git worktree provisioner
 
 `integrations/workspace/git.py` implements the port with `git worktree`:
@@ -540,10 +548,12 @@ decide.
 ### The run update operation
 
 `RunRepository.update_run()` updates a run that is already stored. It is **not an
-upsert**: an unknown run is refused with `KeyError`, `run_id` and task identity
-are immutable, and no second row is created — so the one-active-run invariant is
-untouched. It persists `status`, `summary`, `started_at`, `finished_at`, the
-workspace reference and `gates`, durably across a repository reopen.
+upsert**: an unknown run is refused with `KeyError`; `run_id`, task identity and
+the workspace association are immutable, and no second row is created — so the
+one-active-run invariant is untouched. It persists `status`, `summary`,
+`started_at`, `finished_at` and `gates`, durably across a repository reopen. A
+caller that tries to move the run to a different workspace is refused with a
+sanitized `PersistenceError` whose message names only the run id.
 
 ### The local quality gate runner
 

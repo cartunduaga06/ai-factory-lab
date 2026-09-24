@@ -109,6 +109,10 @@ in code:
 - **One working tree per run attempt.** A workspace is keyed by its own id
   (`factory/<task-id>/<workspace-id>`), so a retry never inherits another
   attempt's checkout. An agent cannot edit a tree another run owns.
+- **The association is immutable and unique in storage.** A persisted run's
+  `workspace_id` cannot be changed by `update_run()`, and a partial unique index
+  refuses two runs pointing at the same non-null workspace. The invariant holds
+  at the database boundary, not only in dispatch code.
 - **The source checkout is never disturbed.** The Git worktree provisioner runs
   only `git worktree add`; it never fetches, pushes, resets, rewrites history, or
   checks out the factory branch in the source repository. The source stays on its

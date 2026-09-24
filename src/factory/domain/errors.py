@@ -59,22 +59,28 @@ class TaskStateChangedError(FactoryError):
 class DuplicateRunError(FactoryError):
     """An agent run would duplicate existing run state.
 
-    Raised by persistence when a run with the same ``run_id`` already exists, or
-    when the task already has an active (non-terminal) run. The unique index over
-    active runs is the defense-in-depth guard behind dispatch idempotency: even
-    if two dispatchers slip past the application-level check, storage refuses the
-    second active run.
+    Raised by persistence when a run with the same ``run_id`` already exists,
+    when the task already has an active (non-terminal) run, or when another run
+    already owns the workspace the run points at. The unique indexes over active
+    runs and over run workspaces are the defense-in-depth guards behind dispatch
+    idempotency and the one-workspace-per-run isolation invariant: even if two
+    dispatchers slip past the application-level check, storage refuses the
+    duplicate.
     """
 
-    def __init__(self, run_id: str, task_id: str | None = None) -> None:
-        message = (
-            f"task {task_id} already has an active run"
-            if task_id is not None
-            else f"run {run_id} already exists"
-        )
+    def __init__(
+        self, run_id: str, task_id: str | None = None, workspace_id: str | None = None
+    ) -> None:
+        if task_id is not None:
+            message = f"task {task_id} already has an active run"
+        elif workspace_id is not None:
+            message = f"run {run_id} would reuse a workspace owned by another run"
+        else:
+            message = f"run {run_id} already exists"
         super().__init__(message)
         self.run_id = run_id
         self.task_id = task_id
+        self.workspace_id = workspace_id
 
 
 class DispatchError(FactoryError):

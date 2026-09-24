@@ -371,3 +371,9 @@ def test_two_runs_for_one_task_get_different_workspaces(db_path: str, tmp_path: 
     assert second.workspace.workspace_id != first.workspace.workspace_id  # type: ignore[union-attr]
     assert second.workspace.branch != first.workspace.branch  # type: ignore[union-attr]
     assert second.workspace.path != first.workspace.path  # type: ignore[union-attr]
+
+    # Both associations are durable, and each run keeps its own workspace: the
+    # storage-level one-workspace-per-run guard never collapses them.
+    stored_runs = {r.run_id: r for r in _runs(db_path).list_runs(task.task_id)}
+    assert stored_runs[first.run_id].workspace == first.workspace
+    assert stored_runs[second.run_id].workspace == second.workspace

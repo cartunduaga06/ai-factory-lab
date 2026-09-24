@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus
-from factory.domain.errors import DuplicateRunError, PersistenceError
+from factory.domain.errors import DuplicateRunError, FactoryError, PersistenceError
 from factory.domain.models import AgentRun, QualityGate, Workspace
 from factory.domain.ports import RunRepository
 from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
@@ -65,7 +65,9 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         The workspace insert and the run insert share one transaction, so a
         failure in either leaves both untouched. A task that already has an
         active run is refused by the partial unique index and surfaces as
-        :class:`~factory.domain.errors.DuplicateRunError`.
+        :class:`~factory.domain.errors.DuplicateRunError`; a workspace already
+        claimed by another run is refused by the one-workspace-per-run index and
+        surfaces the same way, so no two runs share a working tree.
         """
         created_at = encode_datetime(datetime.now(UTC))
         try:
@@ -93,11 +95,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     ),
                 )
         except sqlite3.IntegrityError as exc:
-            if _is_duplicate(exc):
-                if run.status in _ACTIVE_STATUSES:
-                    raise DuplicateRunError(run.run_id, task_id=run.task_id) from None
-                raise DuplicateRunError(run.run_id) from None
-            raise
+            raise self._duplicate_error(exc, run) from None
         return run
 
     def get_run(self, run_id: str) -> AgentRun | None:
@@ -109,16 +107,23 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         return _row_to_run(row, workspace) if row is not None else None
 
     def update_run(self, run: AgentRun) -> AgentRun:
-        """Update an already-stored run. Never inserts.
+        """Update an already-stored run. Never inserts, never re-associates.
 
         The row is matched by ``run_id``; a missing row is refused with
         ``KeyError`` rather than upserted, so this operation can never create a
-        second run or bypass the one-active-run invariant. ``task_id`` is
-        immutable: a caller trying to re-point a run at another task is refused.
+        second run or bypass the one-active-run invariant. The run's identity is
+        immutable: ``task_id`` and ``workspace_id`` are fixed once the run is
+        saved, so a caller cannot re-point a run at another task or another
+        workspace. ``workspace_id`` is deliberately absent from the ``UPDATE``
+        below, so the isolation invariant holds even if a caller bypasses the
+        check.
         """
         with self._connect() as conn:
             existing = conn.execute(
-                f"SELECT task_id, created_at FROM {AGENT_RUNS_TABLE} WHERE run_id = ?",
+                f"""
+                SELECT task_id, workspace_id, created_at
+                  FROM {AGENT_RUNS_TABLE} WHERE run_id = ?
+                """,
                 (run.run_id,),
             ).fetchone()
             if existing is None:
@@ -126,14 +131,17 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
             if existing["task_id"] != run.task_id:
                 raise PersistenceError(f"run {run.run_id} belongs to another task")
 
-            if run.workspace is not None:
-                self._ensure_workspace(conn, run.workspace)
+            new_workspace_id = run.workspace.workspace_id if run.workspace is not None else None
+            if new_workspace_id != existing["workspace_id"]:
+                # Sanitized: the message names only the run id. Workspace paths,
+                # branches and storage details must not escape this boundary.
+                raise PersistenceError(f"run {run.run_id} cannot change its workspace")
 
             conn.execute(
                 f"""
                 UPDATE {AGENT_RUNS_TABLE}
                    SET status = ?, summary = ?, started_at = ?, finished_at = ?,
-                       workspace_id = ?, gates = ?
+                       gates = ?
                  WHERE run_id = ?
                 """,
                 (
@@ -141,7 +149,6 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     run.summary,
                     encode_datetime(run.started_at) if run.started_at else None,
                     encode_datetime(run.finished_at) if run.finished_at else None,
-                    run.workspace.workspace_id if run.workspace else None,
                     _encode_gates(run.gates),
                     run.run_id,
                 ),
@@ -208,6 +215,29 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         ).fetchone()
         if existing is None:
             cls._insert_workspace(conn, workspace)
+
+    @staticmethod
+    def _duplicate_error(exc: sqlite3.IntegrityError, run: AgentRun) -> FactoryError:
+        """Map a SQLite integrity failure to a sanitized factory error.
+
+        The raw SQLite message names table columns and can include stored values,
+        so it is never surfaced: only the discriminating outcome crosses the
+        boundary. A workspace-reuse refusal and an active-run clash are different
+        facts and carry different signals rather than collapsing into one.
+
+        Returns the error to raise; the caller does ``raise ... from None`` so no
+        raw SQLite text is retained as ``__cause__``/``__context__``.
+        """
+        if not _is_duplicate(exc):
+            # An unexpected integrity failure (for example a missing task via the
+            # foreign key). Its text may embed stored values, so it is normalized.
+            return PersistenceError("run could not be persisted")
+        if "workspace" in str(exc).lower():
+            workspace_id = run.workspace.workspace_id if run.workspace is not None else None
+            return DuplicateRunError(run.run_id, workspace_id=workspace_id)
+        if run.status in _ACTIVE_STATUSES:
+            return DuplicateRunError(run.run_id, task_id=run.task_id)
+        return DuplicateRunError(run.run_id)
 
     @staticmethod
     def _workspace_for(conn: sqlite3.Connection, row: sqlite3.Row) -> Workspace | None:
