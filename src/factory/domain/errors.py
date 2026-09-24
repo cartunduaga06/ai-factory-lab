@@ -111,9 +111,10 @@ class AgentDispatchError(DispatchError):
     """The agent adapter failed while starting a run.
 
     The failed attempt is still recorded as a durable run, so the error carries
-    its ``run_id``. The adapter's own exception is chained as the cause rather
-    than embedded in the message, so an engine's error text can never leak into
-    factory logs or the CLI.
+    its ``run_id``. The adapter's own exception is neither embedded in the
+    message nor retained as ``__cause__``/``__context__``: it is discarded at the
+    adapter boundary, so an engine's error text — which could contain a
+    credential — can never leak into factory logs, tracebacks or the CLI.
     """
 
     def __init__(self, task_id: str, run_id: str) -> None:

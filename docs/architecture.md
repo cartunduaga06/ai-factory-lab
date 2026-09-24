@@ -343,10 +343,15 @@ remains possible.
 
 `DispatchService` reads only `AgentAdapter.kind` and calls `dispatch`. No engine
 is named in orchestration; Phase 2B ships no concrete adapter, and tests use a
-deterministic fake. An adapter failure is normalized into `AgentDispatchError`,
-with the engine's own exception chained as the cause so its message cannot leak
-into factory logs or CLI output. The failed attempt is still recorded as a
-terminal `FAILED` run so it stays auditable.
+deterministic fake. An adapter failure is normalized into `AgentDispatchError`
+built from sanitized factory data only. The engine's own exception is discarded
+at this boundary rather than chained: retaining it as `__cause__`/`__context__`
+would let Python render it in the traceback, so a token in the engine's message
+could still reach factory logs or CLI output. The `except` block captures
+nothing and exits before the error is raised, so the resulting
+`AgentDispatchError` has no cause or context and its formatted traceback carries
+no engine text. The failed attempt is still recorded as a terminal `FAILED` run
+so it stays auditable.
 
 ## Planned evolution
 

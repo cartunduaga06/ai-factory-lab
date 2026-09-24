@@ -8,6 +8,7 @@ no real engine is involved.
 from __future__ import annotations
 
 import threading
+import traceback
 from pathlib import Path
 
 import pytest
@@ -204,9 +205,22 @@ def test_adapter_failure_is_typed_and_leaves_no_active_run(db_path: str) -> None
     assert runs.find_active_run(task.task_id) is None
     assert tasks.get(task.task_id).status is TaskStatus.CLAIMED
 
-    # The engine's message never appears in the factory error.
-    assert "ghp_secret" not in str(caught.value)
-    assert caught.value.run_id == recorded[0].run_id
+    error = caught.value
+    # The engine's message never appears in the factory error, in any form.
+    assert "ghp_secret" not in str(error)
+    assert "ghp_secret" not in repr(error)
+    assert error.run_id == recorded[0].run_id
+
+    # The raw engine exception is not retained anywhere in the chain: no cause,
+    # no context, and therefore nothing for a formatter to walk into.
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+    # A formatted traceback is the surface most likely to be logged, so it is the
+    # surface the leak was reported on. The secret must not survive formatting.
+    formatted = "".join(traceback.format_exception(error))
+    assert "ghp_secret" not in formatted
+    assert "engine exploded" not in formatted
 
 
 def test_retry_after_failed_attempt_requires_a_ready_task(db_path: str) -> None:

@@ -83,8 +83,9 @@ class DispatchService:
             TaskNotReadyError: if the task is not in ``READY``.
             DispatchConflictError: if another dispatcher won the claim race.
             AgentDispatchError: if the adapter failed to start the run. The
-                failed attempt is persisted as a terminal ``FAILED`` run, and the
-                adapter's own exception is chained as the cause.
+                failed attempt is persisted as a terminal ``FAILED`` run. The
+                adapter's own exception is discarded rather than chained, so no
+                engine message can leak through this error's cause or traceback.
         """
         task = self._require_task(task_id)
         if task.status is not TaskStatus.READY:
@@ -125,11 +126,21 @@ class DispatchService:
         self, task: FactoryTask, workspace: Workspace, adapter: AgentAdapter
     ) -> AgentRun:
         started_at = datetime.now(UTC)
+        produced: AgentRun | None
         try:
             produced = adapter.dispatch(task, workspace)
-        except Exception as exc:  # noqa: BLE001 - normalized into a domain error below
+        except Exception:  # noqa: BLE001 - deliberately discarded, see below
+            # The engine's exception is intentionally NOT captured. Its message
+            # may embed a credential, and retaining it as ``__cause__`` or
+            # ``__context__`` would expose that value to any traceback or
+            # exception log. Only the fact of failure crosses this boundary; the
+            # ``except`` block exits before anything is persisted or raised, so
+            # the discarded exception leaves no chain behind.
+            produced = None
+
+        if produced is None:
             failed = self._record_failure(task, workspace, adapter.kind, started_at)
-            raise AgentDispatchError(task.task_id, run_id=failed.run_id) from exc
+            raise AgentDispatchError(task.task_id, run_id=failed.run_id)
 
         run = AgentRun(
             task_id=task.task_id,
