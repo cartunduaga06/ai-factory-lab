@@ -35,17 +35,24 @@ integrations  ──┼──► orchestration ──► domain
                 ┘
 ```
 
-- `factory/domain` — pure typed model. **No I/O**: no network, DB, filesystem or
-  `os.environ` access.
+- `factory/domain` — pure typed model. **No I/O**: no network, DB, filesystem,
+  `os.environ`, `subprocess` or git access.
 - `factory/orchestration` — lifecycle and dispatch. May depend on `domain`.
-  **Must not import a concrete agent engine** — only the `AgentAdapter` protocol.
-- `factory/integrations` — GitHub, OpenHands, Codex adapters. Translates external
-  APIs into domain types. `integrations/openhands/` talks to the OpenHands Agent
-  Server over HTTP through an injectable transport; the factory never imports the
-  OpenHands SDK, and no OpenHands code belongs in `domain` or `orchestration`.
+  **Must not import a concrete agent engine** — only the `AgentAdapter` protocol
+  — and must not import `subprocess`, `sqlite3` or git. `DispatchService`
+  depends on the `WorkspaceProvisioner` port; `RunTrackingService` on
+  `QualityGateRunner`.
+- `factory/integrations` — GitHub, OpenHands, workspace and gate adapters.
+  Translates external APIs into domain types. `integrations/openhands/` talks to
+  the OpenHands Agent Server over HTTP through an injectable transport; the
+  factory never imports the OpenHands SDK, and no OpenHands code belongs in
+  `domain` or `orchestration`. `integrations/workspace/git.py` creates one Git
+  worktree per run; `integrations/gates/local.py` runs argv-only, shell-free,
+  bounded gate processes.
 - `factory/infrastructure` — configuration, logging, persistence. May not import
   `orchestration`. Core-domain `ports` live in `domain/ports.py`:
-  `IssueSource` and `TaskRepository`. Concrete GitHub behaviour belongs in
+  `IssueSource`, `TaskRepository`, `RunRepository`, `WorkspaceProvisioner` and
+  `QualityGateRunner`. Concrete GitHub behaviour belongs in
   `integrations/github`; concrete SQLite behaviour belongs in
   `infrastructure/persistence`.
 
@@ -77,7 +84,10 @@ All four checks must pass before a change is proposed. Python 3.11+.
 - Tests target real logic — no mocks of the code under test. Tests must not read
   the real environment or network: pass explicit inputs. Persistence tests use a
   temporary SQLite file; the GitHub adapter is tested with an injected in-memory
-  transport. `tests/test_layering.py` enforces the dependency direction.
+  transport. Workspace and gate tests each build a disposable local Git repo or a
+  temporary directory under `tmp_path` — never a real product repository.
+  `tests/test_layering.py` enforces the dependency direction and that concrete
+  workspace/gate implementations stay outside `domain`/`orchestration`.
 
 ## Key domain concepts
 
@@ -87,14 +97,20 @@ All four checks must pass before a change is proposed. Python 3.11+.
 | `TaskSource` | Frozen `(provider, repository_slug, issue_number)` identity of a task. |
 | `TaskTransition` | Auditable record of one lifecycle status change. |
 | `AgentRun` | One attempt by one engine to complete a task. |
-| `RunRepository` | Persistence port for `Workspace` and `AgentRun`. |
+| `RunRepository` | Persistence port for `Workspace` and `AgentRun`; `update_run` refreshes a stored run. |
 | `Repository` | A repo the factory knows about, tagged `CONTROL_PLANE` or `TARGET`. |
-| `Workspace` | An isolated per-run checkout on its own branch. |
+| `Workspace` | An isolated per-run checkout on its own branch, keyed by its own id. |
+| `WorkspaceProvisioner` | Port that materialises a `Workspace` into a physical checkout. |
 | `PullRequest` | Agent-produced PR awaiting mandatory human approval. |
-| `QualityGate` | A named, verifiable check (lint, tests, typecheck). |
+| `QualityGate` | A named, verifiable check (lint, tests, typecheck) with `required`/`is_green`. |
+| `QualityGateSpec` | Declarative argv definition of a gate supplied by the application layer. |
+| `QualityGateRunner` | Port that executes a `QualityGateSpec` in a `Workspace`. |
+| `ValidationOutcome` | Deterministic result of validating a run (`PENDING`/`READY_FOR_NEXT_PHASE`/`GATES_FAILED`). |
 | `AgentAdapter` | Engine-agnostic execution interface (OpenHands, Codex, ...). |
 | `IssueIntakeService` | Idempotent intake: eligible issues → persisted tasks. |
 | `TaskLifecycleService` | Validates a transition, then persists status + history atomically. |
+| `DispatchService` | Claims a task, provisions a per-run workspace, starts the run. |
+| `RunTrackingService` | Refreshes an active run, drives lifecycle, evaluates gates on success. |
 
 ## Task lifecycle
 

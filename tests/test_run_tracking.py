@@ -1,0 +1,323 @@
+"""Tests for the run-tracking / validation orchestration service.
+
+The service is exercised with a real SQLite repository, a real
+:class:`tests.fake_adapter.FakeAgentAdapter` and a real
+:class:`tests.fake_workspace.FakeQualityGateRunner`. No engine, no subprocess.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from factory.domain.enums import QualityGateStatus, RunStatus, TaskStatus, ValidationOutcome
+from factory.domain.models import AgentRun, FactoryTask, QualityGateSpec, TaskSource
+from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
+from factory.orchestration import RunTrackingService
+from tests.fake_adapter import FakeAgentAdapter
+from tests.fake_workspace import FakeQualityGateRunner, specs, statuses
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> str:
+    return str(tmp_path / "factory.db")
+
+
+def _tasks(db_path: str) -> SqliteTaskRepository:
+    repository = SqliteTaskRepository(db_path)
+    repository.initialize()
+    return repository
+
+
+def _runs(db_path: str) -> SqliteRunRepository:
+    repository = SqliteRunRepository(db_path)
+    repository.initialize()
+    return repository
+
+
+def _running_task(tasks: SqliteTaskRepository) -> FactoryTask:
+    task = tasks.save(
+        FactoryTask(
+            title="Task",
+            target_repository="cartunduaga06/finanza-ia",
+            source=TaskSource("github", "cartunduaga06/ai-factory-lab", 1),
+        )
+    )
+    tasks.apply_transition(task.task_id, TaskStatus.DISCOVERED, TaskStatus.READY)
+    tasks.apply_transition(task.task_id, TaskStatus.READY, TaskStatus.CLAIMED)
+    tasks.apply_transition(task.task_id, TaskStatus.CLAIMED, TaskStatus.RUNNING)
+    task.status = TaskStatus.RUNNING
+    return task
+
+
+def _run_with_workspace(runs: SqliteRunRepository, task: FactoryTask, tmp_path: Path) -> AgentRun:
+    from factory.domain.models import Workspace
+
+    workspace = Workspace(
+        repository_slug=task.target_repository,
+        branch=f"factory/{task.task_id}/ws-1",
+        path=str(tmp_path / "ws-1"),
+    )
+    Path(workspace.path).mkdir(parents=True, exist_ok=True)
+    run = AgentRun(
+        task_id=task.task_id,
+        adapter=FakeAgentAdapter().kind,
+        run_id="run-1",
+        status=RunStatus.RUNNING,
+        workspace=workspace,
+    )
+    runs.save_run(run)
+    return run
+
+
+def _service(
+    db_path: str,
+    *,
+    gate_specs: tuple[QualityGateSpec, ...] = (),
+    runner: FakeQualityGateRunner | None = None,
+) -> RunTrackingService:
+    return RunTrackingService(
+        _tasks(db_path),
+        _runs(db_path),
+        gate_specs=gate_specs,
+        gate_runner=runner,
+    )
+
+
+# -- non-terminal ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [RunStatus.PENDING, RunStatus.RUNNING])
+def test_pending_or_running_keeps_task_running(
+    db_path: str, tmp_path: Path, status: RunStatus
+) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    adapter = FakeAgentAdapter(collect_status=status)
+
+    result = _service(db_path).refresh(run.run_id, adapter)
+
+    assert result.task_status is TaskStatus.RUNNING
+    assert result.run.status is status
+    assert result.outcome is ValidationOutcome.PENDING
+    assert tasks.get(task.task_id).status is TaskStatus.RUNNING
+
+
+# -- success / validation --------------------------------------------------
+
+
+def test_succeeded_transitions_task_to_validating(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    adapter = FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+
+    result = _service(db_path).refresh(run.run_id, adapter)
+
+    assert result.run.status is RunStatus.SUCCEEDED
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+    assert result.task_status is TaskStatus.VALIDATING
+
+
+def test_collect_result_is_persisted(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    adapter = FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED, collect_summary="did the work")
+
+    _service(db_path).refresh(run.run_id, adapter)
+
+    reloaded = _runs(db_path).get_run(run.run_id)
+    assert reloaded is not None
+    assert reloaded.status is RunStatus.SUCCEEDED
+    assert reloaded.summary == "did the work"
+    assert reloaded.finished_at is not None
+
+
+def test_succeeded_without_gates_reports_ready(db_path: str, tmp_path: Path) -> None:
+    # Zero configured gates: documented behaviour is vacuously ready, because the
+    # factory does not invent gates a repository never defined.
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+
+    result = _service(db_path).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+    assert result.run.gates == ()
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_green_required_gate_reports_ready_for_next_phase(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner(statuses(tests=QualityGateStatus.PASSED))
+
+    result = _service(db_path, gate_specs=specs("tests"), runner=runner).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+    assert [g.status for g in result.run.gates] == [QualityGateStatus.PASSED]
+    # It stops at VALIDATING: PR_OPEN belongs to a later phase.
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+    assert runner.calls == [("tests", run.workspace.path)]  # type: ignore[union-attr]
+
+
+def test_failed_required_gate_keeps_task_validating(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner(statuses(tests=QualityGateStatus.FAILED))
+
+    result = _service(db_path, gate_specs=specs("tests"), runner=runner).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_gates_persist_durably_after_refresh(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner(
+        statuses(tests=QualityGateStatus.PASSED, lint=QualityGateStatus.PASSED)
+    )
+
+    _service(db_path, gate_specs=specs("tests", "lint"), runner=runner).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    reopened = _runs(db_path)
+    reloaded = reopened.get_run(run.run_id)
+    assert reloaded is not None
+    assert [g.name for g in reloaded.gates] == ["tests", "lint"]
+    assert all(g.status is QualityGateStatus.PASSED for g in reloaded.gates)
+    assert reloaded.status is RunStatus.SUCCEEDED
+    # And the task status survived the reopen too.
+    assert _tasks(db_path).get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_optional_failed_gate_does_not_block(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner(
+        statuses(tests=QualityGateStatus.PASSED, coverage=QualityGateStatus.FAILED)
+    )
+    gate_specs = (*specs("tests"), QualityGateSpec(name="coverage", argv=("true",), required=False))
+
+    result = _service(db_path, gate_specs=gate_specs, runner=runner).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+
+
+def test_required_skipped_gate_is_not_green(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner(statuses(tests=QualityGateStatus.SKIPPED))
+
+    result = _service(db_path, gate_specs=specs("tests"), runner=runner).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+
+
+def test_multiple_required_gates_require_all_to_pass(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner(
+        statuses(tests=QualityGateStatus.PASSED, lint=QualityGateStatus.FAILED)
+    )
+
+    result = _service(db_path, gate_specs=specs("tests", "lint"), runner=runner).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+
+
+def test_refresh_is_idempotent_for_a_terminal_run(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    service = _service(db_path, gate_specs=specs("tests"), runner=FakeQualityGateRunner())
+    adapter = FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+
+    first = service.refresh(run.run_id, adapter)
+    second = service.refresh(run.run_id, adapter)
+
+    # The second pass must not re-collect a terminal run.
+    assert adapter.collected == 1
+    assert second.run.gates == first.run.gates
+
+
+# -- failure / cancellation ------------------------------------------------
+
+
+def test_failed_transitions_task_through_legal_failure_path(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+
+    result = _service(db_path).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.FAILED)
+    )
+
+    assert result.task_status is TaskStatus.FAILED
+    assert tasks.get(task.task_id).status is TaskStatus.FAILED
+    assert result.outcome is ValidationOutcome.PENDING
+
+
+def test_cancelled_transitions_task_through_legal_cancellation_path(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+
+    result = _service(db_path).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.CANCELLED)
+    )
+
+    assert result.task_status is TaskStatus.CANCELLED
+    assert tasks.get(task.task_id).status is TaskStatus.CANCELLED
+
+
+def test_unknown_run_raises_key_error(db_path: str, tmp_path: Path) -> None:
+    with pytest.raises(KeyError):
+        _service(db_path).refresh("missing", FakeAgentAdapter())
+
+
+# -- no workspace ----------------------------------------------------------
+
+
+def test_succeeded_run_without_workspace_fails_its_gates(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = AgentRun(
+        task_id=task.task_id,
+        adapter=FakeAgentAdapter().kind,
+        run_id="run-nows",
+        status=RunStatus.RUNNING,
+    )
+    _runs(db_path).save_run(run)
+
+    result = _service(db_path, gate_specs=specs("tests"), runner=FakeQualityGateRunner()).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+    assert result.run.gates[0].detail == "no_workspace"

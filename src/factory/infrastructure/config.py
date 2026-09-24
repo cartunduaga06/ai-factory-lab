@@ -10,10 +10,13 @@ See ``.env.example`` for the full, placeholder-only reference.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+
+from factory.domain.models import QualityGateSpec
 
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 DEFAULT_WORKSPACE_ROOT = "./.workspaces"
@@ -28,6 +31,14 @@ class DatabaseScheme(StrEnum):
 
 class UnsupportedDatabaseError(ValueError):
     """Raised when ``DATABASE_URL`` names a scheme the factory cannot use yet."""
+
+
+class InvalidGateSpecError(ValueError):
+    """A configured quality gate specification could not be parsed.
+
+    The message names only the environment variable and the offending gate, never
+    a value it could not parse — configuration may be logged.
+    """
 
 
 class Environment(StrEnum):
@@ -193,6 +204,14 @@ class FactoryConfig:
     database_url: str | None
     workspace_root: str
     logging: LoggingConfig
+    # Local checkout the workspace provisioner branches from. Injected, never
+    # hard-coded: the factory has no business assuming a machine-specific path.
+    source_checkout: str | None = None
+    # Optional commit-ish a new factory branch starts from (default: source HEAD).
+    workspace_base_ref: str | None = None
+    # Declarative gate definitions supplied by the application layer. The factory
+    # never invents a gate a repository did not define.
+    quality_gates: tuple[QualityGateSpec, ...] = ()
 
     @property
     def database(self) -> DatabaseConfig:
@@ -224,6 +243,9 @@ class FactoryConfig:
             database_url=_clean(source.get("DATABASE_URL")),
             workspace_root=_clean(source.get("FACTORY_WORKSPACE_ROOT")) or DEFAULT_WORKSPACE_ROOT,
             logging=LoggingConfig.from_env(source),
+            source_checkout=_clean(source.get("FACTORY_SOURCE_CHECKOUT")),
+            workspace_base_ref=_clean(source.get("FACTORY_WORKSPACE_BASE_REF")),
+            quality_gates=parse_gate_specs(source.get("FACTORY_QUALITY_GATES")),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -248,8 +270,52 @@ class FactoryConfig:
             "codex": {"api_key": "***" if self.codex.api_key else None},
             "database_url": _redact_url(self.database_url),
             "workspace_root": self.workspace_root,
+            "source_checkout": self.source_checkout,
+            "workspace_base_ref": self.workspace_base_ref,
+            "quality_gates": [
+                {"name": spec.name, "required": spec.required} for spec in self.quality_gates
+            ],
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
+
+
+def parse_gate_specs(raw: str | None) -> tuple[QualityGateSpec, ...]:
+    """Parse the JSON gate definition supplied through ``FACTORY_QUALITY_GATES``.
+
+    The wire format is a JSON array of objects::
+
+        [{"name": "tests", "argv": ["pytest"], "required": true}]
+
+    ``argv`` is a list, never a shell string, so nothing is ever interpolated
+    into a shell. Unset or empty configuration yields no gates, which is
+    documented behaviour: the factory does not invent gates a repository did not
+    define. A malformed definition raises :class:`InvalidGateSpecError` rather
+    than being silently ignored, so a typo cannot disable validation.
+    """
+    cleaned = _clean(raw)
+    if cleaned is None:
+        return ()
+    try:
+        decoded = json.loads(cleaned)
+    except json.JSONDecodeError:
+        raise InvalidGateSpecError("FACTORY_QUALITY_GATES must be valid JSON") from None
+    if not isinstance(decoded, list):
+        raise InvalidGateSpecError("FACTORY_QUALITY_GATES must be a JSON array")
+    specs: list[QualityGateSpec] = []
+    for index, item in enumerate(decoded):
+        if not isinstance(item, dict):
+            raise InvalidGateSpecError(f"quality gate #{index} must be a JSON object")
+        name = item.get("name")
+        argv = item.get("argv")
+        required = item.get("required", True)
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidGateSpecError(f"quality gate #{index} needs a non-empty name")
+        if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+            raise InvalidGateSpecError(f"quality gate {name!r} needs a non-empty argv list")
+        if not isinstance(required, bool):
+            raise InvalidGateSpecError(f"quality gate {name!r} 'required' must be a boolean")
+        specs.append(QualityGateSpec(name=name, argv=tuple(argv), required=required))
+    return tuple(specs)
 
 
 __all__ = [
@@ -262,7 +328,9 @@ __all__ = [
     "Environment",
     "FactoryConfig",
     "GitHubConfig",
+    "InvalidGateSpecError",
     "LogFormat",
     "LoggingConfig",
     "UnsupportedDatabaseError",
+    "parse_gate_specs",
 ]

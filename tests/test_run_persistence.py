@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus
-from factory.domain.errors import DuplicateRunError
+from factory.domain.errors import DuplicateRunError, PersistenceError
 from factory.domain.models import AgentRun, FactoryTask, QualityGate, TaskSource, Workspace
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
 
@@ -261,3 +261,121 @@ def test_phase_2a_database_gains_run_schema_without_loss(db_path: str) -> None:
     repository.initialize()
 
     assert tasks.get(task.task_id) == task
+
+
+# -- durable updates (Phase 4) --------------------------------------------
+
+
+def test_update_run_round_trips_status_summary_timestamps_and_gates(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    repository.save_run(run)
+
+    finished = datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC)
+    run.status = RunStatus.SUCCEEDED
+    run.summary = "implemented the change"
+    run.started_at = WHEN
+    run.finished_at = finished
+    run.gates = (
+        QualityGate("tests", QualityGateStatus.PASSED, detail="exit_code=0"),
+        QualityGate("lint", QualityGateStatus.FAILED, detail="exit_code=1", required=False),
+    )
+    repository.update_run(run)
+
+    reopened = _runs(db_path)
+    loaded = reopened.get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.status is RunStatus.SUCCEEDED
+    assert loaded.summary == "implemented the change"
+    assert loaded.started_at == WHEN
+    assert loaded.finished_at == finished
+    assert loaded.workspace == run.workspace
+    assert loaded.gates == run.gates
+
+
+def test_update_run_does_not_create_a_duplicate(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    repository.save_run(run)
+
+    repository.update_run(run)
+    repository.update_run(run)
+
+    assert len(repository.list_runs(task.task_id)) == 1
+
+
+def test_update_run_preserves_task_identity(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    repository.save_run(run)
+
+    run.status = RunStatus.SUCCEEDED
+    repository.update_run(run)
+
+    loaded = repository.get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.task_id == task.task_id
+    assert loaded.run_id == run.run_id
+    assert loaded.adapter is run.adapter
+
+
+def test_update_unknown_run_fails_safely(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+
+    with pytest.raises(KeyError):
+        repository.update_run(run)
+    # Refusing an unknown update must not have inserted it.
+    assert repository.list_runs(task.task_id) == []
+
+
+def test_update_run_refuses_to_re_point_at_another_task(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    first = tasks.save(_task(1))
+    second = tasks.save(_task(2))
+    repository = _runs(db_path)
+    run = _run(first.task_id)
+    repository.save_run(run)
+
+    run.task_id = second.task_id
+    with pytest.raises(PersistenceError):
+        repository.update_run(run)
+
+
+def test_update_run_releases_the_active_run_slot_when_terminal(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    repository.save_run(run)
+    assert repository.find_active_run(task.task_id) is not None
+
+    run.status = RunStatus.SUCCEEDED
+    run.finished_at = WHEN
+    repository.update_run(run)
+
+    # Terminalising a run frees the one-active-run slot for a retry.
+    assert repository.find_active_run(task.task_id) is None
+    repository.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER))
+    assert len(repository.list_runs(task.task_id)) == 2
+
+
+def test_update_run_workspace_is_not_duplicated(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    repository.save_run(run)
+
+    run.summary = "updated"
+    repository.update_run(run)
+
+    assert repository.get_workspace(run.workspace.workspace_id) == run.workspace  # type: ignore[union-attr]

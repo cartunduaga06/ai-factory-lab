@@ -123,6 +123,26 @@ class AgentDispatchError(DispatchError):
         self.run_id = run_id
 
 
+class WorkspaceProvisioningError(DispatchError):
+    """The physical workspace for a run could not be prepared.
+
+    Sanitized like every other dispatch failure: the message is built from
+    factory-domain data only (the workspace id), and the underlying git or
+    process exception is deliberately not retained as ``__cause__`` or
+    ``__context__``. Git writes credentials into stderr for some failures, so
+    chaining the raw error would render it in the traceback; discarding it keeps
+    command lines, remote URLs and tokens out of logs, exceptions and the CLI.
+
+    The task remains ``CLAIMED``: the READY→CLAIMED claim already committed, and
+    the legal recovery is the existing ``BLOCKED``/``CANCELLED`` path, not a
+    silent rollback that would rewrite history.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} could not be prepared")
+        self.workspace_id = workspace_id
+
+
 __all__ = [
     "AgentDispatchError",
     "DispatchConflictError",
@@ -134,4 +154,5 @@ __all__ = [
     "TaskNotReadyError",
     "TaskSourceError",
     "TaskStateChangedError",
+    "WorkspaceProvisioningError",
 ]

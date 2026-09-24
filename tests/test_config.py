@@ -203,3 +203,62 @@ def test_redacted_database_url_masks_embedded_userinfo() -> None:
     assert "supersecret" not in str(redacted)
     assert "user" not in str(redacted)
     assert "db.internal:5432/factory" in str(redacted)
+
+
+# -- source checkout and quality gates (Phase 4) ---------------------------
+
+
+def test_source_checkout_is_unset_by_default_and_injected_when_configured() -> None:
+    assert FactoryConfig.from_env({}).source_checkout is None
+
+    config = FactoryConfig.from_env({"FACTORY_SOURCE_CHECKOUT": "/srv/checkout/target"})
+    assert config.source_checkout == "/srv/checkout/target"
+    assert config.redacted()["source_checkout"] == "/srv/checkout/target"
+
+
+def test_quality_gates_default_to_none_configured() -> None:
+    # Documented behaviour: no gates means nothing the factory invented.
+    assert FactoryConfig.from_env({}).quality_gates == ()
+
+
+def test_quality_gates_are_parsed_from_argv_json() -> None:
+    config = FactoryConfig.from_env(
+        {
+            "FACTORY_QUALITY_GATES": (
+                '[{"name": "tests", "argv": ["pytest"]},'
+                ' {"name": "lint", "argv": ["ruff", "check", "."], "required": false}]'
+            )
+        }
+    )
+    assert [spec.name for spec in config.quality_gates] == ["tests", "lint"]
+    assert config.quality_gates[0].argv == ("pytest",)
+    assert config.quality_gates[0].required is True
+    assert config.quality_gates[1].required is False
+
+
+def test_quality_gate_redacted_view_omits_argv() -> None:
+    config = FactoryConfig.from_env(
+        {"FACTORY_QUALITY_GATES": '[{"name": "tests", "argv": ["pytest", "-x"]}]'}
+    )
+    rendered = config.redacted()["quality_gates"]
+    assert rendered == [{"name": "tests", "required": True}]
+    assert "-x" not in repr(rendered)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not json",
+        '{"name": "tests", "argv": ["pytest"]}',
+        '[{"name": "", "argv": ["pytest"]}]',
+        '[{"name": "tests", "argv": []}]',
+        '[{"name": "tests", "argv": "pytest"}]',
+        '[{"name": "tests", "argv": ["pytest"], "required": "yes"}]',
+        "[42]",
+    ],
+)
+def test_malformed_quality_gate_config_is_rejected(raw: str) -> None:
+    from factory.infrastructure.config import InvalidGateSpecError
+
+    with pytest.raises(InvalidGateSpecError):
+        FactoryConfig.from_env({"FACTORY_QUALITY_GATES": raw})

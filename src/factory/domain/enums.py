@@ -50,6 +50,23 @@ class QualityGateStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
+class ValidationOutcome(StrEnum):
+    """Deterministic result of validating a succeeded agent run.
+
+    The factory stops at the validation decision in Phase 4: it never advances
+    the task to ``PR_OPEN``, because no pull request exists yet. ``GATES_FAILED``
+    is the signal later orchestration uses to decide whether corrective work is
+    required — Phase 4 does not dispatch a correction itself.
+    """
+
+    # The agent run has not reached a terminal success yet.
+    PENDING = "PENDING"
+    # Every configured required gate passed; the run is ready for the next phase.
+    READY_FOR_NEXT_PHASE = "READY_FOR_NEXT_PHASE"
+    # At least one required gate did not pass. The task stays VALIDATING.
+    GATES_FAILED = "GATES_FAILED"
+
+
 class AgentKind(StrEnum):
     """Execution engines the factory can dispatch to.
 

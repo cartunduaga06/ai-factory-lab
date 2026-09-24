@@ -121,20 +121,71 @@ with its workspace. The service reads only `AgentAdapter.kind`, so no engine is
 named anywhere in orchestration. `SqliteRunRepository` stores workspaces and runs
 so they survive a restart.
 
-The factory still ships **no real engine**. Phase 2B proves the seam with a
-deterministic fake adapter in tests; OpenHands arrives in Phase 3.
+The factory still ships **no real engine** in Phase 2B. Phase 2B proves the seam
+with a deterministic fake adapter in tests; OpenHands arrives in Phase 3.
 
 Dispatch is safe to repeat. The idempotency rule is: **a task that already has an
 active run — one whose `RunStatus` is not terminal — has already been dispatched.**
-Such a task is left in `CLAIMED`, so the `READY` requirement refuses the retry and
-the original run is kept. The rule is enforced twice: by the `READY` check in
-`DispatchService`, and by a partial unique index (`uq_agent_runs_active_task`) that
-allows at most one non-terminal run per task. Terminal runs fall outside that
-index, so a genuine retry after a finished run is still possible.
+Such a task is left `RUNNING` (or `CLAIMED` if provisioning is still in progress),
+so the `READY` requirement refuses the retry and the original run is kept. The
+rule is enforced twice: by the `READY` check in `DispatchService`, and by a
+partial unique index (`uq_agent_runs_active_task`) that allows at most one
+non-terminal run per task. Terminal runs fall outside that index, so a genuine
+retry after a finished run is still possible.
 
 Two dispatchers racing for the same `READY` task resolve deterministically:
-exactly one wins, the loser receives a `DispatchConflictError`, and exactly one
+exactly one wins, the loser is refused in a controlled way, and exactly one
 transition, one workspace and one run exist afterwards.
+
+## 1c. Isolated workspaces and validation (Phase 4)
+
+Phase 4 gives each dispatch attempt its own physical Git workspace and adds the
+validation lifecycle:
+
+```
+FactoryTask (READY)
+      ↓
+DispatchService  ──► WorkspaceProvisioner ──► git worktree add
+      ↓                                          ↓
+CLAIMED → RUNNING          Workspace (branch factory/<task>/<workspace>)
+      ↓
+AgentAdapter.dispatch ──► AgentRun persisted
+      ↓  (later)
+RunTrackingService ──► AgentAdapter.collect
+      ↓
+SUCCEEDED → Task VALIDATING ──► QualityGateRunner in the workspace
+                    ↓
+          gates persisted on the AgentRun; task STAYS VALIDATING
+```
+
+One **unique branch and worktree per run attempt**: the branch and path derive
+from the workspace's own generated id (`factory/<task-id>/<workspace-id>`), which
+exists before the engine is involved. A retry of the same task therefore gets a
+fresh workspace, never another run's tree. `GitWorktreeWorkspaceProvisioner`
+creates the worktree, leaves the source checkout on its existing branch, and never
+fetches, pushes or rewrites history.
+
+`RunTrackingService` refreshes an active run through `AgentAdapter.collect()`
+only, so it names no engine. `PENDING`/`RUNNING` leave the task `RUNNING`;
+`SUCCEEDED` moves it `RUNNING → VALIDATING`; `FAILED` and `CANCELLED` use the
+existing legal failure and cancellation edges.
+
+In `VALIDATING`, configured gates run in the run's workspace through
+`LocalQualityGateRunner` (argv only, `shell=False`, bounded timeout, no shell
+interpolation, minimal environment). A required gate is green **only** when it
+`PASSED`; `PENDING`, `FAILED` and `SKIPPED` do not count. When every required gate
+passes the run reports `READY_FOR_NEXT_PHASE` — and the task **stays
+`VALIDATING`**, because no pull request exists yet. Opening one is Phase 5 work.
+
+Which gates exist is application configuration, never code:
+
+```bash
+FACTORY_SOURCE_CHECKOUT=~/projects/finanza-ia
+FACTORY_QUALITY_GATES=[{"name":"tests","argv":["pytest"],"required":true}]
+```
+
+No secrets are required for this phase's tests or smoke run: they use disposable
+local repositories.
 
 ## 2. Why it is separate from product repositories
 
@@ -174,7 +225,8 @@ multiple agents coexist. Full diagram and rationale:
 **Phase 1 — repository baseline. Complete.**
 **Phase 2A — GitHub issue intake + persistence. Complete.**
 **Phase 2B — run lifecycle and dispatch. Complete.**
-**Phase 3 — OpenHands adapter. Implemented on this branch.**
+**Phase 3 — OpenHands adapter. Complete.**
+**Phase 4 — isolated workspaces and quality gates. Implemented on this branch.**
 
 Present today:
 
@@ -202,23 +254,32 @@ Present today:
   normalizes its execution state back to `RunStatus`, and `cancel` interrupts it
   idempotently. Run identity is the OpenHands conversation id. No OpenHands SDK
   dependency: the adapter speaks HTTP through an injectable transport.
+- **Per-run workspace isolation**: `new_workspace()` builds a workspace identity
+  from its own generated id, and `GitWorktreeWorkspaceProvisioner` materialises it
+  as a `git worktree` on `factory/<task-id>/<workspace-id>`, leaving the source
+  checkout untouched.
+- **The validation lifecycle**: `RunTrackingService` refreshes an active run
+  through `AgentAdapter.collect()` and drives the task to `VALIDATING` on success,
+  using the existing legal edges for failure and cancellation.
+- **A local quality gate runner** (`LocalQualityGateRunner`): argv-only,
+  `shell=False`, workspace-scoped, bounded, sanitized results.
+- **Durable run updates**: `RunRepository.update_run()` refreshes a stored run's
+  status, summary, timestamps, workspace and gates without creating a duplicate.
 
 Not present yet — deliberately deferred:
 
 - **Codex and other engines.** OpenHands is the only concrete engine; the
   `AgentAdapter` seam still admits others.
-- **Branch creation in target repositories, commits, pushes and PR creation.**
-  The factory records the branch a workspace intends to use but creates nothing
-  on GitHub.
-- **Quality-gate evaluation.** `QualityGate` exists in the model but is not yet
-  evaluated.
-- **A scheduler or daemon.** Intake is a single manual run; dispatch is called
-  programmatically.
+- **Commits, pushes and PR creation.** A green validation leaves the task in
+  `VALIDATING`; the factory never commits, pushes or opens a pull request in
+  Phase 4.
+- **A scheduler or daemon.** Intake is a single manual run; dispatch and tracking
+  are called programmatically.
 - **A dashboard, API or FastAPI service.**
 - **PostgreSQL.** Persistence is SQLite only; `DATABASE_URL` rejects other
   schemes.
 
-These are Phase 4 and later work. See the [roadmap](#7-planned-roadmap).
+These are Phase 5 and later work. See the [roadmap](#7-planned-roadmap).
 
 ## 5. Local development setup
 
@@ -278,7 +339,7 @@ policy is stated in full — with the reasoning behind each boundary — in
 | 2A ✅ | GitHub Issue intake → `FactoryTask`; SQLite task + transition persistence |
 | 2B ✅ | Run lifecycle persistence (`AgentRun`, `Workspace`); `DispatchService` over the `AgentAdapter` protocol |
 | 3 ✅ | `OpenHandsAdapter`: real OpenHands Agent Server dispatch, collect and cancel |
-| 4 | Workspace provisioning; quality gates (lint/tests/type checks) evaluated as part of the run |
+| 4 ✅ | Isolated `git worktree` workspace per run; quality gates evaluated in `VALIDATING` |
 | 5 | PR creation and `WAITING_HUMAN` handoff; Codex adapter as a second engine |
 | 6 | API / dashboard on top of the orchestrator |
 

@@ -1,8 +1,9 @@
 """Dispatch: turn a READY task into a durable workspace and agent run.
 
-This is the Phase 2B execution seam. It coordinates the existing pieces — the
-lifecycle transition service, the ``AgentAdapter`` protocol and the run
-persistence port — without knowing which engine is on the other side.
+This is the execution seam. It coordinates the existing pieces — the lifecycle
+transition service, the ``AgentAdapter`` protocol, the ``WorkspaceProvisioner``
+port and the run persistence port — without knowing which engine is on the
+other side or how a workspace is materialised.
 
 The sequence is deliberate:
 
@@ -10,9 +11,19 @@ The sequence is deliberate:
 2. **Claim atomically.** ``READY -> CLAIMED`` goes through the same
    compare-and-swap used everywhere else, so two dispatchers cannot both claim
    the same task. The loser gets :class:`DispatchConflictError`.
-3. **Create the workspace and run.** The adapter is invoked with a workspace the
-   factory built; its returned run is persisted, together with the workspace, in
-   one transaction.
+3. **Build a per-run workspace identity.** Branch and path derive from the
+   workspace's own generated id, so a retry of the same task never reuses
+   another attempt's workspace.
+4. **Prepare the physical workspace.** The injected ``WorkspaceProvisioner``
+   materialises the checkout. If it fails, the adapter is never called and no
+   run is recorded.
+5. **Start the run.** The adapter is invoked with the factory-built workspace
+   and its returned run is persisted, together with the workspace, in one
+   transaction.
+6. **Advance to RUNNING.** After the run is durable, ``CLAIMED -> RUNNING``
+   records that work has actually begun. A dispatch that fails before this point
+   leaves the task ``CLAIMED`` and creates no active run, so a retry is possible
+   once the blocker is removed.
 
 There is no engine-specific branch anywhere in this module: only
 :attr:`AgentAdapter.kind` is read, and only to record which engine ran.
@@ -29,37 +40,46 @@ from factory.domain.errors import (
     DuplicateRunError,
     TaskNotReadyError,
     TaskStateChangedError,
+    WorkspaceProvisioningError,
 )
-from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, Workspace
-from factory.domain.ports import RunRepository, TaskRepository
+from factory.domain.models import (
+    AgentAdapter,
+    AgentRun,
+    FactoryTask,
+    Workspace,
+    new_workspace,
+)
+from factory.domain.ports import RunRepository, TaskRepository, WorkspaceProvisioner
 from factory.orchestration.machine import InvalidTransitionError, TaskStateMachine
 from factory.orchestration.transitions import TaskLifecycleService
 
 
-def branch_for(task: FactoryTask) -> str:
-    """Derive the isolated branch name a task's workspace must be created on.
+def branch_for(task: FactoryTask, workspace: Workspace) -> str:
+    """Return the isolated branch a task's workspace is created on.
 
-    Deterministic from the task id so a retry lands on the same branch and never
-    invents a second one. It is a plain string: this factory records the branch
-    it intends to use but does not create it (branch creation in the target
-    repository is later-phase work).
+    The branch is the workspace's own declared branch. It is a pure function of
+    the workspace identity, so a retry that reuses a workspace is idempotent and
+    a new attempt (new workspace id) gets a new branch.
     """
-    return f"factory/{task.task_id}"
+    del task  # Branch identity is owned by the workspace, not the task.
+    return workspace.branch
 
 
 class DispatchService:
-    """Claims READY tasks and records the resulting workspace and run."""
+    """Claims READY tasks, prepares their workspace and records the run."""
 
     def __init__(
         self,
         tasks: TaskRepository,
         runs: RunRepository,
         *,
+        provisioner: WorkspaceProvisioner,
         workspace_root: str = "./.workspaces",
         state_machine: TaskStateMachine | None = None,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
+        self._provisioner = provisioner
         self._lifecycle = TaskLifecycleService(tasks, state_machine)
         self._workspace_root = workspace_root.rstrip("/")
 
@@ -72,16 +92,18 @@ class DispatchService:
         """Dispatch ``task_id`` to ``adapter`` and return the durable run.
 
         Idempotency rule: a task that already has an active run (a run that is
-        not in a terminal status) has already been dispatched. Such a task is
-        still in ``CLAIMED``, so the READY requirement below refuses it and the
-        caller keeps the original run rather than creating a second one. The rule
-        is enforced twice — by the READY check here and by the one-active-run
-        unique index in storage.
+        not in a terminal status) has already been dispatched. Such a task is in
+        ``RUNNING`` or ``CLAIMED``, so the READY requirement below refuses it and
+        the caller keeps the original run rather than creating a second one. The
+        rule is enforced twice — by the READY check here and by the
+        one-active-run unique index in storage.
 
         Raises:
             KeyError: if the task is unknown.
             TaskNotReadyError: if the task is not in ``READY``.
             DispatchConflictError: if another dispatcher won the claim race.
+            WorkspaceProvisioningError: if the physical workspace could not be
+                prepared. The adapter is not called and no run is recorded.
             AgentDispatchError: if the adapter failed to start the run. The
                 failed attempt is persisted as a terminal ``FAILED`` run. The
                 adapter's own exception is discarded rather than chained, so no
@@ -92,8 +114,10 @@ class DispatchService:
             raise TaskNotReadyError(task_id, task.status)
 
         claimed = self._claim(task)
-        workspace = self._workspace_for(claimed)
-        return self._start_run(claimed, workspace, adapter)
+        workspace = self._prepare_workspace(claimed)
+        run = self._start_run(claimed, workspace, adapter)
+        self._advance_to_running(claimed)
+        return run
 
     # -- steps -------------------------------------------------------------
 
@@ -115,12 +139,23 @@ class DispatchService:
             # create a workspace or run.
             raise DispatchConflictError(task.task_id) from exc
 
-    def _workspace_for(self, task: FactoryTask) -> Workspace:
-        return Workspace(
-            repository_slug=task.target_repository,
-            branch=branch_for(task),
-            path=f"{self._workspace_root}/{task.task_id}",
-        )
+    def _prepare_workspace(self, task: FactoryTask) -> Workspace:
+        """Build the per-run workspace identity and materialise it physically.
+
+        Failure here is a sanitized :class:`WorkspaceProvisioningError`. The task
+        stays ``CLAIMED`` — the claim already committed, and instead of rewriting
+        history the factory relies on the existing ``BLOCKED``/``CANCELLED``
+        paths for recovery. No run is recorded and the adapter is never invoked.
+        """
+        workspace = new_workspace(task, self._workspace_root)
+        try:
+            return self._provisioner.prepare(task, workspace)
+        except WorkspaceProvisioningError:
+            raise
+        except Exception:  # noqa: BLE001 - normalize an unexpected provisioner error
+            # A provisioner that raises something else must not leak its message
+            # either: it may wrap a git or OS error that embeds a path or token.
+            raise WorkspaceProvisioningError(workspace.workspace_id) from None
 
     def _start_run(
         self, task: FactoryTask, workspace: Workspace, adapter: AgentAdapter
@@ -154,6 +189,16 @@ class DispatchService:
             gates=produced.gates,
         )
         return self._persist_run(run)
+
+    def _advance_to_running(self, task: FactoryTask) -> None:
+        """Move the claimed task to ``RUNNING`` after its run is durable.
+
+        Ordering matters: the run is persisted first, so a task can never be
+        ``RUNNING`` without a durable run behind it. ``CLAIMED -> RUNNING`` is a
+        legal edge in the transition table, so this cannot fail for a task the
+        claim just produced.
+        """
+        self._lifecycle.transition(task.task_id, TaskStatus.RUNNING)
 
     def _record_failure(
         self,

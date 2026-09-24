@@ -18,6 +18,8 @@ from factory.domain.enums import TaskStatus
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
+    QualityGate,
+    QualityGateSpec,
     Repository,
     TaskSource,
     TaskTransition,
@@ -171,6 +173,25 @@ class RunRepository(ABC):
         """Return the run with ``run_id``, or ``None`` if unknown."""
 
     @abstractmethod
+    def update_run(self, run: AgentRun) -> AgentRun:
+        """Persist changes to an existing ``run`` and return it.
+
+        This is *not* an upsert: it updates a run that is already stored and
+        never creates one. ``run_id`` and task identity are immutable — the
+        stored row is matched by ``run_id`` and its ``task_id`` must not change.
+        Every mutable field is written: ``status``, ``summary``, ``started_at``,
+        ``finished_at``, the run's workspace reference and ``gates``.
+
+        The write is refused, rather than silently inserting, when the run is
+        unknown. It does not create a second run, and the one-active-run-per-task
+        invariant is unaffected because no new row is added.
+
+        Raises:
+            KeyError: if no run with ``run.run_id`` is stored.
+            PersistenceError: if the stored run belongs to a different task.
+        """
+
+    @abstractmethod
     def list_runs(self, task_id: str | None = None) -> Sequence[AgentRun]:
         """Return stored runs, optionally filtered to one task, oldest first."""
 
@@ -184,4 +205,52 @@ class RunRepository(ABC):
         """
 
 
-__all__ = ["IssueSource", "RunRepository", "TaskRepository"]
+class WorkspaceProvisioner(ABC):
+    """Prepares the physical, isolated working tree a run operates in.
+
+    The orchestration layer depends only on this contract. How the checkout is
+    materialised — a Git worktree, a fresh clone, a container volume — is an
+    implementation detail that belongs outside the domain and orchestration.
+
+    Implementations must be **retry-safe**: preparing a workspace that already
+    exists and already points at the expected branch is a no-op that returns the
+    same workspace. Preparing a *different* workspace must yield a different
+    branch and path. An existing checkout that does not match the requested
+    workspace must be rejected rather than silently reused.
+    """
+
+    @abstractmethod
+    def prepare(self, task: FactoryTask, workspace: Workspace) -> Workspace:
+        """Create (or confirm) ``workspace`` for ``task`` and return it.
+
+        Raises:
+            WorkspaceProvisioningError: if the workspace cannot be prepared. The
+                error is sanitized — it never carries raw process output, a
+                command line or a credential.
+        """
+
+
+class QualityGateRunner(ABC):
+    """Executes a declarative quality gate inside a run's workspace.
+
+    Implementations own process execution and therefore all of its safety
+    requirements (no shell, bounded timeout, sanitized result). The orchestration
+    layer only asks "did this gate pass?" and never builds a command itself.
+    """
+
+    @abstractmethod
+    def run(self, spec: QualityGateSpec, workspace: Workspace) -> QualityGate:
+        """Evaluate ``spec`` with the workspace as the working directory.
+
+        Returns a :class:`~factory.domain.models.QualityGate` whose ``detail`` is
+        sanitized and never contains raw process output or a credential.
+        """
+
+
+__all__ = [
+    "IssueSource",
+    "QualityGateRunner",
+    "RunRepository",
+    "TaskRepository",
+    "WorkspaceProvisioner",
+]

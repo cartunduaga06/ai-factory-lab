@@ -100,6 +100,57 @@ enforcement.
   credential. The factory's runtime credential stays read-only for intake, and
   the execution credential remains outside this repository entirely.
 
+## Isolated workspaces and quality gates (Phase 4)
+
+Phase 4 is where the factory first touches the filesystem and runs processes, so
+it is where the boundary is easiest to get wrong. Every one of these is enforced
+in code:
+
+- **One working tree per run attempt.** A workspace is keyed by its own id
+  (`factory/<task-id>/<workspace-id>`), so a retry never inherits another
+  attempt's checkout. An agent cannot edit a tree another run owns.
+- **The source checkout is never disturbed.** The Git worktree provisioner runs
+  only `git worktree add`; it never fetches, pushes, resets, rewrites history, or
+  checks out the factory branch in the source repository. The source stays on its
+  existing branch.
+- **No push, no fetch with credentials, no branch deletion.** The provisioner's
+  command surface is deliberately a handful of read-only/creating git calls. It
+  holds no push credential, and the factory runtime credential was never granted
+  write scope.
+- **Git failures are sanitized, not chained.** `WorkspaceProvisioningError`
+  carries only the workspace id. Git echoes failing commands and can print a
+  remote URL with an embedded token, so the raw stderr and the underlying
+  exception are discarded — not attached as `__cause__`/`__context__`, which
+  Python would render in a traceback.
+- **A failed preparation never fabricates success.** If provisioning fails the
+  adapter is not called and no run is recorded; the task stays `CLAIMED` and the
+  legal recovery is the existing `BLOCKED`/`CANCELLED` path. No history is
+  rewritten to hide the failure.
+- **Gates run without a shell.** `LocalQualityGateRunner` executes an argv tuple
+  with `shell=False`. Arguments are data, never syntax: metacharacters cannot
+  become a second command, and there is no command string to interpolate.
+- **Gates run inside the run's workspace,** with `cwd` set to `Workspace.path`.
+- **Gates are bounded.** Every execution has a timeout; exceeding it is a
+  `FAILED` gate, never a hung factory.
+- **Gates receive a minimal environment.** Only a small allowlist of variables is
+  forwarded, so a factory credential in the ambient environment is not handed to
+  the command.
+- **Gate output is never persisted.** `QualityGate.detail` holds only
+  `exit_code=<n>`, `timeout` or `spawn_error`. Raw stdout/stderr routinely echo
+  environment values, paths and tokens, and the factory cannot know which of them
+  is sensitive, so none of it is stored in MVP 0.1.
+- **Which gates exist is configuration, not code.** Gate commands come from the
+  application layer (`FACTORY_QUALITY_GATES`). The factory never invents a gate,
+  and a malformed definition is refused rather than silently ignored — a typo
+  cannot disable validation.
+- **Validation cannot skip the gate.** A required gate is green only when it
+  `PASSED`; `PENDING`, `FAILED` and `SKIPPED` are all not green. An unevaluated
+  requirement is never treated as satisfied.
+
+The Phase 4 stop line is itself a safety property: a green validation leaves the
+task in `VALIDATING` and **does not** open a PR. Nothing in this phase commits,
+pushes, opens a pull request, merges or deploys.
+
 ## Credential separation
 
 Two different credentials exist around this project and must never be conflated:

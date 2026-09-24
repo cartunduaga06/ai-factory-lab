@@ -23,6 +23,7 @@ from factory.domain.enums import (
     RepositoryRole,
     RunStatus,
     TaskStatus,
+    ValidationOutcome,
 )
 
 
@@ -123,6 +124,13 @@ class Workspace:
 
     Workspaces are ephemeral and per-run: an agent never shares a working tree
     with another run or with the factory's own repository.
+
+    ``workspace_id`` is the stable pre-dispatch identity of the workspace. It is
+    generated before the agent engine is involved (the engine's own conversation
+    id is not known until dispatch), and it — not the task id — is what makes a
+    workspace unique. That distinction is the guardrail behind one branch and one
+    working tree per *run attempt*: retrying the same task yields a fresh
+    workspace id, and therefore a different branch and path.
     """
 
     workspace_id: str = field(default_factory=_new_id)
@@ -136,6 +144,29 @@ class Workspace:
             raise ValueError("workspace must be created on an isolated branch")
 
 
+def new_workspace(task: FactoryTask, workspace_root: str) -> Workspace:
+    """Build a per-run isolated :class:`Workspace` for ``task``.
+
+    The branch and path are derived from the workspace's own generated id, so two
+    attempts at the same task never collide::
+
+        branch: factory/<task-id>/<workspace-id>
+        path:   <workspace-root>/<workspace-id>
+
+    Pure computation — no filesystem, no git. The physical checkout is created
+    later by a :class:`factory.domain.ports.WorkspaceProvisioner`, which is the
+    only thing allowed to touch the outside world.
+    """
+    workspace_id = _new_id()
+    root = workspace_root.rstrip("/")
+    return Workspace(
+        workspace_id=workspace_id,
+        repository_slug=task.target_repository,
+        branch=f"factory/{task.task_id}/{workspace_id}",
+        path=f"{root}/{workspace_id}",
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class QualityGate:
     """A single verifiable check applied to an agent run.
@@ -143,20 +174,49 @@ class QualityGate:
     Gates are named declaratively (``lint``, ``tests``, ``typecheck``, ...) so
     the orchestration layer can evaluate them uniformly regardless of the agent
     engine that produced the change.
+
+    A gate is *green* only when it actually ``PASSED``. For a required gate,
+    ``PENDING``, ``FAILED`` and ``SKIPPED`` are all treated as not green: an
+    unevaluated or skipped requirement is never silently counted as satisfied.
+    An optional gate never blocks the run, whatever its status.
     """
 
     name: str
     status: QualityGateStatus = QualityGateStatus.PENDING
-    # Short human-readable detail; must never contain secrets.
+    # Short sanitized detail; must never contain secrets or raw process output.
     detail: str | None = None
     required: bool = True
 
     @property
+    def is_green(self) -> bool:
+        """Whether this gate is satisfied. Only ``PASSED`` counts."""
+        return self.status is QualityGateStatus.PASSED
+
+    @property
     def is_blocking(self) -> bool:
-        return self.required and self.status in {
-            QualityGateStatus.PENDING,
-            QualityGateStatus.FAILED,
-        }
+        """Whether this gate must prevent the run from being considered ready."""
+        return self.required and not self.is_green
+
+
+@dataclass(slots=True, frozen=True)
+class QualityGateSpec:
+    """A declarative definition of a gate the application wants to run.
+
+    Commands are an *argv* tuple, never shell text, so the concrete runner can
+    execute them without a shell. Which gates exist is supplied by configuration
+    (the application/repository layer); neither the domain nor orchestration
+    hard-codes a command.
+    """
+
+    name: str
+    argv: tuple[str, ...]
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("quality gate name must not be empty")
+        if not self.argv:
+            raise ValueError("quality gate argv must not be empty")
 
 
 @dataclass(slots=True)
@@ -224,9 +284,47 @@ class AgentRun:
 
     @property
     def all_gates_passed(self) -> bool:
+        """Whether every attached gate (required or not) is ``PASSED``.
+
+        Returns ``False`` when no gates are attached: an empty gate list is not
+        evidence of success. Use :attr:`required_gates_passed` for the
+        required-only question the validation lifecycle actually asks.
+        """
         if not self.gates:
             return False
-        return all(gate.status is QualityGateStatus.PASSED for gate in self.gates)
+        return all(gate.is_green for gate in self.gates)
+
+    @property
+    def required_gates_passed(self) -> bool:
+        """Whether every *required* gate is green.
+
+        An optional gate never blocks, whatever its status. When no required gate
+        is configured this is vacuously ``True``: the factory does not invent
+        gates a repository never defined, and nothing was configured to block the
+        run. Callers that need to distinguish "no requirements" from "requirements
+        met" should check :attr:`has_required_gates`.
+        """
+        return all(gate.is_green for gate in self.gates if gate.required)
+
+    @property
+    def has_required_gates(self) -> bool:
+        """Whether at least one required gate is attached to this run."""
+        return any(gate.required for gate in self.gates)
+
+    @property
+    def validation_outcome(self) -> ValidationOutcome:
+        """Deterministic validation result derived from the run's gates.
+
+        ``PENDING`` until the engine reports a terminal success; thereafter
+        ``READY_FOR_NEXT_PHASE`` (all required gates green) or ``GATES_FAILED``.
+        This is the signal later orchestration uses — Phase 4 never advances the
+        task further on its own.
+        """
+        if self.status is not RunStatus.SUCCEEDED:
+            return ValidationOutcome.PENDING
+        if self.required_gates_passed:
+            return ValidationOutcome.READY_FOR_NEXT_PHASE
+        return ValidationOutcome.GATES_FAILED
 
 
 @dataclass(slots=True, frozen=True)
@@ -282,8 +380,10 @@ __all__ = [
     "FactoryTask",
     "PullRequest",
     "QualityGate",
+    "QualityGateSpec",
     "Repository",
     "TaskSource",
     "TaskTransition",
     "Workspace",
+    "new_workspace",
 ]

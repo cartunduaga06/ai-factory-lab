@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus
-from factory.domain.errors import DuplicateRunError
+from factory.domain.errors import DuplicateRunError, PersistenceError
 from factory.domain.models import AgentRun, QualityGate, Workspace
 from factory.domain.ports import RunRepository
 from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
@@ -71,12 +71,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         try:
             with self._connect() as conn:
                 if run.workspace is not None:
-                    existing = conn.execute(
-                        f"SELECT 1 FROM {WORKSPACES_TABLE} WHERE workspace_id = ?",
-                        (run.workspace.workspace_id,),
-                    ).fetchone()
-                    if existing is None:
-                        self._insert_workspace(conn, run.workspace)
+                    self._ensure_workspace(conn, run.workspace)
                 conn.execute(
                     f"""
                     INSERT INTO {AGENT_RUNS_TABLE} (
@@ -112,6 +107,46 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
             ).fetchone()
             workspace = self._workspace_for(conn, row) if row is not None else None
         return _row_to_run(row, workspace) if row is not None else None
+
+    def update_run(self, run: AgentRun) -> AgentRun:
+        """Update an already-stored run. Never inserts.
+
+        The row is matched by ``run_id``; a missing row is refused with
+        ``KeyError`` rather than upserted, so this operation can never create a
+        second run or bypass the one-active-run invariant. ``task_id`` is
+        immutable: a caller trying to re-point a run at another task is refused.
+        """
+        with self._connect() as conn:
+            existing = conn.execute(
+                f"SELECT task_id, created_at FROM {AGENT_RUNS_TABLE} WHERE run_id = ?",
+                (run.run_id,),
+            ).fetchone()
+            if existing is None:
+                raise KeyError(run.run_id)
+            if existing["task_id"] != run.task_id:
+                raise PersistenceError(f"run {run.run_id} belongs to another task")
+
+            if run.workspace is not None:
+                self._ensure_workspace(conn, run.workspace)
+
+            conn.execute(
+                f"""
+                UPDATE {AGENT_RUNS_TABLE}
+                   SET status = ?, summary = ?, started_at = ?, finished_at = ?,
+                       workspace_id = ?, gates = ?
+                 WHERE run_id = ?
+                """,
+                (
+                    run.status.value,
+                    run.summary,
+                    encode_datetime(run.started_at) if run.started_at else None,
+                    encode_datetime(run.finished_at) if run.finished_at else None,
+                    run.workspace.workspace_id if run.workspace else None,
+                    _encode_gates(run.gates),
+                    run.run_id,
+                ),
+            )
+        return run
 
     def list_runs(self, task_id: str | None = None) -> Sequence[AgentRun]:
         query = f"SELECT * FROM {AGENT_RUNS_TABLE}"
@@ -157,6 +192,22 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                 encode_datetime(workspace.created_at),
             ),
         )
+
+    @classmethod
+    def _ensure_workspace(cls, conn: sqlite3.Connection, workspace: Workspace) -> None:
+        """Insert the workspace if it is not already stored, else leave it.
+
+        A run's workspace is written once at dispatch. On a later update the same
+        workspace is re-attached, and re-inserting its row would violate the
+        primary key, so presence is checked first. The existing row is not
+        modified: a workspace is immutable in practice.
+        """
+        existing = conn.execute(
+            f"SELECT 1 FROM {WORKSPACES_TABLE} WHERE workspace_id = ?",
+            (workspace.workspace_id,),
+        ).fetchone()
+        if existing is None:
+            cls._insert_workspace(conn, workspace)
 
     @staticmethod
     def _workspace_for(conn: sqlite3.Connection, row: sqlite3.Row) -> Workspace | None:

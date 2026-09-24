@@ -49,7 +49,19 @@ def test_domain_imports_no_factory_layer() -> None:
 
 
 def test_domain_has_no_io_imports() -> None:
-    forbidden = {"os", "socket", "sqlite3", "urllib", "http", "requests", "pathlib"}
+    forbidden = {
+        "os",
+        "socket",
+        "sqlite3",
+        "subprocess",
+        "git",
+        "urllib",
+        "http",
+        "requests",
+        "pathlib",
+        "shutil",
+        "tempfile",
+    }
     violations: list[str] = []
     for path in _modules("domain"):
         for module in _imports_in(path):
@@ -103,9 +115,9 @@ def test_infrastructure_does_not_import_orchestration() -> None:
 
 
 def test_dispatch_depends_only_on_domain_contracts() -> None:
-    # The dispatch service is the Phase 2B execution seam: it may see the
-    # AgentAdapter protocol and the domain ports, but no storage engine and no
-    # concrete agent integration.
+    # The dispatch service is the execution seam: it may see the AgentAdapter
+    # protocol and the domain ports, but no storage engine and no concrete agent
+    # integration.
     modules = _imports_in(SRC / "orchestration" / "dispatch.py")
     forbidden = {
         module
@@ -113,6 +125,37 @@ def test_dispatch_depends_only_on_domain_contracts() -> None:
         if module.startswith(("factory.integrations", "factory.infrastructure", "sqlite3"))
     }
     assert forbidden == set()
+
+
+def test_orchestration_imports_no_process_or_git_modules() -> None:
+    # Concrete git/workspace and process execution live outside orchestration.
+    forbidden = {"subprocess", "sqlite3", "shutil"}
+    violations: list[str] = []
+    for path in _modules("orchestration"):
+        for module in _imports_in(path):
+            root = module.split(".")[0]
+            if root in forbidden or root == "git" or module.startswith("factory.infrastructure"):
+                violations.append(f"{path.relative_to(SRC)} imports {module}")
+    assert violations == []
+
+
+def test_workspace_and_gate_integrations_live_outside_core_layers() -> None:
+    # The concrete implementations exist, and exist only under integrations.
+    assert (SRC / "integrations" / "workspace" / "git.py").exists()
+    assert (SRC / "integrations" / "gates" / "local.py").exists()
+    for layer in ("domain", "orchestration"):
+        violations = _violations(layer, "factory.integrations.workspace")
+        violations += _violations(layer, "factory.integrations.gates")
+        assert violations == []
+
+
+def test_ports_define_the_phase_4_contracts() -> None:
+    # The smallest engine-agnostic seams Phase 4 needs are declared as ports.
+    from factory.domain import ports
+
+    assert hasattr(ports, "WorkspaceProvisioner")
+    assert hasattr(ports, "QualityGateRunner")
+    assert hasattr(ports.RunRepository, "update_run")
 
 
 @pytest.mark.parametrize(
