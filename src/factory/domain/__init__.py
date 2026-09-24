@@ -12,6 +12,7 @@ from factory.domain.enums import (
     RunStatus,
     TaskStatus,
 )
+from factory.domain.errors import DuplicateTaskError, FactoryError, TaskSourceError
 from factory.domain.models import (
     AgentAdapter,
     AgentRun,
@@ -19,20 +20,30 @@ from factory.domain.models import (
     PullRequest,
     QualityGate,
     Repository,
+    TaskSource,
+    TaskTransition,
     Workspace,
 )
+from factory.domain.ports import IssueSource, TaskRepository
 
 __all__ = [
     "AgentAdapter",
     "AgentKind",
     "AgentRun",
+    "DuplicateTaskError",
+    "FactoryError",
     "FactoryTask",
+    "IssueSource",
     "PullRequest",
     "QualityGate",
     "QualityGateStatus",
     "Repository",
     "RepositoryRole",
     "RunStatus",
+    "TaskRepository",
+    "TaskSource",
+    "TaskSourceError",
     "TaskStatus",
+    "TaskTransition",
     "Workspace",
 ]

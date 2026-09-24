@@ -11,6 +11,7 @@ keeps the objects internally consistent.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
@@ -34,6 +35,69 @@ def _new_id() -> str:
     return str(uuid4())
 
 
+def _validate_slug(slug: str) -> None:
+    if "/" not in slug:
+        raise ValueError(f"repository slug must be 'owner/name', got {slug!r}")
+
+
+#: Providers are short, lowercase, ascii tokens (``github``, ``gitlab``, ...).
+_PROVIDER_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]*")
+
+
+@dataclass(slots=True, frozen=True)
+class TaskSource:
+    """Structured identity of where a task came from.
+
+    Identity is a triple — provider + repository + issue number — not a parsed
+    string. That makes it deterministic and safe to use as a uniqueness key:
+    ``github`` + ``cartunduaga06/ai-factory-lab`` + ``42`` always identifies the
+    same task, regardless of how it is formatted for display.
+
+    The domain only knows the provider is a short lowercase token; which
+    providers exist and how to talk to them is an integration concern.
+    """
+
+    provider: str
+    repository_slug: str
+    issue_number: int
+
+    def __post_init__(self) -> None:
+        if not _PROVIDER_PATTERN.fullmatch(self.provider):
+            raise ValueError(
+                "task source provider must be a lowercase ascii token "
+                f"(letters, digits, '-', '_', '.'), got {self.provider!r}"
+            )
+        _validate_slug(self.repository_slug)
+        if self.issue_number <= 0:
+            raise ValueError(
+                f"task source issue number must be positive, got {self.issue_number!r}"
+            )
+
+    @property
+    def external_ref(self) -> str:
+        """Human-readable reference, e.g. ``cartunduaga06/ai-factory-lab#42``.
+
+        For display and backward compatibility only — never the source of truth
+        for identity.
+        """
+        return f"{self.repository_slug}#{self.issue_number}"
+
+
+@dataclass(slots=True, frozen=True)
+class TaskTransition:
+    """One audited lifecycle transition for a task.
+
+    Recorded by persistence, not by the state machine: the machine stays a pure
+    validator, and the storage layer is what makes the history durable.
+    """
+
+    task_id: str
+    from_status: TaskStatus
+    to_status: TaskStatus
+    transition_id: str = field(default_factory=_new_id)
+    occurred_at: datetime = field(default_factory=_utcnow)
+
+
 @dataclass(slots=True, frozen=True)
 class Repository:
     """A repository the factory knows about.
@@ -50,8 +114,7 @@ class Repository:
     fork_slug: str | None = None
 
     def __post_init__(self) -> None:
-        if "/" not in self.slug:
-            raise ValueError(f"repository slug must be 'owner/name', got {self.slug!r}")
+        _validate_slug(self.slug)
 
 
 @dataclass(slots=True, frozen=True)
@@ -100,15 +163,20 @@ class QualityGate:
 class FactoryTask:
     """A unit of work, eventually sourced from a GitHub Issue.
 
-    The ``external_ref`` field is the link back to the originating issue
-    (e.g. ``cartunduaga06/ai-factory-lab#12``). Everything else is factory
-    bookkeeping: an id, the repository in scope, a lifecycle status and the
-    timestamps needed for audit.
+    ``source`` is the structured, deterministic identity of the originating
+    work item. ``external_ref`` is retained as a derived, human-readable
+    convenience (``cartunduaga06/ai-factory-lab#12``) for display and backward
+    compatibility, but it is *never* the source of identity — two different
+    tasks could share a formatted string, and identity must not depend on string
+    parsing.
+
+    Everything else is factory bookkeeping: an id, the repository in scope, a
+    lifecycle status and the timestamps needed for audit.
     """
 
     title: str
-    repository_slug: str
-    external_ref: str | None = None
+    target_repository: str
+    source: TaskSource | None = None
     task_id: str = field(default_factory=_new_id)
     body: str = ""
     status: TaskStatus = TaskStatus.DISCOVERED
@@ -119,8 +187,12 @@ class FactoryTask:
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("task title must not be empty")
-        if "/" not in self.repository_slug:
-            raise ValueError(f"repository_slug must be 'owner/name', got {self.repository_slug!r}")
+        _validate_slug(self.target_repository)
+
+    @property
+    def external_ref(self) -> str | None:
+        """Display reference derived from :attr:`source`, or ``None``."""
+        return self.source.external_ref if self.source is not None else None
 
 
 @dataclass(slots=True)
@@ -211,5 +283,7 @@ __all__ = [
     "PullRequest",
     "QualityGate",
     "Repository",
+    "TaskSource",
+    "TaskTransition",
     "Workspace",
 ]

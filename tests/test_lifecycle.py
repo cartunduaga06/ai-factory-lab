@@ -22,7 +22,7 @@ HAPPY_PATH = [
 
 
 def _task() -> FactoryTask:
-    return FactoryTask(title="Implement feature", repository_slug="cartunduaga06/finanza-ia")
+    return FactoryTask(title="Implement feature", target_repository="cartunduaga06/finanza-ia")
 
 
 def test_happy_path_is_fully_traversable() -> None:

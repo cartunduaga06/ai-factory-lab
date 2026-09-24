@@ -42,7 +42,10 @@ integrations  ──┼──► orchestration ──► domain
 - `factory/integrations` — GitHub, OpenHands, Codex adapters. Translates external
   APIs into domain types.
 - `factory/infrastructure` — configuration, logging, persistence. May not import
-  `orchestration`.
+  `orchestration`. Core-domain `ports` live in `domain/ports.py`:
+  `IssueSource` and `TaskRepository`. Concrete GitHub behaviour belongs in
+  `integrations/github`; concrete SQLite behaviour belongs in
+  `infrastructure/persistence`.
 
 ## Commands
 
@@ -56,6 +59,9 @@ mypy                        # strict type checking
 python -m factory --show-config   # redacted config dump
 ```
 
+`python -m factory intake` runs one manual GitHub intake pass (read-only) and
+persists eligible issues. There is no daemon or scheduler.
+
 All four checks must pass before a change is proposed. Python 3.11+.
 
 ## Conventions
@@ -67,19 +73,25 @@ All four checks must pass before a change is proposed. Python 3.11+.
 - Comments explain *why*, not *what*. Docstrings state the contract and the
   boundary, not the implementation narrative.
 - Tests target real logic — no mocks of the code under test. Tests must not read
-  the real environment or network: pass explicit inputs.
+  the real environment or network: pass explicit inputs. Persistence tests use a
+  temporary SQLite file; the GitHub adapter is tested with an injected in-memory
+  transport. `tests/test_layering.py` enforces the dependency direction.
 
 ## Key domain concepts
 
 | Concept | Meaning |
 |---|---|
-| `FactoryTask` | A unit of work, sourced from a GitHub Issue (`external_ref`). |
+| `FactoryTask` | A unit of work, carrying a structured `TaskSource` identity. |
+| `TaskSource` | Frozen `(provider, repository_slug, issue_number)` identity of a task. |
+| `TaskTransition` | Auditable record of one lifecycle status change. |
 | `AgentRun` | One attempt by one engine to complete a task. |
 | `Repository` | A repo the factory knows about, tagged `CONTROL_PLANE` or `TARGET`. |
 | `Workspace` | An isolated per-run checkout on its own branch. |
 | `PullRequest` | Agent-produced PR awaiting mandatory human approval. |
 | `QualityGate` | A named, verifiable check (lint, tests, typecheck). |
 | `AgentAdapter` | Engine-agnostic execution interface (OpenHands, Codex, ...). |
+| `IssueIntakeService` | Idempotent intake: eligible issues → persisted tasks. |
+| `TaskLifecycleService` | Validates a transition, then persists status + history atomically. |
 
 ## Task lifecycle
 

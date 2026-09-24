@@ -26,6 +26,12 @@ htmlcov/
 # Local agent workspaces (isolated checkouts of target repositories)
 .workspaces/
 
+# Local SQLite databases — never commit generated data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
 # Editors / OS
 .idea/
 .vscode/

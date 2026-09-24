@@ -52,6 +52,7 @@ The output masks all credentials (`"***"`). Never commit `.env`.
 | Apply formatting | `ruff format .` |
 | Types | `mypy` |
 | Config sanity check | `python -m factory --show-config` |
+| Manual issue intake | `python -m factory intake` |
 
 `pyproject.toml` sets `testpaths = ["tests"]` and `pythonpath = ["src"]`, so
 `pytest` works from the repository root without installing the package.
@@ -63,10 +64,10 @@ proposed.
 
 ```
 src/factory/
-├── domain/          # pure typed model — no I/O
-├── orchestration/   # lifecycle + dispatch
-├── integrations/    # GitHub, OpenHands, Codex adapters
-└── infrastructure/  # configuration, logging, persistence
+├── domain/          # pure typed model — no I/O; ports for IssueSource/TaskRepository
+├── orchestration/   # lifecycle, intake service, transition service
+├── integrations/    # github/ (read-only IssueSource); agent adapters later
+└── infrastructure/  # configuration, logging, persistence/ (SQLite)
 tests/               # pure-logic tests, no network or real environment
 ```
 
@@ -76,10 +77,14 @@ Dependencies point inward: `infrastructure` and `integrations` depend on
 `orchestration`, which depends on `domain`. Never the reverse.
 
 - `domain` must not import from any other `factory` subpackage and must not
-  perform I/O.
-- `orchestration` must not import a concrete agent engine — only the
-  `AgentAdapter` protocol from `domain`.
-- `infrastructure` must not import `orchestration`.
+  perform I/O. It declares the contracts (`IssueSource`, `TaskRepository`) that
+  other layers implement.
+- `orchestration` must not import a concrete agent engine, the GitHub client or
+  SQLite — only protocols/ports and pure logic from `domain`.
+- `infrastructure` must not import `orchestration` (nor `integrations`).
+
+`tests/test_layering.py` enforces these rules by parsing imports, so a wrong-way
+dependency fails the suite rather than being caught in review.
 
 If a change seems to require breaking one of these, the design is wrong; raise
 it rather than working around it.
@@ -94,9 +99,15 @@ it rather than working around it.
 
 ## Testing conventions
 
-- Tests cover real logic — no mocks of the code under test.
+- Tests cover real logic — no mocks of the code under test. Persistence tests
+  use a real temporary SQLite file; intake tests use a real repository and a fake
+  `IssueSource` implementation, not a mock.
 - No network access and no reading of the real environment. Configuration tests
-  pass an explicit mapping to `FactoryConfig.from_env({...})`.
+  pass an explicit mapping to `FactoryConfig.from_env({...})`; CLI tests set a
+  scoped `os.environ` through monkeypatch after clearing ambient variables.
+- The GitHub adapter is tested against an injected in-memory transport, so
+  pagination, filtering and error handling run deterministically offline.
+- No test may depend on live GitHub.
 - Keep tests deterministic: no reliance on wall-clock ordering or external state.
 - If a required dependency for testing is missing, raise it before installing a
   large stack.

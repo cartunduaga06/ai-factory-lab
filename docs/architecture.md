@@ -71,49 +71,63 @@ Two repositories are involved and must stay separate:
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │                            domain                             │
-│  FactoryTask · AgentRun · Repository · Workspace ·            │
-│  PullRequest · QualityGate · AgentAdapter (protocol)          │
+│  FactoryTask · TaskSource · TaskTransition · AgentRun ·       │
+│  Repository · Workspace · PullRequest · QualityGate ·         │
+│  AgentAdapter (protocol) · IssueSource/TaskRepository (ports) │
 │  pure data + invariants — no I/O                              │
 └───────────────────────────▲───────────────────────────────────┘
                             │ depends on
 ┌───────────────────────────┴───────────────────────────────────┐
 │                        orchestration                          │
-│  TaskStateMachine · lifecycle transition table · dispatcher   │
-│  depends on the AgentAdapter protocol, never a concrete engine│
+│  TaskStateMachine · lifecycle table · IssueIntakeService ·    │
+│  TaskLifecycleService                                         │
+│  depends on ports and the lifecycle, never a concrete engine, │
+│  GitHub client or SQLite implementation                       │
 └───────────────────────────▲───────────────────────────────────┘
                             │ depends on
 ┌───────────────────────────┴───────────────────────────────────┐
 │                        integrations                           │
-│  GitHub (IssueSource, PullRequestSink)                        │
-│  OpenHands adapter · Codex adapter · AgentAdapterBase         │
+│  GitHub: GitHubClient (read-only) · GitHubIssueSource         │
+│  PullRequestSink · AgentAdapterBase (no agent engine yet)     │
 └───────────────────────────▲───────────────────────────────────┘
                             │ depends on
 ┌───────────────────────────┴───────────────────────────────────┐
 │                      infrastructure                           │
-│  FactoryConfig (env) · logging · persistence (future)         │
+│  FactoryConfig (env) · logging · SqliteTaskRepository         │
 └───────────────────────────────────────────────────────────────┘
 ```
 
 Dependencies point inward. Only `infrastructure` and `integrations` touch the
-outside world.
+outside world. `orchestration` knows GitHub and SQLite only as the `IssueSource`
+and `TaskRepository` ports declared in `domain/ports.py`.
 
 ## Package layout
 
 ```
 src/factory/
 ├── __init__.py              # public surface
-├── __main__.py              # `python -m factory` config sanity check
+├── __main__.py              # `python -m factory` config check + `intake`
 ├── domain/
 │   ├── enums.py             # TaskStatus, RunStatus, QualityGateStatus, ...
-│   └── models.py            # dataclasses + AgentAdapter protocol
+│   ├── models.py            # dataclasses + AgentAdapter protocol + TaskSource
+│   ├── errors.py            # domain errors (duplicate source, lost update, ...)
+│   └── ports.py             # IssueSource, TaskRepository contracts
 ├── orchestration/
 │   ├── lifecycle.py         # transition table (single source of truth)
-│   └── machine.py           # TaskStateMachine, InvalidTransitionError
+│   ├── machine.py           # TaskStateMachine, InvalidTransitionError
+│   ├── intake.py            # IssueIntakeService (provider-agnostic)
+│   └── transitions.py       # TaskLifecycleService (state machine + persistence)
 ├── integrations/
-│   └── base.py              # IssueSource, PullRequestSink, AgentAdapterBase
+│   ├── base.py              # PullRequestSink, AgentAdapterBase
+│   └── github/
+│       ├── client.py        # read-only REST client, injectable transport
+│       └── issues.py        # GitHubIssueSource (IssueSource implementation)
 └── infrastructure/
-    ├── config.py            # FactoryConfig.from_env + redaction
-    └── logging.py           # configure_logging
+    ├── config.py            # FactoryConfig.from_env + redaction + DatabaseConfig
+    ├── logging.py           # configure_logging
+    └── persistence/
+        ├── schema.py        # idempotent SQLite DDL
+        └── sqlite.py        # SqliteTaskRepository (TaskRepository implementation)
 ```
 
 ## Domain model
@@ -122,24 +136,32 @@ The seven concepts from the specification, and where they are defined:
 
 | Concept | Definition | Notes |
 |---|---|---|
-| `FactoryTask` | `domain/models.py` | `external_ref` links back to a GitHub Issue; `status` is a `TaskStatus`. |
+| `FactoryTask` | `domain/models.py` | `source: TaskSource` gives structured identity; `external_ref` is derived for display only. |
+| `TaskSource` | `domain/models.py` | Frozen identity triple `(provider, repository_slug, issue_number)`. |
+| `TaskTransition` | `domain/models.py` | Frozen audit record of one `from_status → to_status` change. |
 | `AgentRun` | `domain/models.py` | One attempt; carries `adapter: AgentKind`, its `Workspace` and `QualityGate[]`. |
 | `Repository` | `domain/models.py` | `slug` + `RepositoryRole` (`CONTROL_PLANE` / `TARGET`). |
 | `Workspace` | `domain/models.py` | Ephemeral, per-run, must have a branch. |
 | `PullRequest` | `domain/models.py` | Records the proposal; merge is external and human. |
 | `QualityGate` | `domain/models.py` | Named check with `QualityGateStatus`; required gates block. |
 | `AgentAdapter` | `domain/models.py` | `runtime_checkable` `Protocol` — the engine seam. |
+| `IssueSource` | `domain/ports.py` | Port: supplies work items. Read-only in Phase 2A. |
+| `TaskRepository` | `domain/ports.py` | Port: persists tasks and transition history. |
 
 Design intent:
 
 - **Engine independence.** Orchestration sees only `AgentAdapter.kind`,
   `dispatch`, `collect` and `cancel`. Adding Codex or any other engine is a new
   integration, not an orchestration change.
-- **Issues as the source of work.** `FactoryTask.external_ref` is deliberately a
-  string, not an integer, so PRs and other artifacts can be referenced later.
-- **Immutable value types.** `Repository`, `Workspace`, `PullRequest` and
-  `QualityGate` are frozen; `FactoryTask` and `AgentRun` are mutable because the
-  lifecycle advances them.
+- **Structured source identity.** `FactoryTask.source` is a `TaskSource`, not a
+  parsed string. The triple `(provider, repository_slug, issue_number)` is the
+  deterministic uniqueness key; `external_ref` exists for display and backward
+  compatibility but is never authoritative.
+- **Ports, not implementations.** The domain declares `IssueSource` and
+  `TaskRepository`; GitHub lives in `integrations`, SQLite in `infrastructure`.
+- **Immutable value types.** `Repository`, `Workspace`, `PullRequest`,
+  `QualityGate`, `TaskSource` and `TaskTransition` are frozen; `FactoryTask` and
+  `AgentRun` are mutable because the lifecycle advances them.
 
 ## Task state machine
 
@@ -201,8 +223,58 @@ Two deliberate choices:
 - **`BLOCKED`** is the only non-terminal failure state, because a blocker (missing
   information, a dependency) is usually removable. It re-enters at `READY`.
 
-No workflow engine is implemented. The machine validates transitions; scheduling
-and persistence come later.
+No workflow engine is implemented. The machine stays pure: it validates
+transitions, and `TaskLifecycleService` is the thin orchestration seam that
+applies a validated transition and records it in persistence atomically.
+
+## Issue intake (Phase 2A)
+
+The first operational control-plane capability is intake:
+
+```
+GitHub Issue
+      ↓
+GitHubIssueSource      (integrations — read-only REST)
+      ↓
+FactoryTask            (domain — with structured TaskSource)
+      ↓
+IssueIntakeService     (orchestration — provider-agnostic)
+      ↓
+TaskRepository         (domain port)
+      ↓
+SQLite                 (infrastructure)
+      ↓
+Transition History     (transitions table)
+```
+
+### Eligibility
+
+An issue is eligible when it is **open**, carries the `factory-ready` label, and
+is **not** a pull request. The factory observes GitHub only — intake never adds,
+removes or changes labels, comments, state or any other GitHub resource.
+
+### Structured source identity
+
+`TaskSource(provider, repository_slug, issue_number)` is the deterministic
+identity of a task. `github` + `cartunduaga06/ai-factory-lab` + `42` identifies
+exactly one task. `FactoryTask.external_ref` (`...#42`) is derived for display
+and is never used as the identity key.
+
+### Idempotency
+
+Intake checks `TaskRepository.find_by_source()` before writing and skips tasks
+that already exist, leaving them untouched. The `tasks` table additionally
+enforces `UNIQUE(source_provider, source_repository, source_issue_number)` as a
+defense-in-depth guarantee: a concurrent writer that slips past the check still
+cannot create a duplicate.
+
+### Transition persistence
+
+`TaskLifecycleService.transition()` retrieves the task, validates the requested
+transition with the pure `TaskStateMachine`, then applies the status change and
+inserts the history row **in one transaction**. If either half fails, neither is
+committed: the status stays put and no history row appears. An invalid
+transition raises before any write occurs.
 
 ## Configuration model
 
@@ -213,6 +285,10 @@ safely so the repository runs with nothing configured:
 - Missing or empty values → `None`, never a real default credential.
 - Unresolved `<placeholder>` values (from `.env.example`) are treated as unset,
   so a copied example file cannot masquerade as configuration.
+- `DATABASE_URL` defaults to `sqlite:///./factory.db`. Phase 2A supports SQLite
+  only; a non-SQLite scheme raises `UnsupportedDatabaseError` when the URL is
+  parsed. Parsing is deferred until the database is actually needed, so loading
+  configuration never fails on an unusable URL.
 - `FactoryConfig.redacted()` is the only supported way to log configuration.
 
 See `.env.example` for the full reference.
@@ -221,7 +297,8 @@ See `.env.example` for the full reference.
 
 | Phase | Addition |
 |---|---|
-| 2 | GitHub Issues → `FactoryTask` intake; persistence for tasks/runs/transitions |
+| 2A | ✅ GitHub Issue intake + SQLite task/transition persistence (this PR) |
+| 2B | Run lifecycle persistence; agent dispatch plumbing (not yet started) |
 | 3 | OpenHands `AgentAdapter`; workspace provisioning |
 | 4 | Gate evaluation inside `VALIDATING` |
 | 5 | PR creation, `WAITING_HUMAN` handoff; Codex adapter |

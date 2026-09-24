@@ -11,6 +11,7 @@ from factory.domain.models import (
     FactoryTask,
     QualityGate,
     Repository,
+    TaskSource,
     Workspace,
 )
 
@@ -35,21 +36,33 @@ def test_workspace_requires_isolated_branch() -> None:
 
 
 def test_factory_task_defaults_to_discovered_from_issue() -> None:
+    source = TaskSource(
+        provider="github",
+        repository_slug="cartunduaga06/ai-factory-lab",
+        issue_number=12,
+    )
     task = FactoryTask(
         title="Add retry to importer",
-        repository_slug="cartunduaga06/finanza-ia",
-        external_ref="cartunduaga06/ai-factory-lab#12",
+        target_repository="cartunduaga06/finanza-ia",
+        source=source,
     )
     assert task.status.value == "DISCOVERED"
+    assert task.source == source
     assert task.external_ref == "cartunduaga06/ai-factory-lab#12"
     assert task.labels == ()
 
 
+def test_factory_task_without_source_has_no_external_ref() -> None:
+    task = FactoryTask(title="Manual task", target_repository="cartunduaga06/finanza-ia")
+    assert task.source is None
+    assert task.external_ref is None
+
+
 def test_factory_task_rejects_invalid_input() -> None:
     with pytest.raises(ValueError):
-        FactoryTask(title="   ", repository_slug="cartunduaga06/finanza-ia")
+        FactoryTask(title="   ", target_repository="cartunduaga06/finanza-ia")
     with pytest.raises(ValueError):
-        FactoryTask(title="ok", repository_slug="not-a-slug")
+        FactoryTask(title="ok", target_repository="not-a-slug")
 
 
 def test_agent_run_gate_aggregation() -> None:

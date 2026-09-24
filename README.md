@@ -56,6 +56,48 @@ is verified, and *when* a human must step in. Its responsibilities:
 
 GitHub Issues are the initial source of work.
 
+## 1a. Issue intake pipeline (Phase 2A)
+
+The first operational capability turns GitHub Issues into durable local tasks:
+
+```
+GitHub Issue
+      ↓
+GitHubIssueSource
+      ↓
+FactoryTask
+      ↓
+IssueIntakeService
+      ↓
+TaskRepository
+      ↓
+SQLite
+```
+
+In words: `GitHubIssueSource` reads **open** issues labelled `factory-ready` over
+the GitHub REST API (read-only) and maps each into a `FactoryTask` carrying a
+structured `TaskSource`. `IssueIntakeService` — which knows nothing about GitHub
+or SQLite, only the `IssueSource` and `TaskRepository` contracts — persists the
+tasks that are new and leaves existing ones untouched. `SqliteTaskRepository`
+stores them locally so they survive a restart.
+
+Intake is manual and idempotent:
+
+```bash
+python -m factory intake
+```
+
+```
+Discovered: 3
+Created: 2
+Existing: 1
+Errors: 0
+```
+
+Running it again over the same issues reports `Created: 0` and creates no
+duplicates. See [section 4](#4-current-development-status) for what is and is not
+implemented.
+
 ## 2. Why it is separate from product repositories
 
 `ai-factory-lab` and `finanza-ia` have different lifespans, secrets and risk
@@ -92,19 +134,35 @@ multiple agents coexist. Full diagram and rationale:
 ## 4. Current development status
 
 **Phase 1 — repository baseline. Complete.**
+**Phase 2A — GitHub issue intake + persistence. Implemented on this branch.**
 
 Present today:
 
 - Repository structure and architectural documentation.
-- Typed domain model: `FactoryTask`, `AgentRun`, `Repository`, `Workspace`,
-  `PullRequest`, `QualityGate`, `AgentAdapter`.
+- Typed domain model: `FactoryTask`, `TaskSource`, `TaskTransition`, `AgentRun`,
+  `Repository`, `Workspace`, `PullRequest`, `QualityGate`, `AgentAdapter`.
 - A declarative task lifecycle with a validating state machine.
 - An environment-variable configuration model with credential redaction.
 - A Python 3.11+ skeleton with pytest, Ruff and mypy baselines.
+- **Read-only GitHub issue intake** (`GitHubIssueSource`) mapping `factory-ready`
+  issues into `FactoryTask` objects with structured source identity.
+- **SQLite persistence** (`SqliteTaskRepository`) for tasks and an auditable
+  transition history, with a database-level uniqueness constraint on source
+  identity.
+- An **idempotent, provider-agnostic `IssueIntakeService`** and the manual
+  `python -m factory intake` command.
 
-Not present yet: a scheduler, real GitHub/agent integrations, persistence, a
-dashboard or API. These are Phase 2+ work and are intentionally out of scope —
-see the [roadmap](#7-planned-roadmap).
+Not present yet — deliberately deferred:
+
+- **Agent execution.** No OpenHands or Codex dispatch, no workspace
+  provisioning, no PR creation. The `AgentAdapter` seam exists but has no
+  concrete engine.
+- **A scheduler or daemon.** Intake is a single manual run.
+- **A dashboard, API or FastAPI service.**
+- **PostgreSQL.** Persistence is SQLite only; `DATABASE_URL` rejects other
+  schemes.
+
+These are Phase 2B and later work. See the [roadmap](#7-planned-roadmap).
 
 ## 5. Local development setup
 
@@ -161,7 +219,8 @@ policy is stated in full — with the reasoning behind each boundary — in
 | Phase | Focus |
 |---|---|
 | 1 ✅ | Repository baseline: structure, domain model, state machine, config, tooling |
-| 2 | GitHub Issues intake → `FactoryTask`; persistence for tasks and runs |
+| 2A ✅ | GitHub Issue intake → `FactoryTask`; SQLite task + transition persistence |
+| 2B | Run lifecycle persistence; agent dispatch plumbing |
 | 3 | `AgentAdapter` implementation for OpenHands; isolated workspaces |
 | 4 | Quality gates (lint/tests/type checks) evaluated as part of the run |
 | 5 | PR creation and `WAITING_HUMAN` handoff; Codex adapter as a second engine |

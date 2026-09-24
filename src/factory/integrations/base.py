@@ -1,29 +1,21 @@
 """Base contracts for integrations.
 
-Only abstract interfaces live here for now — concrete GitHub and agent
-implementations arrive in Phase 2. Defining the contracts early keeps the
-orchestration layer decoupled from any single provider.
+``IssueSource`` and ``TaskRepository`` are declared in the domain (they are
+ports the orchestrator depends on). This module holds the remaining contracts
+that only integrations care about: the agent-engine seam and the pull-request
+sink. Defining the contracts early keeps the orchestration layer decoupled from
+any single provider.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 
 from factory.domain.enums import AgentKind
 from factory.domain.models import AgentRun, FactoryTask, PullRequest, Repository, Workspace
+from factory.domain.ports import IssueSource
 
-
-class IssueSource(ABC):
-    """A system that supplies work items (currently GitHub Issues)."""
-
-    @abstractmethod
-    def list_open_tasks(self, repository: Repository) -> Sequence[FactoryTask]:
-        """Return currently open work items for ``repository``."""
-
-    @abstractmethod
-    def get_task(self, repository: Repository, external_ref: str) -> FactoryTask:
-        """Fetch a single task by its external reference (e.g. issue number)."""
+__all__ = ["AgentAdapterBase", "IssueSource", "PullRequestSink"]
 
 
 class PullRequestSink(ABC):
