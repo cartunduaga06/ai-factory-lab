@@ -75,6 +75,30 @@ enforcement.
 - **Duplicate protection is enforced in storage.** The `tasks` table carries
   `UNIQUE(source_provider, source_repository, source_issue_number)`, so a bug in
   application-level checks cannot create two tasks for one issue.
+- **One active run per task is enforced in storage.** The `agent_runs` table
+  carries a partial unique index over non-terminal statuses, so two concurrent
+  dispatchers cannot both record an active run for one task.
+- **Engine errors are discarded at the adapter boundary.** `DispatchService`
+  converts an adapter failure into `AgentDispatchError` using sanitized
+  factory-domain data only (the task id and the persisted run id). The raw engine
+  exception is not retained: it is not embedded in the message, and it is not
+  chained as `__cause__` or `__context__`. Chaining is itself a leak vector —
+  Python renders a chained exception in the traceback, so an engine error string
+  that contains a token would reach logs or CLI output through the cause. Because
+  the `except` block captures nothing and exits before the sanitized error is
+  raised, `AgentDispatchError.__cause__` and `__context__` are both `None`, and no
+  formatted traceback contains the engine message. Only sanitized
+  factory-domain errors escape orchestration.
+- **The failure record carries no engine text.** The terminal `FAILED` run that
+  records a failed attempt stores only factory data — task id, adapter kind,
+  workspace, status and timestamps — never the engine's exception or summary, so
+  a token in an engine message has no persisted path either.
+- **Dispatch performs no remote writes.** `DispatchService` calls only the
+  `AgentAdapter` protocol. It records the branch a workspace *intends* to use and
+  creates nothing on GitHub; branch creation and PR handling are later phases.
+- **No execution credential in the factory runtime.** Dispatch consumes no push
+  credential. The factory's runtime credential stays read-only for intake, and
+  the execution credential remains outside this repository entirely.
 
 ## Credential separation
 

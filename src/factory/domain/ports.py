@@ -15,7 +15,14 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
 from factory.domain.enums import TaskStatus
-from factory.domain.models import FactoryTask, Repository, TaskSource, TaskTransition
+from factory.domain.models import (
+    AgentRun,
+    FactoryTask,
+    Repository,
+    TaskSource,
+    TaskTransition,
+    Workspace,
+)
 
 
 class IssueSource(ABC):
@@ -118,4 +125,63 @@ class TaskRepository(ABC):
         """Return the transition history for ``task_id``, oldest first."""
 
 
-__all__ = ["IssueSource", "TaskRepository"]
+class RunRepository(ABC):
+    """Persistence boundary for workspaces and agent runs.
+
+    Dispatch creates durable records for the isolated workspace a run operates in
+    and for the run itself. As with :class:`TaskRepository`, orchestration sees
+    only this interface, so the storage engine stays an implementation detail.
+
+    Implementations must guarantee the atomicity contract documented on
+    :meth:`save_run`.
+    """
+
+    @abstractmethod
+    def initialize(self) -> None:
+        """Create the schema if needed. Idempotent and safe to call repeatedly."""
+
+    @abstractmethod
+    def save_workspace(self, workspace: Workspace) -> Workspace:
+        """Persist a new ``workspace`` and return it.
+
+        Raises:
+            DuplicateRunError: if a workspace with the same ``workspace_id``
+                already exists.
+        """
+
+    @abstractmethod
+    def get_workspace(self, workspace_id: str) -> Workspace | None:
+        """Return the workspace with ``workspace_id``, or ``None`` if unknown."""
+
+    @abstractmethod
+    def save_run(self, run: AgentRun) -> AgentRun:
+        """Persist a new ``run`` and return it.
+
+        Persisting a run also persists its workspace when one is attached, in a
+        single atomic operation, so a run is never stored without the workspace it
+        claims to operate in.
+
+        Raises:
+            DuplicateRunError: if a run with the same ``run_id`` exists, or if the
+                task already has an active (non-terminal) run.
+        """
+
+    @abstractmethod
+    def get_run(self, run_id: str) -> AgentRun | None:
+        """Return the run with ``run_id``, or ``None`` if unknown."""
+
+    @abstractmethod
+    def list_runs(self, task_id: str | None = None) -> Sequence[AgentRun]:
+        """Return stored runs, optionally filtered to one task, oldest first."""
+
+    @abstractmethod
+    def find_active_run(self, task_id: str) -> AgentRun | None:
+        """Return the task's active run, or ``None``.
+
+        This is the deterministic lookup that makes dispatch idempotent: a task
+        that already has a run in a non-terminal status has been dispatched and
+        must not be dispatched again.
+        """
+
+
+__all__ = ["IssueSource", "RunRepository", "TaskRepository"]

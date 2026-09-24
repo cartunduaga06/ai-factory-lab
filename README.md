@@ -98,6 +98,44 @@ Running it again over the same issues reports `Created: 0` and creates no
 duplicates. See [section 4](#4-current-development-status) for what is and is not
 implemented.
 
+## 1b. Run lifecycle and dispatch (Phase 2B)
+
+The second capability claims a ready task and records the run it produces:
+
+```
+FactoryTask (READY)
+      ↓
+DispatchService  ──► AgentAdapter (protocol)
+      ↓                    ↓
+CLAIMED              AgentRun + Workspace
+      ↓                    ↓
+TaskRepository       RunRepository
+      ↓                    ↓
+            SQLite
+```
+
+In words: `DispatchService` requires the task to be `READY`, claims it with an
+atomic `READY → CLAIMED` compare-and-swap, builds an isolated `Workspace` for it,
+calls the `AgentAdapter` protocol, and persists the resulting `AgentRun` together
+with its workspace. The service reads only `AgentAdapter.kind`, so no engine is
+named anywhere in orchestration. `SqliteRunRepository` stores workspaces and runs
+so they survive a restart.
+
+The factory still ships **no real engine**. Phase 2B proves the seam with a
+deterministic fake adapter in tests; OpenHands arrives in Phase 3.
+
+Dispatch is safe to repeat. The idempotency rule is: **a task that already has an
+active run — one whose `RunStatus` is not terminal — has already been dispatched.**
+Such a task is left in `CLAIMED`, so the `READY` requirement refuses the retry and
+the original run is kept. The rule is enforced twice: by the `READY` check in
+`DispatchService`, and by a partial unique index (`uq_agent_runs_active_task`) that
+allows at most one non-terminal run per task. Terminal runs fall outside that
+index, so a genuine retry after a finished run is still possible.
+
+Two dispatchers racing for the same `READY` task resolve deterministically:
+exactly one wins, the loser receives a `DispatchConflictError`, and exactly one
+transition, one workspace and one run exist afterwards.
+
 ## 2. Why it is separate from product repositories
 
 `ai-factory-lab` and `finanza-ia` have different lifespans, secrets and risk
@@ -134,7 +172,8 @@ multiple agents coexist. Full diagram and rationale:
 ## 4. Current development status
 
 **Phase 1 — repository baseline. Complete.**
-**Phase 2A — GitHub issue intake + persistence. Implemented on this branch.**
+**Phase 2A — GitHub issue intake + persistence. Complete.**
+**Phase 2B — run lifecycle and dispatch. Implemented on this branch.**
 
 Present today:
 
@@ -151,18 +190,24 @@ Present today:
   identity.
 - An **idempotent, provider-agnostic `IssueIntakeService`** and the manual
   `python -m factory intake` command.
+- **A `DispatchService`** that claims a `READY` task through the atomic lifecycle
+  and records its run through the `AgentAdapter` protocol only.
+- **SQLite persistence for workspaces and agent runs**
+  (`SqliteRunRepository`), with one-active-run-per-task enforced by a partial
+  unique index.
 
 Not present yet — deliberately deferred:
 
-- **Agent execution.** No OpenHands or Codex dispatch, no workspace
-  provisioning, no PR creation. The `AgentAdapter` seam exists but has no
-  concrete engine.
-- **A scheduler or daemon.** Intake is a single manual run.
+- **A real agent engine.** No OpenHands or Codex integration, no branch creation
+  in target repositories, no PR creation. The `AgentAdapter` seam is exercised
+  only by a deterministic fake adapter in tests.
+- **A scheduler or daemon.** Intake is a single manual run; dispatch is called
+  programmatically.
 - **A dashboard, API or FastAPI service.**
 - **PostgreSQL.** Persistence is SQLite only; `DATABASE_URL` rejects other
   schemes.
 
-These are Phase 2B and later work. See the [roadmap](#7-planned-roadmap).
+These are Phase 3 and later work. See the [roadmap](#7-planned-roadmap).
 
 ## 5. Local development setup
 
@@ -220,7 +265,7 @@ policy is stated in full — with the reasoning behind each boundary — in
 |---|---|
 | 1 ✅ | Repository baseline: structure, domain model, state machine, config, tooling |
 | 2A ✅ | GitHub Issue intake → `FactoryTask`; SQLite task + transition persistence |
-| 2B | Run lifecycle persistence; agent dispatch plumbing |
+| 2B ✅ | Run lifecycle persistence (`AgentRun`, `Workspace`); `DispatchService` over the `AgentAdapter` protocol |
 | 3 | `AgentAdapter` implementation for OpenHands; isolated workspaces |
 | 4 | Quality gates (lint/tests/type checks) evaluated as part of the run |
 | 5 | PR creation and `WAITING_HUMAN` handoff; Codex adapter as a second engine |

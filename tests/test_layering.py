@@ -81,6 +81,19 @@ def test_infrastructure_does_not_import_orchestration() -> None:
     assert _violations("infrastructure", "factory.orchestration") == []
 
 
+def test_dispatch_depends_only_on_domain_contracts() -> None:
+    # The dispatch service is the Phase 2B execution seam: it may see the
+    # AgentAdapter protocol and the domain ports, but no storage engine and no
+    # concrete agent integration.
+    modules = _imports_in(SRC / "orchestration" / "dispatch.py")
+    forbidden = {
+        module
+        for module in modules
+        if module.startswith(("factory.integrations", "factory.infrastructure", "sqlite3"))
+    }
+    assert forbidden == set()
+
+
 @pytest.mark.parametrize(
     "package",
     ["domain", "orchestration", "integrations", "infrastructure"],

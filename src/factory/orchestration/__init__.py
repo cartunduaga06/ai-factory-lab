@@ -4,6 +4,7 @@ This layer coordinates work but depends only on the ``AgentAdapter`` protocol
 declared in the domain. It must never import a concrete agent engine directly.
 """
 
+from factory.orchestration.dispatch import DispatchService, branch_for
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
 from factory.orchestration.lifecycle import (
     TERMINAL_STATES,
@@ -17,11 +18,13 @@ from factory.orchestration.transitions import TaskLifecycleService
 __all__ = [
     "TERMINAL_STATES",
     "TRANSITIONS",
+    "DispatchService",
     "IntakeSummary",
     "InvalidTransitionError",
     "IssueIntakeService",
     "TaskLifecycleService",
     "TaskStateMachine",
+    "branch_for",
     "can_transition",
     "next_states",
 ]
