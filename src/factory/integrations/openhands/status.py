@@ -46,8 +46,10 @@ class OpenHandsExecutionStatus(StrEnum):
     DELETING = "deleting"
 
 
-#: The single source of truth for the mapping.
-_STATUS_MAP: dict[OpenHandsExecutionStatus, RunStatus] = {
+#: The single source of truth for the mapping. Keys are the states' string
+#: values; ``StrEnum`` members hash and compare as their underlying value, so a
+#: plain ``str`` lookup works without an ``Enum`` constructor that could raise.
+_STATUS_MAP: dict[str, RunStatus] = {
     OpenHandsExecutionStatus.IDLE: RunStatus.PENDING,
     OpenHandsExecutionStatus.RUNNING: RunStatus.RUNNING,
     OpenHandsExecutionStatus.PAUSED: RunStatus.RUNNING,
@@ -69,14 +71,17 @@ def map_status(raw: object) -> RunStatus:
         OpenHandsStatusError: if ``raw`` is not one of the states this adapter
             knows about. Failing loudly is deliberate: an unrecognized state must
             not be guessed into ``SUCCEEDED``.
+
+    The lookup never raises internally and the error is constructed outside any
+    ``Enum``/provider exception context, so ``raw`` is never retained: the
+    raised error has no message, attribute, ``__cause__`` or ``__context__``
+    carrying the untrusted external value.
     """
-    if not isinstance(raw, str):
-        raise OpenHandsStatusError(raw)
-    try:
-        state = OpenHandsExecutionStatus(raw)
-    except ValueError:
-        raise OpenHandsStatusError(raw) from None
-    return _STATUS_MAP[state]
+    if isinstance(raw, str):
+        status = _STATUS_MAP.get(raw)
+        if status is not None:
+            return status
+    raise OpenHandsStatusError()
 
 
 def is_terminal(run_status: RunStatus) -> bool:

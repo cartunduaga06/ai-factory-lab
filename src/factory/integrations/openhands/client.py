@@ -84,11 +84,15 @@ class OpenHandsStatusError(OpenHandsError):
 
     Raised rather than guessed: an unrecognized external status must never be
     silently normalized to success.
+
+    The message is a fixed, sanitized constant. An unrecognized status is
+    untrusted external input and could embed a token, credential, provider
+    message or other sensitive payload, so the offending value is neither stored
+    nor echoed, and no chained exception is retained.
     """
 
-    def __init__(self, raw: object) -> None:
-        super().__init__(f"unrecognized OpenHands execution status: {raw!r}")
-        self.raw = raw
+    def __init__(self) -> None:
+        super().__init__("OpenHands reported an unrecognized execution status")
 
 
 def redact(text: str, secrets: Iterable[str | None] = ()) -> str:

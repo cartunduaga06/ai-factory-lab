@@ -7,6 +7,8 @@ success.
 
 from __future__ import annotations
 
+import traceback
+
 import pytest
 
 from factory.domain.enums import RunStatus
@@ -55,6 +57,61 @@ def test_unknown_state_never_becomes_success() -> None:
     # An unrecognized state must not silently map to SUCCEEDED (or any status).
     with pytest.raises(OpenHandsStatusError):
         map_status("completed")
+
+
+def test_status_error_does_not_expose_a_secret_bearing_status() -> None:
+    secret = "ghp_supersecret123"
+    raw = f"unexpected-{secret}"
+
+    with pytest.raises(OpenHandsStatusError) as caught:
+        map_status(raw)
+
+    error = caught.value
+    # Neither the message nor its repr may carry the external value.
+    assert secret not in str(error)
+    assert secret not in repr(error)
+    assert raw not in str(error)
+    assert raw not in repr(error)
+    # No chained provider/Enum exception may keep the raw value reachable.
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    # A formatted traceback must be equally clean.
+    assert secret not in "".join(traceback.format_exception(error))
+    # The raw external value must not be retained anywhere on the error.
+    assert not hasattr(error, "raw")
+    assert all(secret not in repr(value) for value in vars(error).values())
+
+
+def test_status_error_sanitizes_a_non_string_malicious_payload() -> None:
+    secret = "ghp_supersecret123"
+
+    class _Payload:
+        def __init__(self) -> None:
+            self.token = secret
+
+        def __repr__(self) -> str:
+            return f"Payload(token={self.token!r})"
+
+        def __str__(self) -> str:
+            return self.token
+
+    with pytest.raises(OpenHandsStatusError) as caught:
+        map_status(_Payload())
+
+    error = caught.value
+    assert secret not in str(error)
+    assert secret not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert secret not in "".join(traceback.format_exception(error))
+    assert not hasattr(error, "raw")
+    assert all(secret not in repr(value) for value in vars(error).values())
+
+
+def test_unknown_status_with_secret_never_maps_to_succeeded() -> None:
+    with pytest.raises(OpenHandsStatusError) as caught:
+        map_status("unexpected-ghp_supersecret123")
+    assert not isinstance(caught.value, RunStatus)
 
 
 def test_terminal_classification_matches_factory_semantics() -> None:
