@@ -80,7 +80,7 @@ Two repositories are involved and must stay separate:
 ┌───────────────────────────┴───────────────────────────────────┐
 │                        orchestration                          │
 │  TaskStateMachine · lifecycle table · IssueIntakeService ·    │
-│  TaskLifecycleService                                         │
+│  TaskLifecycleService · DispatchService                       │
 │  depends on ports and the lifecycle, never a concrete engine, │
 │  GitHub client or SQLite implementation                       │
 └───────────────────────────▲───────────────────────────────────┘
@@ -93,13 +93,14 @@ Two repositories are involved and must stay separate:
                             │ depends on
 ┌───────────────────────────┴───────────────────────────────────┐
 │                      infrastructure                           │
-│  FactoryConfig (env) · logging · SqliteTaskRepository         │
+│  FactoryConfig (env) · logging · SqliteTaskRepository ·       │
+│  SqliteRunRepository                                          │
 └───────────────────────────────────────────────────────────────┘
 ```
 
 Dependencies point inward. Only `infrastructure` and `integrations` touch the
-outside world. `orchestration` knows GitHub and SQLite only as the `IssueSource`
-and `TaskRepository` ports declared in `domain/ports.py`.
+outside world. `orchestration` knows GitHub and SQLite only as the `IssueSource`,
+`TaskRepository` and `RunRepository` ports declared in `domain/ports.py`.
 
 ## Package layout
 
@@ -110,12 +111,13 @@ src/factory/
 ├── domain/
 │   ├── enums.py             # TaskStatus, RunStatus, QualityGateStatus, ...
 │   ├── models.py            # dataclasses + AgentAdapter protocol + TaskSource
-│   ├── errors.py            # domain errors (duplicate source, lost update, ...)
-│   └── ports.py             # IssueSource, TaskRepository contracts
+│   ├── errors.py            # domain errors (duplicate source, lost update, dispatch)
+│   └── ports.py             # IssueSource, TaskRepository, RunRepository contracts
 ├── orchestration/
 │   ├── lifecycle.py         # transition table (single source of truth)
 │   ├── machine.py           # TaskStateMachine, InvalidTransitionError
 │   ├── intake.py            # IssueIntakeService (provider-agnostic)
+│   ├── dispatch.py          # DispatchService (claim + workspace + run)
 │   └── transitions.py       # TaskLifecycleService (state machine + persistence)
 ├── integrations/
 │   ├── base.py              # PullRequestSink, AgentAdapterBase
@@ -127,7 +129,10 @@ src/factory/
     ├── logging.py           # configure_logging
     └── persistence/
         ├── schema.py        # idempotent SQLite DDL
-        └── sqlite.py        # SqliteTaskRepository (TaskRepository implementation)
+        ├── codec.py         # shared datetime encoding
+        ├── sqlite_base.py   # shared connection + idempotent initialize
+        ├── sqlite.py        # SqliteTaskRepository (TaskRepository implementation)
+        └── run_sqlite.py    # SqliteRunRepository (RunRepository implementation)
 ```
 
 ## Domain model
@@ -157,8 +162,9 @@ Design intent:
   parsed string. The triple `(provider, repository_slug, issue_number)` is the
   deterministic uniqueness key; `external_ref` exists for display and backward
   compatibility but is never authoritative.
-- **Ports, not implementations.** The domain declares `IssueSource` and
-  `TaskRepository`; GitHub lives in `integrations`, SQLite in `infrastructure`.
+- **Ports, not implementations.** The domain declares `IssueSource`,
+  `TaskRepository` and `RunRepository`; GitHub lives in `integrations`, SQLite in
+  `infrastructure`.
 - **Immutable value types.** `Repository`, `Workspace`, `PullRequest`,
   `QualityGate`, `TaskSource` and `TaskTransition` are frozen; `FactoryTask` and
   `AgentRun` are mutable because the lifecycle advances them.
@@ -285,20 +291,69 @@ safely so the repository runs with nothing configured:
 - Missing or empty values → `None`, never a real default credential.
 - Unresolved `<placeholder>` values (from `.env.example`) are treated as unset,
   so a copied example file cannot masquerade as configuration.
-- `DATABASE_URL` defaults to `sqlite:///./factory.db`. Phase 2A supports SQLite
-  only; a non-SQLite scheme raises `UnsupportedDatabaseError` when the URL is
-  parsed. Parsing is deferred until the database is actually needed, so loading
-  configuration never fails on an unusable URL.
+- `DATABASE_URL` defaults to `sqlite:///./factory.db`. SQLite is the only
+  supported backend; a non-SQLite scheme raises `UnsupportedDatabaseError` when
+  the URL is parsed. Parsing is deferred until the database is actually needed,
+  so loading configuration never fails on an unusable URL.
 - `FactoryConfig.redacted()` is the only supported way to log configuration.
 
 See `.env.example` for the full reference.
+
+## Run lifecycle and dispatch (Phase 2B)
+
+Dispatch turns a ready task into a durable run:
+
+```
+FactoryTask (READY)
+      ↓
+DispatchService        (orchestration — depends on AgentAdapter only)
+      ├──────────────► AgentAdapter.dispatch(task, workspace)
+      ↓
+READY → CLAIMED         (atomic compare-and-swap, history row committed with it)
+      ↓
+Workspace + AgentRun   (domain)
+      ↓
+RunRepository          (domain port)
+      ↓
+SQLite                 (infrastructure — workspaces + agent_runs tables)
+```
+
+### Claim atomicity
+
+The `READY → CLAIMED` claim goes through the same conditional-update
+compare-and-swap as every other transition. Two dispatchers cannot both win: the
+loser's guarded update matches zero rows and is refused. The loser surfaces a
+`DispatchConflictError` and creates no workspace and no run.
+
+### Idempotency
+
+The rule is: **a task that already has an active run has already been
+dispatched.** Because dispatch does not advance the task past `CLAIMED`, such a
+task fails the `READY` requirement on a retry and the original run is preserved.
+The rule is enforced twice:
+
+1. `DispatchService` requires `READY` before claiming.
+2. `agent_runs` carries a partial unique index, `uq_agent_runs_active_task`,
+   allowing at most one non-terminal (`PENDING`, `RUNNING`) run per task.
+
+Terminal runs fall outside the partial index, so a retry after a finished run
+remains possible.
+
+### Adapter boundary
+
+`DispatchService` reads only `AgentAdapter.kind` and calls `dispatch`. No engine
+is named in orchestration; Phase 2B ships no concrete adapter, and tests use a
+deterministic fake. An adapter failure is normalized into `AgentDispatchError`,
+with the engine's own exception chained as the cause so its message cannot leak
+into factory logs or CLI output. The failed attempt is still recorded as a
+terminal `FAILED` run so it stays auditable.
 
 ## Planned evolution
 
 | Phase | Addition |
 |---|---|
-| 2A | ✅ GitHub Issue intake + SQLite task/transition persistence (this PR) |
-| 2B | Run lifecycle persistence; agent dispatch plumbing (not yet started) |
+| 2A | ✅ GitHub Issue intake + SQLite task/transition persistence |
+| 2B | ✅ Run lifecycle persistence (`AgentRun`, `Workspace`) + `DispatchService` |
 | 3 | OpenHands `AgentAdapter`; workspace provisioning |
 | 4 | Gate evaluation inside `VALIDATING` |
 | 5 | PR creation, `WAITING_HUMAN` handoff; Codex adapter |

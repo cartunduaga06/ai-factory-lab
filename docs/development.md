@@ -64,8 +64,8 @@ proposed.
 
 ```
 src/factory/
-├── domain/          # pure typed model — no I/O; ports for IssueSource/TaskRepository
-├── orchestration/   # lifecycle, intake service, transition service
+├── domain/          # pure typed model — no I/O; IssueSource/TaskRepository/RunRepository ports
+├── orchestration/   # lifecycle, intake service, dispatch service, transition service
 ├── integrations/    # github/ (read-only IssueSource); agent adapters later
 └── infrastructure/  # configuration, logging, persistence/ (SQLite)
 tests/               # pure-logic tests, no network or real environment
@@ -77,8 +77,8 @@ Dependencies point inward: `infrastructure` and `integrations` depend on
 `orchestration`, which depends on `domain`. Never the reverse.
 
 - `domain` must not import from any other `factory` subpackage and must not
-  perform I/O. It declares the contracts (`IssueSource`, `TaskRepository`) that
-  other layers implement.
+  perform I/O. It declares the contracts (`IssueSource`, `TaskRepository`,
+  `RunRepository`) that other layers implement.
 - `orchestration` must not import a concrete agent engine, the GitHub client or
   SQLite — only protocols/ports and pure logic from `domain`.
 - `infrastructure` must not import `orchestration` (nor `integrations`).

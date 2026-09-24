@@ -85,6 +85,7 @@ All four checks must pass before a change is proposed. Python 3.11+.
 | `TaskSource` | Frozen `(provider, repository_slug, issue_number)` identity of a task. |
 | `TaskTransition` | Auditable record of one lifecycle status change. |
 | `AgentRun` | One attempt by one engine to complete a task. |
+| `RunRepository` | Persistence port for `Workspace` and `AgentRun`. |
 | `Repository` | A repo the factory knows about, tagged `CONTROL_PLANE` or `TARGET`. |
 | `Workspace` | An isolated per-run checkout on its own branch. |
 | `PullRequest` | Agent-produced PR awaiting mandatory human approval. |

@@ -75,6 +75,19 @@ enforcement.
 - **Duplicate protection is enforced in storage.** The `tasks` table carries
   `UNIQUE(source_provider, source_repository, source_issue_number)`, so a bug in
   application-level checks cannot create two tasks for one issue.
+- **One active run per task is enforced in storage.** The `agent_runs` table
+  carries a partial unique index over non-terminal statuses, so two concurrent
+  dispatchers cannot both record an active run for one task.
+- **Engine errors are normalized, not echoed.** `DispatchService` converts an
+  adapter failure into `AgentDispatchError` and chains the engine's exception as
+  the cause rather than embedding its message. An engine error string — which
+  could contain a token — cannot reach factory logs or CLI output.
+- **Dispatch performs no remote writes.** `DispatchService` calls only the
+  `AgentAdapter` protocol. It records the branch a workspace *intends* to use and
+  creates nothing on GitHub; branch creation and PR handling are later phases.
+- **No execution credential in the factory runtime.** Dispatch consumes no push
+  credential. The factory's runtime credential stays read-only for intake, and
+  the execution credential remains outside this repository entirely.
 
 ## Credential separation
 

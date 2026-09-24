@@ -24,52 +24,24 @@ import sqlite3
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 
 from factory.domain.enums import TaskStatus
 from factory.domain.errors import DuplicateTaskError, TaskStateChangedError
 from factory.domain.models import FactoryTask, TaskSource, TaskTransition
 from factory.domain.ports import TaskRepository
-from factory.infrastructure.persistence.schema import (
-    SCHEMA_STATEMENTS,
-    TASKS_TABLE,
-    TRANSITIONS_TABLE,
-)
+from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
+from factory.infrastructure.persistence.schema import TASKS_TABLE, TRANSITIONS_TABLE
+from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 
 # SQLite's own error class never escapes this module: callers see only the
 # domain errors below, keeping the storage engine an implementation detail.
 
 
-class SqliteTaskRepository(TaskRepository):
+class SqliteTaskRepository(SqliteRepository, TaskRepository):
     """Durable task and transition storage backed by a SQLite file."""
-
-    def __init__(self, path: str) -> None:
-        # ``:memory:`` is honoured; any other value is a filesystem path.
-        self._path = path
-
-    @property
-    def path(self) -> str:
-        return self._path
 
     def __repr__(self) -> str:
         return f"SqliteTaskRepository(path={self._path!r})"
-
-    # -- lifecycle ---------------------------------------------------------
-
-    def initialize(self) -> None:
-        """Create the schema if it does not exist. Safe to call repeatedly."""
-        if self._path != ":memory:":
-            Path(self._path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            for statement in SCHEMA_STATEMENTS:
-                conn.execute(statement)
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path)
-        conn.row_factory = sqlite3.Row
-        # Enforce the foreign key from transitions -> tasks.
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
 
     # -- TaskRepository ----------------------------------------------------
 
@@ -95,8 +67,8 @@ class SqliteTaskRepository(TaskRepository):
                         source.issue_number if source else None,
                         task.status.value,
                         _encode_labels(task.labels),
-                        _encode_datetime(task.created_at),
-                        _encode_datetime(task.updated_at),
+                        encode_datetime(task.created_at),
+                        encode_datetime(task.updated_at),
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -125,7 +97,7 @@ class SqliteTaskRepository(TaskRepository):
                     source.issue_number if source else None,
                     task.status.value,
                     _encode_labels(task.labels),
-                    _encode_datetime(task.updated_at),
+                    encode_datetime(task.updated_at),
                     task.task_id,
                 ),
             )
@@ -178,7 +150,7 @@ class SqliteTaskRepository(TaskRepository):
         untouched.
         """
         now = datetime.now(UTC)
-        timestamp = _encode_datetime(now)
+        timestamp = encode_datetime(now)
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
@@ -244,14 +216,6 @@ def _decode_labels(raw: str) -> tuple[str, ...]:
     return tuple(str(item) for item in decoded)
 
 
-def _encode_datetime(value: datetime) -> str:
-    return value.isoformat()
-
-
-def _decode_datetime(raw: str) -> datetime:
-    return datetime.fromisoformat(raw)
-
-
 def _is_unique_violation(exc: sqlite3.IntegrityError) -> bool:
     return "UNIQUE" in str(exc).upper()
 
@@ -275,8 +239,8 @@ def _row_to_task(row: sqlite3.Row) -> FactoryTask:
         body=row["body"],
         status=TaskStatus(row["status"]),
         labels=_decode_labels(row["labels"]),
-        created_at=_decode_datetime(row["created_at"]),
-        updated_at=_decode_datetime(row["updated_at"]),
+        created_at=decode_datetime(row["created_at"]),
+        updated_at=decode_datetime(row["updated_at"]),
     )
 
 
@@ -286,7 +250,7 @@ def _row_to_transition(row: sqlite3.Row) -> TaskTransition:
         from_status=TaskStatus(row["from_status"]),
         to_status=TaskStatus(row["to_status"]),
         transition_id=row["transition_id"],
-        occurred_at=_decode_datetime(row["occurred_at"]),
+        occurred_at=decode_datetime(row["occurred_at"]),
     )
 
 

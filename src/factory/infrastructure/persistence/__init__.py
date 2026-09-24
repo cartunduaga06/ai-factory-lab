@@ -1,10 +1,11 @@
 """Persistence adapters.
 
-Concrete storage lives here, behind the port declared in
-``factory.domain.ports``. Phase 2A ships a standard-library SQLite adapter for
-local development; the orchestration layer never imports it.
+Concrete storage lives here, behind the ports declared in
+``factory.domain.ports``. The factory ships standard-library SQLite adapters for
+local development; the orchestration layer never imports them.
 """
 
+from factory.infrastructure.persistence.run_sqlite import SqliteRunRepository
 from factory.infrastructure.persistence.sqlite import SqliteTaskRepository
 
-__all__ = ["SqliteTaskRepository"]
+__all__ = ["SqliteRunRepository", "SqliteTaskRepository"]
