@@ -169,27 +169,36 @@ class SqliteTaskRepository(TaskRepository):
     ) -> FactoryTask:
         """Atomically apply ``expected_from -> target`` and record history.
 
-        The status update and the history insert share one transaction, so a
-        failure in either leaves both untouched. ``expected_from`` is checked
-        against the freshly loaded row to guard against a lost update.
+        The compare-and-swap is a single conditional ``UPDATE`` whose predicate
+        includes ``expected_from``. SQLite serializes the writes and re-evaluates
+        the predicate against the committed state, so two writers sharing the same
+        ``expected_from`` cannot both succeed — the loser matches zero rows and is
+        refused with :class:`TaskStateChangedError`. The status update and the
+        history insert share one transaction, so a failure in either leaves both
+        untouched.
         """
+        now = datetime.now(UTC)
+        timestamp = _encode_datetime(now)
         with self._connect() as conn:
-            row = conn.execute(
-                f"SELECT * FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
-            ).fetchone()
-            if row is None:
-                raise KeyError(task_id)
-
-            task = _row_to_task(row)
-            if task.status is not expected_from:
-                raise TaskStateChangedError(task_id, expected_from, task.status)
-
-            now = datetime.now(UTC)
-            timestamp = _encode_datetime(now)
-            conn.execute(
-                f"UPDATE {TASKS_TABLE} SET status = ?, updated_at = ? WHERE task_id = ?",
-                (target.value, timestamp, task_id),
+            cursor = conn.execute(
+                f"""
+                UPDATE {TASKS_TABLE}
+                   SET status = ?, updated_at = ?
+                 WHERE task_id = ? AND status = ?
+                """,
+                (target.value, timestamp, task_id, expected_from.value),
             )
+            if cursor.rowcount == 0:
+                # The guarded write matched nothing: the task is either gone or its
+                # stored status moved on. Re-read inside the transaction to report
+                # which, and leave state and history untouched.
+                row = conn.execute(
+                    f"SELECT status FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(task_id)
+                raise TaskStateChangedError(task_id, expected_from, TaskStatus(row["status"]))
+
             conn.execute(
                 f"""
                 INSERT INTO {TRANSITIONS_TABLE} (
@@ -198,9 +207,12 @@ class SqliteTaskRepository(TaskRepository):
                 """,
                 (str(uuid.uuid4()), task_id, expected_from.value, target.value, timestamp),
             )
-            task.status = target
-            task.updated_at = now
-        return task
+
+            updated = conn.execute(
+                f"SELECT * FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        assert updated is not None  # the guarded UPDATE above proved the row exists
+        return _row_to_task(updated)
 
     def history(self, task_id: str) -> Sequence[TaskTransition]:
         with self._connect() as conn:

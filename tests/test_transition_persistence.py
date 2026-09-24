@@ -9,6 +9,7 @@ status update rolls back with it.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -180,3 +181,76 @@ def test_lost_update_is_refused(repo: SqliteTaskRepository) -> None:
 def test_apply_transition_on_unknown_task_raises(repo: SqliteTaskRepository) -> None:
     with pytest.raises(KeyError):
         repo.apply_transition("missing", TaskStatus.DISCOVERED, TaskStatus.READY)
+
+
+# -- concurrency -----------------------------------------------------------
+
+#: Rounds the race is replayed. Each round is independently deterministic; the
+#: repetition exercises the window without sleeps.
+CONCURRENCY_ROUNDS = 25
+
+
+def test_concurrent_transitions_sharing_expected_from_allow_one_winner(
+    repo: SqliteTaskRepository,
+) -> None:
+    """Two writers racing on the same ``expected_from``: exactly one may win.
+
+    Both threads open independent connections and issue a transition guarded by
+    ``DISCOVERED`` — one to ``READY``, one to ``CANCELLED`` — released together by
+    a barrier. Because the guard is part of the UPDATE predicate, only one can
+    match; the loser must raise :class:`TaskStateChangedError` and write nothing.
+    The stored status must agree with the single recorded history row.
+    """
+    from factory.domain.errors import TaskStateChangedError
+
+    for round_number in range(CONCURRENCY_ROUNDS):
+        task = FactoryTask(
+            title=f"Issue {round_number}",
+            target_repository="cartunduaga06/finanza-ia",
+            source=TaskSource("github", "cartunduaga06/ai-factory-lab", round_number + 1),
+        )
+        repo.save(task)
+
+        barrier = threading.Barrier(2)
+        outcomes: list[BaseException | None] = []
+        lock = threading.Lock()
+
+        def race(
+            target: TaskStatus,
+            *,
+            guarded_task: FactoryTask = task,
+            start: threading.Barrier = barrier,
+            results: list[BaseException | None] = outcomes,
+            results_lock: threading.Lock = lock,
+        ) -> None:
+            contender = SqliteTaskRepository(repo.path)
+            contender.initialize()
+            start.wait()
+            try:
+                contender.apply_transition(guarded_task.task_id, TaskStatus.DISCOVERED, target)
+                outcome: BaseException | None = None
+            except BaseException as exc:  # noqa: BLE001 - classified by assertions below
+                outcome = exc
+            with results_lock:
+                results.append(outcome)
+
+        threads = [
+            threading.Thread(target=race, args=(target,))
+            for target in (TaskStatus.READY, TaskStatus.CANCELLED)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert outcomes.count(None) == 1, outcomes
+        losers = [outcome for outcome in outcomes if isinstance(outcome, TaskStateChangedError)]
+        assert len(losers) == 1, outcomes
+
+        history = repo.history(task.task_id)
+        assert len(history) == 1
+        assert history[0].from_status is TaskStatus.DISCOVERED
+
+        stored = repo.get(task.task_id)
+        assert stored is not None
+        assert stored.status is history[0].to_status
