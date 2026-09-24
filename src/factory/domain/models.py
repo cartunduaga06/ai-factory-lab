@@ -328,20 +328,46 @@ class AgentRun:
 
 
 @dataclass(slots=True, frozen=True)
+class PublishedRevision:
+    """The durable identity of a workspace revision the factory published.
+
+    A workspace publication produces one commit on one isolated branch. Both
+    values are recorded so a retry can recognise what a previous attempt already
+    did instead of creating a second commit or a second push. This is a plain
+    value object: it carries no git or provider detail.
+    """
+
+    commit_sha: str
+    branch: str
+
+    def __post_init__(self) -> None:
+        if not self.commit_sha.strip():
+            raise ValueError("published revision must carry a commit sha")
+        if not self.branch.strip():
+            raise ValueError("published revision must carry a branch")
+
+
+@dataclass(slots=True, frozen=True)
 class PullRequest:
     """A pull request opened by an agent, awaiting mandatory human approval.
 
     The factory may open a PR but must never merge one. ``merged`` exists for
     bookkeeping only and is expected to be driven by an external human action.
+
+    ``run_id`` links the PR to the single agent run that produced it, which is
+    what makes publication idempotent: a run has at most one PR, and a retry
+    recovers that PR rather than opening another.
     """
 
     repository_slug: str
     head_branch: str
     base_branch: str
     title: str
+    body: str = ""
     number: int | None = None
     url: str | None = None
     task_id: str | None = None
+    run_id: str | None = None
     opened_at: datetime = field(default_factory=_utcnow)
     merged: bool = False
 
@@ -378,6 +404,7 @@ __all__ = [
     "AgentAdapter",
     "AgentRun",
     "FactoryTask",
+    "PublishedRevision",
     "PullRequest",
     "QualityGate",
     "QualityGateSpec",

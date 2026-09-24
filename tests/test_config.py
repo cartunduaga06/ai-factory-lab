@@ -262,3 +262,32 @@ def test_malformed_quality_gate_config_is_rejected(raw: str) -> None:
 
     with pytest.raises(InvalidGateSpecError):
         FactoryConfig.from_env({"FACTORY_QUALITY_GATES": raw})
+
+
+# -- Phase 5 configuration -------------------------------------------------
+
+
+def test_write_token_is_unset_by_default_and_masked_when_configured() -> None:
+    from factory.infrastructure.config import DEFAULT_TARGET_BRANCH
+
+    assert FactoryConfig.from_env({}).github_write_token is None
+    assert FactoryConfig.from_env({}).target_default_branch == DEFAULT_TARGET_BRANCH
+
+    secret = "MY_PRIVATE_PUSH_PASSWORD_93726"
+    config = FactoryConfig.from_env({"GITHUB_WRITE_TOKEN": secret})
+    assert config.github_write_token == secret
+    redacted = config.redacted()
+    assert redacted["github_write_token"] == "***"
+    assert secret not in repr(redacted)
+
+
+def test_target_default_branch_is_configurable() -> None:
+    config = FactoryConfig.from_env({"FACTORY_TARGET_DEFAULT_BRANCH": "develop"})
+    assert config.target_default_branch == "develop"
+    assert config.redacted()["target_default_branch"] == "develop"
+
+
+def test_write_token_placeholder_is_treated_as_unset() -> None:
+    config = FactoryConfig.from_env({"GITHUB_WRITE_TOKEN": "<your-write-token>"})
+    assert config.github_write_token is None
+    assert config.redacted()["github_write_token"] is None

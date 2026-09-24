@@ -41,18 +41,22 @@ integrations  ──┼──► orchestration ──► domain
   **Must not import a concrete agent engine** — only the `AgentAdapter` protocol
   — and must not import `subprocess`, `sqlite3` or git. `DispatchService`
   depends on the `WorkspaceProvisioner` port; `RunTrackingService` on
-  `QualityGateRunner`.
+  `QualityGateRunner`; `PublicationService` on the `WorkspacePublisher`,
+  `PullRequestSink` and `PullRequestRepository` ports.
 - `factory/integrations` — GitHub, OpenHands, workspace and gate adapters.
   Translates external APIs into domain types. `integrations/openhands/` talks to
   the OpenHands Agent Server over HTTP through an injectable transport; the
   factory never imports the OpenHands SDK, and no OpenHands code belongs in
   `domain` or `orchestration`. `integrations/workspace/git.py` creates one Git
-  worktree per run; `integrations/gates/local.py` runs argv-only, shell-free,
-  bounded gate processes.
+  worktree per run; `integrations/workspace/git_publish.py` commits and pushes
+  exactly the isolated branch; `integrations/gates/local.py` runs argv-only,
+  shell-free, bounded gate processes. `integrations/github/pull_requests.py` and
+  `write_client.py` are the only Phase 5 write path, and expose no merge.
 - `factory/infrastructure` — configuration, logging, persistence. May not import
   `orchestration`. Core-domain `ports` live in `domain/ports.py`:
-  `IssueSource`, `TaskRepository`, `RunRepository`, `WorkspaceProvisioner` and
-  `QualityGateRunner`. Concrete GitHub behaviour belongs in
+  `IssueSource`, `TaskRepository`, `RunRepository`, `WorkspaceProvisioner`,
+  `QualityGateRunner`, `WorkspacePublisher`, `PullRequestSink` and
+  `PullRequestRepository`. Concrete GitHub behaviour belongs in
   `integrations/github`; concrete SQLite behaviour belongs in
   `infrastructure/persistence`.
 
@@ -101,16 +105,21 @@ All four checks must pass before a change is proposed. Python 3.11+.
 | `Repository` | A repo the factory knows about, tagged `CONTROL_PLANE` or `TARGET`. |
 | `Workspace` | An isolated per-run checkout on its own branch, keyed by its own id. |
 | `WorkspaceProvisioner` | Port that materialises a `Workspace` into a physical checkout. |
-| `PullRequest` | Agent-produced PR awaiting mandatory human approval. |
+| `PullRequest` | Agent-produced PR awaiting mandatory human approval; carries `run_id`. |
+| `PublishedRevision` | Frozen `(commit_sha, branch)` identity of a published workspace revision. |
 | `QualityGate` | A named, verifiable check (lint, tests, typecheck) with `required`/`is_green`. |
 | `QualityGateSpec` | Declarative argv definition of a gate supplied by the application layer. |
 | `QualityGateRunner` | Port that executes a `QualityGateSpec` in a `Workspace`. |
+| `WorkspacePublisher` | Port that commits a workspace and pushes its isolated branch. |
+| `PullRequestSink` | Port to find/open pull requests. Deliberately has no merge. |
+| `PullRequestRepository` | Port that durably stores the PRs the factory opens. |
 | `ValidationOutcome` | Deterministic result of validating a run (`PENDING`/`READY_FOR_NEXT_PHASE`/`GATES_FAILED`). |
 | `AgentAdapter` | Engine-agnostic execution interface (OpenHands, Codex, ...). |
 | `IssueIntakeService` | Idempotent intake: eligible issues → persisted tasks. |
 | `TaskLifecycleService` | Validates a transition, then persists status + history atomically. |
 | `DispatchService` | Claims a task, provisions a per-run workspace, starts the run. |
 | `RunTrackingService` | Refreshes an active run, drives lifecycle, evaluates gates on success. |
+| `PublicationService` | Publishes a validated run: commit, push, PR, persist, `WAITING_HUMAN`. Never merges. |
 
 ## Task lifecycle
 

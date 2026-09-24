@@ -172,17 +172,95 @@ class WorkspaceProvisioningError(DispatchError):
         self.workspace_id = workspace_id
 
 
+class PublicationError(FactoryError):
+    """A run's work could not be published.
+
+    The base class for every controlled Phase 5 publication failure. Like the
+    dispatch errors, it carries factory-domain identifiers only and never retains
+    the underlying git, HTTP or storage exception as ``__cause__`` or
+    ``__context__``: those messages can embed a remote URL, a response body or a
+    credential, and Python would render them in a traceback.
+    """
+
+
+class TaskNotPublishableError(PublicationError):
+    """A task or run does not meet the guard conditions for publication.
+
+    Raised before any commit, push or PR when the run is not ready to publish:
+    the task is not ``VALIDATING``, the run does not belong to the task, it is not
+    the latest run, it did not succeed, its validation outcome is not
+    ``READY_FOR_NEXT_PHASE``, or it has no workspace. A red or incomplete
+    validation is never published.
+    """
+
+    def __init__(self, task_id: str, run_id: str, reason: str) -> None:
+        super().__init__(f"run {run_id} for task {task_id} is not publishable: {reason}")
+        self.task_id = task_id
+        self.run_id = run_id
+        self.reason = reason
+
+
+class RevisionNotPublishableError(PublicationError):
+    """The workspace has nothing the factory may publish.
+
+    Raised when the isolated branch has no publishable diff relative to its base
+    and carries no previous factory publication commit, so publishing would
+    produce an empty, meaningless commit (or an empty PR). The message names the
+    workspace only.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} has no publishable changes")
+        self.workspace_id = workspace_id
+
+
+class UnsafeRemoteError(PublicationError):
+    """A git remote URL carries embedded credentials and was refused.
+
+    The factory never authenticates through a credential-bearing remote: it must
+    not reuse, mutate or persist a userinfo-embedded URL. Publication stops before
+    any authenticated operation runs. The message names the workspace only — never
+    the URL, which is the very thing that could contain a secret.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} remote configuration is unsafe")
+        self.workspace_id = workspace_id
+
+
+class DuplicatePullRequestError(FactoryError):
+    """A pull request would duplicate existing persisted PR state.
+
+    Raised by persistence when the run already has a stored PR, or when an active
+    publication already owns the same target repository and head branch. The
+    uniqueness is enforced by storage — the defense-in-depth guard behind
+    one-PR-per-run publication idempotency — not only by an application check.
+    The message names factory identifiers only.
+    """
+
+    def __init__(self, run_id: str, repository_slug: str, head_branch: str) -> None:
+        super().__init__(f"run {run_id} already has a persisted pull request")
+        self.run_id = run_id
+        self.repository_slug = repository_slug
+        self.head_branch = head_branch
+
+
 __all__ = [
     "AgentCollectError",
     "AgentDispatchError",
     "DispatchConflictError",
     "DispatchError",
+    "DuplicatePullRequestError",
     "DuplicateRunError",
     "DuplicateTaskError",
     "FactoryError",
     "PersistenceError",
+    "PublicationError",
+    "RevisionNotPublishableError",
+    "TaskNotPublishableError",
     "TaskNotReadyError",
     "TaskSourceError",
     "TaskStateChangedError",
+    "UnsafeRemoteError",
     "WorkspaceProvisioningError",
 ]

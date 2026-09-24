@@ -13,6 +13,11 @@ from factory.orchestration.lifecycle import (
     next_states,
 )
 from factory.orchestration.machine import InvalidTransitionError, TaskStateMachine
+from factory.orchestration.publication import (
+    PublicationResult,
+    PublicationService,
+    build_pull_request_body,
+)
 from factory.orchestration.tracking import RunRefresh, RunTrackingService
 from factory.orchestration.transitions import TaskLifecycleService
 
@@ -23,11 +28,14 @@ __all__ = [
     "IntakeSummary",
     "InvalidTransitionError",
     "IssueIntakeService",
+    "PublicationResult",
+    "PublicationService",
     "RunRefresh",
     "RunTrackingService",
     "TaskLifecycleService",
     "TaskStateMachine",
     "branch_for",
+    "build_pull_request_body",
     "can_transition",
     "next_states",
 ]

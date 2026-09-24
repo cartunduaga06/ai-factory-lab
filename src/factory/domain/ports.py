@@ -18,6 +18,8 @@ from factory.domain.enums import TaskStatus
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
+    PublishedRevision,
+    PullRequest,
     QualityGate,
     QualityGateSpec,
     Repository,
@@ -247,10 +249,104 @@ class QualityGateRunner(ABC):
         """
 
 
+class WorkspacePublisher(ABC):
+    """Publishes a validated run's workspace revision to an isolated branch.
+
+    This is the engine- and provider-agnostic seam for Phase 5. The orchestration
+    layer must not run git itself: it asks this port to commit the workspace's
+    changes and push its branch, and receives back a
+    :class:`~factory.domain.models.PublishedRevision` (commit sha + branch).
+
+    The port is deliberately tiny because publishing is the most dangerous thing
+    the factory does. Implementations own every safety requirement: argv-only git
+    commands with no shell, a bounded timeout, hook and credential isolation, a
+    sanitized error, and a refusal to push anything but the workspace's own
+    isolated branch.
+    """
+
+    @abstractmethod
+    def publish(self, task: FactoryTask, run: AgentRun) -> PublishedRevision:
+        """Commit ``run``'s workspace changes (if any) and push its branch.
+
+        The operation must be idempotent: a retry reuses the commit and branch a
+        previous attempt already produced rather than creating a second commit or
+        a new branch identity. A branch with no publishable diff and no previous
+        factory commit is refused.
+
+        Raises:
+            PublicationError: if the revision cannot be published safely. The
+                error is sanitized — it never carries raw process output, a
+                command line, a remote URL or a credential.
+        """
+
+
+class PullRequestSink(ABC):
+    """A provider that hosts pull requests (currently GitHub).
+
+    The factory may open and look up pull requests but must never merge one, so
+    this contract deliberately exposes **no** merge, close or issue-mutation
+    operation. GitHub is one implementation; the orchestration layer depends only
+    on this interface.
+    """
+
+    @abstractmethod
+    def find_open_pull_request(
+        self, repository: Repository, head_branch: str
+    ) -> PullRequest | None:
+        """Return the open PR whose head is ``head_branch``, if one exists."""
+
+    @abstractmethod
+    def open_pull_request(self, pull_request: PullRequest) -> PullRequest:
+        """Open a pull request and return it enriched with its number and URL.
+
+        Implementations must be retry-safe: if an open PR for the same head
+        branch already exists, that PR is returned instead of a second one being
+        created.
+        """
+
+
+class PullRequestRepository(ABC):
+    """Persistence boundary for the pull requests the factory opens.
+
+    A PR created for a run is durable: it must survive a process restart so
+    publication is idempotent and a crash after the PR was created but before it
+    was recorded can be reconciled. As with the other ports, orchestration sees
+    only this interface.
+
+    ``save`` is deliberately not an upsert that silently changes identity: a
+    second, different PR for a run (or for the same target repository/head
+    branch) is refused by storage rather than overwriting the first.
+    """
+
+    @abstractmethod
+    def initialize(self) -> None:
+        """Create the schema if needed. Idempotent and safe to call repeatedly."""
+
+    @abstractmethod
+    def save(self, pull_request: PullRequest) -> PullRequest:
+        """Persist a newly discovered/created ``pull_request`` and return it.
+
+        Raises:
+            DuplicatePullRequestError: if the run already has a persisted PR, or
+                if an active publication already owns this repository/head branch.
+        """
+
+    @abstractmethod
+    def get_for_run(self, run_id: str) -> PullRequest | None:
+        """Return the PR persisted for ``run_id``, or ``None`` if unknown."""
+
+    @abstractmethod
+    def find_by_branch(self, repository_slug: str, head_branch: str) -> PullRequest | None:
+        """Return the PR persisted for ``repository_slug`` + ``head_branch``."""
+
+
 __all__ = [
     "IssueSource",
+    "PullRequestRepository",
+    "PullRequestSink",
     "QualityGateRunner",
     "RunRepository",
     "TaskRepository",
     "WorkspaceProvisioner",
+    "WorkspacePublisher",
 ]

@@ -1,10 +1,9 @@
 """Base contracts for integrations.
 
-``IssueSource`` and ``TaskRepository`` are declared in the domain (they are
-ports the orchestrator depends on). This module holds the remaining contracts
-that only integrations care about: the agent-engine seam and the pull-request
-sink. Defining the contracts early keeps the orchestration layer decoupled from
-any single provider.
+``IssueSource``, ``PullRequestSink`` and the other ports the orchestrator
+depends on are declared in the domain, so orchestration never imports this
+package. This module keeps the agent-engine convenience base class and
+re-exports the port contracts for backward compatibility with earlier phases.
 """
 
 from __future__ import annotations
@@ -12,28 +11,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from factory.domain.enums import AgentKind
-from factory.domain.models import AgentRun, FactoryTask, PullRequest, Repository, Workspace
-from factory.domain.ports import IssueSource
+from factory.domain.models import AgentRun, FactoryTask, Workspace
+from factory.domain.ports import IssueSource, PullRequestSink
 
 __all__ = ["AgentAdapterBase", "IssueSource", "PullRequestSink"]
-
-
-class PullRequestSink(ABC):
-    """A system that receives results (currently GitHub Pull Requests).
-
-    Implementations may open and update pull requests. They must never merge:
-    merge is a human action (see ``docs/security.md``).
-    """
-
-    @abstractmethod
-    def open_pull_request(self, pull_request: PullRequest) -> PullRequest:
-        """Open a pull request and return it enriched with its number and URL."""
-
-    @abstractmethod
-    def find_open_pull_request(
-        self, repository: Repository, head_branch: str
-    ) -> PullRequest | None:
-        """Return the existing open PR for ``head_branch``, if any."""
 
 
 class AgentAdapterBase(ABC):

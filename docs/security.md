@@ -155,6 +155,65 @@ The Phase 4 stop line is itself a safety property: a green validation leaves the
 task in `VALIDATING` and **does not** open a PR. Nothing in this phase commits,
 pushes, opens a pull request, merges or deploys.
 
+## Publication and the human gate (Phase 5)
+
+Phase 5 is where the factory first writes to a remote, so the boundary is again
+the easiest thing to get wrong. Every one of these is enforced in code:
+
+- **Publication is guarded twice.** It is refused before any write unless the
+  run is the task's latest, `SUCCEEDED`, and `READY_FOR_NEXT_PHASE` with an
+  isolated workspace. A red or incomplete validation never produces a commit, a
+  push or a PR, and a superseded run never publishes.
+- **Only the isolated branch is committed and pushed.** The commit happens inside
+  `Workspace.path` only — never in the source checkout, never on `main`. The
+  destination ref is validated explicitly, `main`/`master`/`HEAD`/`+`-refs and
+  option-like refs are refused, and no force option is ever used. History is
+  never rewritten.
+- **Git hooks cannot run with factory credentials.** Factory-controlled commit
+  and push run with `core.hooksPath=/dev/null` passed inline, so a
+  repository-controlled hook never executes with the write credential in the
+  environment.
+- **The write token is separate and never implicit.** `GITHUB_WRITE_TOKEN` is
+  distinct from the read-only intake token; a publication that needs a write
+  credential but has none fails rather than falling back to the read credential.
+  OpenHands/LLM credentials remain separate again, and the write token is never
+  handed to quality-gate subprocesses.
+- **No credential in a URL, argv or a file.** HTTPS authentication uses a
+  temporary `GIT_ASKPASS` helper that contains no credential and reads it from a
+  process environment variable; the helper is removed after the single push. A
+  remote URL that already carries userinfo is refused with `UnsafeRemoteError`
+  before any authenticated operation, and the URL is never surfaced. The token is
+  never written to a URL, `.git/config`, argv, a log or an exception.
+- **Git failures are sanitized, not chained.** `PublicationError` carries only
+  factory identifiers. Git echoes failing commands and can print a
+  credential-bearing remote URL, so raw stdout/stderr and the underlying
+  exception are discarded — never attached as `__cause__`/`__context__`, which
+  Python would render in a traceback.
+- **GitHub response bodies are untrusted.** For every Phase 5 write, a GitHub
+  error body (`message`, `error`, `detail`, an arbitrary network reason) is never
+  propagated. `GitHubWriteError` carries only the numeric HTTP status, and it is
+  raised outside the `except` block so the discarded exception is not retained as
+  `__context__` either. No token, header value, body or URL credential can reach
+  `str(error)`, `repr(error)` or a traceback.
+- **PR content is deterministic and bounded.** A PR title is derived from the task
+  title, bounded and stripped of non-printables. The body carries only safe
+  factory metadata — source Issue reference, task/run ids, validation outcome and
+  gate names/statuses. No raw agent output, provider payload, stdout/stderr,
+  environment value or secret is ever copied into a PR.
+- **No empty publication.** A branch with no publishable diff and no previous
+  factory commit is refused rather than committed empty, and an empty PR is never
+  opened.
+- **Publication is idempotent and restart-safe.** A persisted PR short-circuits
+  the flow, and every step is retry-safe, so a crash at any point (commit/push/PR
+  create/persist/lifecycle) is recovered without a duplicate commit, push, PR row
+  or transition. Storage enforces one PR per run and one publication identity per
+  branch.
+- **No automatic merge, ever.** The factory may commit, push, open a PR, persist
+  it and move a task to `WAITING_HUMAN` — and stops there. There is no merge,
+  auto-merge, close, deploy or Issue-mutation operation in `PullRequestSink`,
+  `GitHubWriteClient` or the domain. Automatic merge is not merely discouraged;
+  it is unreachable.
+
 ## Credential separation
 
 Two different credentials exist around this project and must never be conflated:
@@ -167,6 +226,19 @@ Two different credentials exist around this project and must never be conflated:
 The factory runtime credential requires no write scope. The execution credential
 is used only by the environment that builds the factory; it is never written into
 configuration, code, test fixtures, documentation, logs or a git remote URL.
+
+Phase 5 adds a third, **write-scoped** credential for the factory itself:
+
+| Credential | Purpose |
+|---|---|
+| `GITHUB_WRITE_TOKEN` | push an isolated branch and open a PR on the target repository |
+
+It is deliberately separate from `GITHUB_TOKEN`: the intake credential is
+read-only, and the factory must not implicitly reuse a read-scoped token for a
+write. A publication that needs a write credential but has none fails rather than
+falling back to the intake token. The write token is masked by
+`--show-config`, is never in a URL, argv or `.git/config`, and is never handed to
+quality-gate subprocesses.
 
 ## Secrets handling
 

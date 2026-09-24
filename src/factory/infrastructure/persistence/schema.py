@@ -26,16 +26,22 @@ Design notes:
   storage-level guard behind the Phase 4 one-workspace-per-run isolation
   invariant. Terminal statuses are excluded from the active-run index, so retries
   after a finished run are still possible.
+* ``pull_requests`` records the PR the factory opened for a run. ``run_id`` is
+  ``UNIQUE`` (one PR per run) and ``(repository_slug, head_branch)`` is
+  ``UNIQUE`` (one active publication identity per branch), the storage-level
+  guards behind publication idempotency. Initialization only adds tables and
+  indexes: it never drops or rewrites existing data.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
 WORKSPACES_TABLE = "workspaces"
 AGENT_RUNS_TABLE = "agent_runs"
+PULL_REQUESTS_TABLE = "pull_requests"
 
 #: Run statuses that count as "active" for the one-active-run-per-task guard.
 #: These must match the non-terminal members of
@@ -135,27 +141,66 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_{AGENT_RUNS_TABLE}_workspace
  WHERE workspace_id IS NOT NULL;
 """
 
+#: Pull requests the factory opened. ``run_id`` is ``UNIQUE`` so a run can have at
+#: most one persisted PR — the storage guard behind publication idempotency.
+#: ``merged`` is bookkeeping only: the factory never performs the merge.
+CREATE_PULL_REQUESTS = f"""
+CREATE TABLE IF NOT EXISTS {PULL_REQUESTS_TABLE} (
+    pull_request_id  TEXT PRIMARY KEY,
+    run_id           TEXT NOT NULL,
+    task_id          TEXT,
+    repository_slug  TEXT NOT NULL,
+    head_branch      TEXT NOT NULL,
+    base_branch      TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    number           INTEGER,
+    url              TEXT,
+    merged           INTEGER NOT NULL DEFAULT 0,
+    opened_at        TEXT NOT NULL,
+    CONSTRAINT uq_pull_requests_run UNIQUE (run_id),
+    CONSTRAINT fk_pull_requests_run
+        FOREIGN KEY (run_id) REFERENCES {AGENT_RUNS_TABLE} (run_id) ON DELETE CASCADE
+);
+"""
+
+CREATE_PULL_REQUESTS_RUN_INDEX = (
+    f"CREATE INDEX IF NOT EXISTS ix_{PULL_REQUESTS_TABLE}_run_id ON {PULL_REQUESTS_TABLE} (run_id);"
+)
+
+#: One active publication identity per unique target repository/head branch. A
+#: second *different* PR for the same branch is refused rather than silently
+#: superseding the first, so a retry can never fork publication identity.
+CREATE_PULL_REQUESTS_BRANCH_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS uq_{PULL_REQUESTS_TABLE}_repository_branch
+    ON {PULL_REQUESTS_TABLE} (repository_slug, head_branch);
+"""
+
 #: Statements applied, in order, by :func:`initialize_schema`.
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS,
     CREATE_TRANSITIONS,
     CREATE_WORKSPACES,
     CREATE_AGENT_RUNS,
+    CREATE_PULL_REQUESTS,
     CREATE_TASKS_STATUS_INDEX,
     CREATE_TASKS_CREATED_INDEX,
     CREATE_TRANSITIONS_TASK_INDEX,
     CREATE_AGENT_RUNS_TASK_INDEX,
     CREATE_AGENT_RUNS_ACTIVE_INDEX,
     CREATE_AGENT_RUNS_WORKSPACE_INDEX,
+    CREATE_PULL_REQUESTS_RUN_INDEX,
+    CREATE_PULL_REQUESTS_BRANCH_INDEX,
 )
 
 __all__ = [
     "ACTIVE_RUN_STATUSES",
     "AGENT_RUNS_TABLE",
     "CREATE_AGENT_RUNS",
+    "CREATE_PULL_REQUESTS",
     "CREATE_TASKS",
     "CREATE_TRANSITIONS",
     "CREATE_WORKSPACES",
+    "PULL_REQUESTS_TABLE",
     "SCHEMA_STATEMENTS",
     "SCHEMA_VERSION",
     "TASKS_TABLE",
