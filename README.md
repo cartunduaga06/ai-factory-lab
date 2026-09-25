@@ -237,7 +237,10 @@ matches the intended publication exactly — same target repository, head
 repository, head branch, base branch and `state == open` — and otherwise opens
 one, with an explicit base branch (`FACTORY_TARGET_DEFAULT_BRANCH`, default
 `main`). A PR with the right head branch but a different base, or a head from a
-fork, is never adopted. The PR
+fork, is never adopted. The same bar applies to a create: the POST response is
+accepted only when it confirms that identity, so an inconsistent, closed or
+malformed success payload is resolved through an exact lookup (recovering the
+real PR if one exists) instead of being persisted. The PR
 body carries only safe factory metadata — source Issue reference, task/run ids,
 validation outcome and gate names/statuses. GitHub's own response text is never
 propagated: only the numeric HTTP status crosses the client boundary.
@@ -343,8 +346,9 @@ Present today:
   commit and non-force push of exactly the workspace's branch.
 - **A `GitHubPullRequestSink`** and write-capable `GitHubWriteClient`: recover an
   open PR only on an exact provider identity match (repository, head repository,
-  head branch, base branch) or open one, with only the numeric status escaping a
-  failed request.
+  head branch, base branch) or open one — validating a successful create response
+  against the same identity rather than trusting it — with only the numeric status
+  escaping a failed request.
 - **Durable PR persistence** (`SqlitePullRequestRepository`): one PR per run,
   enforced by a unique index and surviving a repository reopen.
 

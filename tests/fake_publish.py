@@ -56,8 +56,16 @@ class FakePullRequestSink(PullRequestSink):
     can never be recovered as the factory's.
     """
 
-    def __init__(self, *, fail_create: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_create: bool = False,
+        corrupt_create: PullRequest | None = None,
+    ) -> None:
         self._fail_create = fail_create
+        #: When set, ``open_pull_request`` returns this instead of a consistent PR,
+        #: simulating a malformed/inconsistent successful provider response.
+        self._corrupt_create = corrupt_create
         #: Open PRs keyed by (repository_slug, head_branch, base_branch).
         self._open: dict[tuple[str, str, str], PullRequest] = {}
         self.find_calls = 0
@@ -74,6 +82,8 @@ class FakePullRequestSink(PullRequestSink):
         self.create_calls += 1
         if self._fail_create:
             raise PublicationError("provider refused to open a pull request")
+        if self._corrupt_create is not None:
+            return self._corrupt_create
         base_branch = pull_request.base_branch or "main"
         key = (pull_request.repository_slug, pull_request.head_branch, base_branch)
         existing = self._open.get(key)

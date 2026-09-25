@@ -493,6 +493,61 @@ def test_wrong_base_provider_pr_is_not_adopted_and_a_correct_one_is_opened(
     assert result.task_status is TaskStatus.WAITING_HUMAN
 
 
+def test_inconsistent_create_response_does_not_persist_or_advance(
+    db_path: str, tmp_path: Path
+) -> None:
+    """A create response with the wrong base is refused, not trusted."""
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+    publisher = FakeWorkspacePublisher()
+    sink = FakePullRequestSink(
+        corrupt_create=PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="release",  # provider confirms the wrong base
+            title="inconsistent",
+            number=60,
+            url="https://example.invalid/60",
+        )
+    )
+
+    with pytest.raises(PublicationError):
+        _service(db_path, publisher=publisher, sink=sink).publish(task.task_id, run.run_id)
+
+    assert _prs(db_path).get_for_run(run.run_id) is None
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_exact_create_response_is_persisted_and_advances(db_path: str, tmp_path: Path) -> None:
+    """An exact create response is accepted directly and drives the lifecycle."""
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+    sink = FakePullRequestSink(
+        corrupt_create=PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="main",
+            title="exact",
+            number=61,
+            url="https://example.invalid/61",
+        )
+    )
+
+    result = _service(db_path, sink=sink).publish(task.task_id, run.run_id)
+
+    assert result.pull_request.number == 61
+    assert result.pull_request.base_branch == "main"
+    assert result.task_status is TaskStatus.WAITING_HUMAN
+    stored = _prs(db_path).get_for_run(run.run_id)
+    assert stored is not None and stored.number == 61
+
+
 def test_unknown_task_or_run_raises_key_error(db_path: str, tmp_path: Path) -> None:
     tasks = _tasks(db_path)
     task = _task(tasks)

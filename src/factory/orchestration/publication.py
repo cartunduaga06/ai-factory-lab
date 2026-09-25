@@ -247,12 +247,7 @@ class PublicationService:
         if found is not None:
             # Defense in depth: the sink contract promises exact identity, but the
             # service must not re-label a recovered PR with the configured base.
-            if (
-                found.repository_slug != workspace.repository_slug
-                or found.head_branch != head_branch
-                or found.base_branch != self._base_branch
-            ):
-                raise PullRequestIdentityError(task.task_id, run.run_id)
+            self._require_provider_identity(task, run, found, head_branch)
             return _with_factory_metadata(found, task, run, self._base_branch)
 
         requested = PullRequest(
@@ -265,7 +260,27 @@ class PublicationService:
             run_id=run.run_id,
         )
         opened = self._sink.open_pull_request(requested)
+        # The same bar applies to a created PR: a provider response that does not
+        # confirm the expected identity must not be persisted or advance the task.
+        self._require_provider_identity(task, run, opened, head_branch)
         return _with_factory_metadata(opened, task, run, self._base_branch)
+
+    def _require_provider_identity(
+        self,
+        task: FactoryTask,
+        run: AgentRun,
+        pull_request: PullRequest,
+        head_branch: str,
+    ) -> None:
+        """Refuse a provider PR whose repository/head/base is not this run's."""
+        workspace = run.workspace
+        assert workspace is not None  # guarded by _require_publishable
+        if (
+            pull_request.repository_slug != workspace.repository_slug
+            or pull_request.head_branch != head_branch
+            or pull_request.base_branch != self._base_branch
+        ):
+            raise PullRequestIdentityError(task.task_id, run.run_id)
 
     def _persist(self, pull_request: PullRequest) -> PullRequest:
         """Persist the PR idempotently.

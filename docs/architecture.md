@@ -437,6 +437,17 @@ instead of reconciling the task to `WAITING_HUMAN`. A mismatched stored row is
 never overwritten, and a failed-create fallback that finds only a wrong-base or
 fork PR raises a sanitized `PublicationError`.
 
+The same bar applies to a **successful create**. The `POST /pulls` response is
+untrusted provider text, so it is mapped through the same structural matcher as a
+lookup: it is accepted only when it confirms `state == open`, the head
+repository/ref and the base repository/ref, and a positive integer number.
+Factory identity is never synthesized over a response that does not match. A
+wrong, closed or malformed success payload is instead resolved through an exact
+lookup (recovering the real open PR if one exists); if none exists, publication
+fails with a sanitized `PublicationError` and the task stays `VALIDATING`.
+`PublicationService` re-validates the created PR's repository/head/base as
+defense in depth before persisting it.
+
 ### Pull request persistence
 
 `SqlitePullRequestRepository` stores one PR per run. The `pull_requests` table

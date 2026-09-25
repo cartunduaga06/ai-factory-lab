@@ -8,11 +8,13 @@ The sink can **find** an open PR by head branch and **open** one. It deliberatel
 exposes no merge, close or issue-mutation operation: the factory may open a PR and
 then stops at ``WAITING_HUMAN``.
 
-Remote response bodies are untrusted provider text. This adapter reads only the
-trusted numeric ``number`` and the PR ``url`` to enrich a
-:class:`~factory.domain.models.PullRequest`; it never copies a GitHub ``message``,
-``error`` or ``detail`` into an exception. Numeric HTTP status is the only error
-detail that escapes, via
+Remote response bodies are untrusted provider text. A PR — whether found or
+returned by a create — is accepted only when its response confirms the full
+expected identity (``state == open``, head repository/ref, base repository/ref),
+so a malformed or inconsistent response can never be persisted. This adapter
+reads only trusted structural fields from a matching response; it never copies a
+GitHub ``message``, ``error`` or ``detail`` into an exception. Numeric HTTP
+status is the only error detail that escapes, via
 :class:`~factory.integrations.github.write_client.GitHubWriteError`.
 """
 
@@ -67,7 +69,10 @@ class GitHubPullRequestSink(PullRequestSink):
         — but only when it matches the *full* expected identity (repository, head
         repository, head branch, base branch). The create failure is reduced to its
         numeric status before any fallback, so no provider text is inspected or
-        propagated.
+        propagated. A *successful* response is held to the same identity bar: it is
+        accepted only when it confirms that identity, and a wrong, closed or
+        malformed success payload is resolved through an exact lookup instead of
+        being trusted.
         """
         base_branch = self._expected_base(pull_request)
         payload, status = self._attempt(
@@ -91,15 +96,36 @@ class GitHubPullRequestSink(PullRequestSink):
             # retained as ``__context__``: only the sanitized status escapes.
             raise PublicationError(f"GitHub pull request create failed with status {status}")
 
-        mapped = _map_created(payload, pull_request)
-        if mapped is not None:
-            return mapped
+        return self._created_or_existing(payload, pull_request, base_branch)
 
+    def _created_or_existing(
+        self, payload: Any, pull_request: PullRequest, base_branch: str
+    ) -> PullRequest:  # noqa: ANN401
+        """Accept a create response only when it confirms the exact identity.
+
+        The POST response is untrusted: it is mapped through the *same* structural
+        identity matcher used for lookups, so ``state == open``, the head
+        repository/ref and the base repository/ref must all match the intended
+        publication. Factory identity is never synthesized over a response that
+        does not match. When it does not match, the matcher's absence is turned
+        into an exact lookup; a wrong, closed or malformed response therefore
+        cannot be persisted, and an inconsistent response still recovers the real
+        PR if one exists.
+        """
+        created = _map_pull_request(
+            payload,
+            pull_request.repository_slug,
+            pull_request.head_branch,
+            base_branch,
+        )
+        if created is not None:
+            return _with_metadata(created, pull_request)
         existing = self._find_open(
             pull_request.repository_slug, pull_request.head_branch, base_branch
         )
         if existing is not None:
             return _with_metadata(existing, pull_request)
+        # Factory ids only; the provider body is never copied into the message.
         raise PublicationError(f"pull request for run {pull_request.run_id} could not be opened")
 
     # -- internals ---------------------------------------------------------
@@ -139,25 +165,6 @@ class GitHubPullRequestSink(PullRequestSink):
             return action(), None
         except GitHubWriteError as exc:
             return None, exc.status
-
-
-def _map_created(payload: Any, pull_request: PullRequest) -> PullRequest | None:  # noqa: ANN401
-    number = payload.get("number") if isinstance(payload, Mapping) else None
-    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
-        return None
-    url = payload.get("html_url")
-    return PullRequest(
-        repository_slug=pull_request.repository_slug,
-        head_branch=pull_request.head_branch,
-        base_branch=pull_request.base_branch or DEFAULT_BASE_BRANCH,
-        title=pull_request.title,
-        body=pull_request.body,
-        number=number,
-        url=url if isinstance(url, str) else None,
-        task_id=pull_request.task_id,
-        run_id=pull_request.run_id,
-        opened_at=pull_request.opened_at,
-    )
 
 
 def _map_pull_request(

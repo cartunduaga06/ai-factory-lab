@@ -235,6 +235,13 @@ the easiest thing to get wrong. Every one of these is enforced in code:
   raised outside the `except` block so the discarded exception is not retained as
   `__context__` either. No token, header value, body or URL credential can reach
   `str(error)`, `repr(error)` or a traceback.
+- **A created PR is validated like a recovered one.** A successful
+  `POST /pulls` response is untrusted: it is accepted only when it structurally
+  confirms the full expected identity (`state == open`, head repository/ref, base
+  repository/ref, positive integer number) through the same matcher used for
+  lookups. A wrong, closed or malformed success payload is never persisted and
+  never advances the task; it is resolved through an exact lookup or refused with
+  a sanitized error. Factory identity is never synthesized over provider text.
 - **PR content is deterministic and bounded.** A PR title is derived from the task
   title, bounded and stripped of non-printables. The body carries only safe
   factory metadata — source Issue reference, task/run ids, validation outcome and

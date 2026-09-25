@@ -34,6 +34,7 @@ def _open_payload(
     branch: str = "factory/task/ws",
     base: str = "main",
     *,
+    state: str = "open",
     head_repo: str = "example/target",
     base_repo: str | None = "example/target",
 ) -> dict[str, object]:
@@ -42,7 +43,7 @@ def _open_payload(
         base_obj["repo"] = {"full_name": base_repo}
     return {
         "number": number,
-        "state": "open",
+        "state": state,
         "html_url": f"https://github.com/example/target/pull/{number}",
         "title": "Add widget",
         "head": {"ref": branch, "repo": {"full_name": head_repo}},
@@ -234,8 +235,129 @@ def test_create_422_with_matching_pr_is_recovered() -> None:
     assert opened.base_branch == "main"
 
 
+# -- created identity: the success response is untrusted -------------------
+
+
+def _request(**overrides: object) -> PullRequest:
+    values: dict[str, object] = {
+        "repository_slug": "example/target",
+        "head_branch": "factory/task/ws",
+        "base_branch": "main",
+        "title": "Add widget",
+        "task_id": "task-1",
+        "run_id": "run-1",
+    }
+    values.update(overrides)
+    return PullRequest(**values)  # type: ignore[arg-type]
+
+
+def test_exact_create_success_is_accepted_without_a_fallback_lookup() -> None:
+    """REGRESSION 6: a consistent success payload is taken directly."""
+    transport = FakeWriteTransport([_open_payload(21)])
+    opened = _sink(transport).open_pull_request(_request())
+
+    assert opened.number == 21
+    assert opened.repository_slug == "example/target"
+    assert opened.head_branch == "factory/task/ws"
+    assert opened.base_branch == "main"
+    assert opened.task_id == "task-1" and opened.run_id == "run-1"
+    # One POST, no GET.
+    assert [r[0] for r in transport.requests] == ["POST"]
+
+
+def test_create_success_with_wrong_base_is_refused() -> None:
+    """REGRESSION 1: a success payload into the wrong base is not trusted."""
+    transport = FakeWriteTransport([_open_payload(22, base="release"), []])
+    with pytest.raises(PublicationError) as caught:
+        _sink(transport).open_pull_request(_request())
+
+    assert [r[0] for r in transport.requests] == ["POST", "GET"]
+    error = caught.value
+    assert error.__cause__ is None and error.__context__ is None
+    assert "release" not in str(error)
+
+
+def test_create_success_with_wrong_head_repository_is_refused() -> None:
+    """REGRESSION 2: a success payload whose head is a fork is not trusted."""
+    transport = FakeWriteTransport([_open_payload(23, head_repo="example/fork"), []])
+    with pytest.raises(PublicationError) as caught:
+        _sink(transport).open_pull_request(_request())
+    assert [r[0] for r in transport.requests] == ["POST", "GET"]
+    assert "fork" not in str(caught.value)
+
+
+def test_create_success_with_closed_state_is_refused() -> None:
+    """REGRESSION 3: a success payload for a closed PR is not trusted."""
+    transport = FakeWriteTransport([_open_payload(24, state="closed"), []])
+    with pytest.raises(PublicationError):
+        _sink(transport).open_pull_request(_request())
+
+
+def test_create_success_with_closed_state_recovers_the_open_pr() -> None:
+    """A closed success payload must still recover the real open PR."""
+    transport = FakeWriteTransport([_open_payload(24, state="closed"), [_open_payload(25)]])
+    opened = _sink(transport).open_pull_request(_request())
+    assert opened.number == 25
+    assert opened.base_branch == "main"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"number": 30, "state": "open", "base": {"ref": "main"}},  # head missing
+        {"number": 30, "state": "open", "head": {"ref": "factory/task/ws"}},  # base missing
+        {"number": 30, "head": {"ref": "factory/task/ws"}},  # state missing
+        {"state": "open", "head": {"ref": "factory/task/ws"}},  # number missing
+        {"number": 0, "state": "open", "head": {"ref": "factory/task/ws"}},  # number <= 0
+        {"number": "30", "state": "open", "head": {"ref": "factory/task/ws"}},  # number not int
+    ],
+)
+def test_malformed_create_success_is_refused_and_looked_up(payload: dict[str, object]) -> None:
+    """REGRESSION 4: an incomplete success payload never becomes a PR."""
+    transport = FakeWriteTransport([payload, []])
+    with pytest.raises(PublicationError):
+        _sink(transport).open_pull_request(_request())
+    assert [r[0] for r in transport.requests] == ["POST", "GET"]
+
+
+def test_inconsistent_create_success_recovers_the_exact_open_pr() -> None:
+    """REGRESSION 5: a bad success payload still recovers the real PR."""
+    transport = FakeWriteTransport([_open_payload(26, base="release"), [_open_payload(24)]])
+    opened = _sink(transport).open_pull_request(_request())
+
+    assert opened.number == 24
+    assert opened.base_branch == "main"
+
+
+def test_malformed_create_success_never_leaks_provider_text() -> None:
+    """ERROR SECURITY: provider body text must not reach an error or a traceback."""
+    transport = FakeWriteTransport(
+        [
+            {
+                "number": 31,
+                "state": "open",
+                "head": {"ref": SECRET, "repo": {"full_name": SECRET}},
+                "base": {"ref": SECRET, "repo": {"full_name": SECRET}},
+                "html_url": f"https://user:{SECRET}@evil.example/{SECRET}",
+                "message": SECRET,
+                "error": SECRET,
+            },
+            [],
+        ]
+    )
+    with pytest.raises(PublicationError) as caught:
+        _sink(transport).open_pull_request(_request())
+
+    error = caught.value
+    rendered = f"{error!s}{error!r}{traceback.format_exception(error)}"
+    assert SECRET not in rendered
+    assert "evil.example" not in rendered
+    assert error.__cause__ is None and error.__context__ is None
+    assert SECRET not in repr(_sink(transport))
+
+
 def test_base_branch_is_explicit() -> None:
-    transport = FakeWriteTransport([_open_payload(41)])
+    transport = FakeWriteTransport([_open_payload(41, base="release")])
     requested = PullRequest(
         repository_slug="example/target",
         head_branch="factory/task/ws",
