@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from factory.domain.enums import RepositoryRole, RunStatus, TaskStatus, ValidationOutcome
 from factory.domain.errors import (
     DuplicatePullRequestError,
+    PullRequestIdentityError,
     TaskNotPublishableError,
     TaskStateChangedError,
     ValidatedRevisionMissingError,
@@ -123,7 +124,7 @@ class PublicationService:
         run = self._require_run(run_id, task_id)
         self._require_publishable(task, run)
 
-        existing = self._existing_pull_request(run)
+        existing = self._existing_pull_request(task, run)
         if existing is not None:
             # A previous pass already published: recover it and reconcile the
             # lifecycle (crash windows C-F). No new commit, push or PR.
@@ -199,15 +200,40 @@ class PublicationService:
 
     # -- publication steps -------------------------------------------------
 
-    def _existing_pull_request(self, run: AgentRun) -> PullRequest | None:
-        """Return a PR already persisted for this run or its target branch."""
-        persisted = self._pull_requests.get_for_run(run.run_id)
-        if persisted is not None:
-            return persisted
+    def _existing_pull_request(self, task: FactoryTask, run: AgentRun) -> PullRequest | None:
+        """Return a PR already persisted for this run or its target branch.
+
+        The persisted identity is re-verified against the intended publication
+        before it can short-circuit the flow. A row whose repository, head branch
+        or base branch does not match — or that belongs to another run/task — is
+        not the factory's publication: it is refused rather than silently
+        reconciled to ``WAITING_HUMAN`` or overwritten.
+        """
         workspace = run.workspace
-        if workspace is None:
+        persisted = self._pull_requests.get_for_run(run.run_id)
+        if persisted is None and workspace is not None:
+            persisted = self._pull_requests.find_by_branch(
+                workspace.repository_slug, workspace.branch
+            )
+        if persisted is None:
             return None
-        return self._pull_requests.find_by_branch(workspace.repository_slug, workspace.branch)
+        self._require_persisted_identity(task, run, persisted)
+        return persisted
+
+    def _require_persisted_identity(
+        self, task: FactoryTask, run: AgentRun, pull_request: PullRequest
+    ) -> None:
+        """Refuse a stored PR whose identity is not this run's publication."""
+        workspace = run.workspace
+        assert workspace is not None  # guarded by _require_publishable
+        if (
+            pull_request.repository_slug != workspace.repository_slug
+            or pull_request.head_branch != workspace.branch
+            or pull_request.base_branch != self._base_branch
+            or (pull_request.run_id is not None and pull_request.run_id != run.run_id)
+            or (pull_request.task_id is not None and pull_request.task_id != task.task_id)
+        ):
+            raise PullRequestIdentityError(task.task_id, run.run_id)
 
     def _resolve_pull_request(
         self, task: FactoryTask, run: AgentRun, head_branch: str
@@ -217,8 +243,16 @@ class PublicationService:
         assert workspace is not None  # guarded by _require_publishable
         repository = Repository(slug=workspace.repository_slug, role=RepositoryRole.TARGET)
 
-        found = self._sink.find_open_pull_request(repository, head_branch)
+        found = self._sink.find_open_pull_request(repository, head_branch, self._base_branch)
         if found is not None:
+            # Defense in depth: the sink contract promises exact identity, but the
+            # service must not re-label a recovered PR with the configured base.
+            if (
+                found.repository_slug != workspace.repository_slug
+                or found.head_branch != head_branch
+                or found.base_branch != self._base_branch
+            ):
+                raise PullRequestIdentityError(task.task_id, run.run_id)
             return _with_factory_metadata(found, task, run, self._base_branch)
 
         requested = PullRequest(
@@ -254,7 +288,19 @@ class PublicationService:
                 )
             if stored is None:
                 raise
+            self._require_stored_matches(stored, pull_request)
             return stored
+
+    @staticmethod
+    def _require_stored_matches(stored: PullRequest, intended: PullRequest) -> None:
+        """Refuse a stored row that is not the PR just resolved for this run."""
+        if (
+            stored.repository_slug != intended.repository_slug
+            or stored.head_branch != intended.head_branch
+            or stored.base_branch != intended.base_branch
+            or (stored.run_id is not None and stored.run_id != intended.run_id)
+        ):
+            raise PullRequestIdentityError(intended.task_id or "", intended.run_id or "")
 
     def _reconcile(self, task_id: str) -> tuple[TaskStatus, bool]:
         """Drive an already-published task to ``WAITING_HUMAN``, idempotently.
@@ -337,11 +383,16 @@ def _bounded_title(title: str) -> str:
 def _with_factory_metadata(
     pull_request: PullRequest, task: FactoryTask, run: AgentRun, base_branch: str
 ) -> PullRequest:
-    """Return ``pull_request`` with factory-owned identity and a bounded title/body."""
+    """Return ``pull_request`` with factory-owned identity and a bounded title/body.
+
+    The provider's base branch is preserved when it is set; ``base_branch`` is
+    only the fallback for a create response that omitted it. Callers validate the
+    provider identity first, so this never relabels a mismatched PR.
+    """
     return PullRequest(
         repository_slug=pull_request.repository_slug,
         head_branch=pull_request.head_branch,
-        base_branch=base_branch,
+        base_branch=pull_request.base_branch or base_branch,
         title=_bounded_title(pull_request.title or task.title),
         body=build_pull_request_body(task, run),
         number=pull_request.number,

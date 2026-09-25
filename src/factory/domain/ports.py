@@ -322,9 +322,15 @@ class PullRequestSink(ABC):
 
     @abstractmethod
     def find_open_pull_request(
-        self, repository: Repository, head_branch: str
+        self, repository: Repository, head_branch: str, base_branch: str
     ) -> PullRequest | None:
-        """Return the open PR whose head is ``head_branch``, if one exists."""
+        """Return the open PR from ``head_branch`` into ``base_branch``, if any.
+
+        The match is exact on provider identity: the repository, the head branch
+        and the base branch must all agree, and the head must come from the same
+        repository (not a fork). A PR with the right head branch but a different
+        base is not the factory's publication.
+        """
 
     @abstractmethod
     def open_pull_request(self, pull_request: PullRequest) -> PullRequest:

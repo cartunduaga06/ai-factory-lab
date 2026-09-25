@@ -43,36 +43,48 @@ class GitHubPullRequestSink(PullRequestSink):
         return f"GitHubPullRequestSink(client={self._client!r})"
 
     def find_open_pull_request(
-        self, repository: Repository, head_branch: str
+        self, repository: Repository, head_branch: str, base_branch: str
     ) -> PullRequest | None:
-        """Return the open PR whose head is ``head_branch``, if one exists.
+        """Return the open PR from ``head_branch`` into ``base_branch``, if any.
 
-        The head is scoped to the repository owner, so a same-named branch in
-        another fork is never matched by accident.
+        Exact provider identity is required: ``state == open``, ``head.ref`` ==
+        ``head_branch``, ``head.repo.full_name`` == the target repository,
+        ``base.ref`` == ``base_branch``, and (when GitHub supplies it)
+        ``base.repo.full_name`` == the target repository. A PR with the right head
+        branch but a different base, or a head from a fork, is not a match — so a
+        same-named branch elsewhere can never be mistaken for the factory's
+        publication. If an earlier item does not match, the search continues.
         """
-        return self._find_open(repository.slug, head_branch)
+        if not base_branch:
+            return None
+        return self._find_open(repository.slug, head_branch, base_branch)
 
     def open_pull_request(self, pull_request: PullRequest) -> PullRequest:
         """Open a PR, or return the existing open one for the same head branch.
 
         Retry-safe: if GitHub rejects the create because an open PR already exists
-        for this head branch, that PR is looked up and returned instead of failing.
-        The create failure is reduced to its numeric status before any fallback, so
-        no provider text is inspected or propagated.
+        for this head branch, that PR is looked up and returned instead of failing
+        — but only when it matches the *full* expected identity (repository, head
+        repository, head branch, base branch). The create failure is reduced to its
+        numeric status before any fallback, so no provider text is inspected or
+        propagated.
         """
+        base_branch = self._expected_base(pull_request)
         payload, status = self._attempt(
             lambda: self._client.post(
                 f"/repos/{pull_request.repository_slug}/pulls",
                 {
                     "title": _bound_title(pull_request.title),
                     "head": pull_request.head_branch,
-                    "base": pull_request.base_branch or DEFAULT_BASE_BRANCH,
+                    "base": base_branch,
                     "body": pull_request.body,
                 },
             )
         )
         if status is not None:
-            existing = self._find_open(pull_request.repository_slug, pull_request.head_branch)
+            existing = self._find_open(
+                pull_request.repository_slug, pull_request.head_branch, base_branch
+            )
             if existing is not None:
                 return _with_metadata(existing, pull_request)
             # Raised outside the ``except`` block so the client's exception is not
@@ -83,14 +95,22 @@ class GitHubPullRequestSink(PullRequestSink):
         if mapped is not None:
             return mapped
 
-        existing = self._find_open(pull_request.repository_slug, pull_request.head_branch)
+        existing = self._find_open(
+            pull_request.repository_slug, pull_request.head_branch, base_branch
+        )
         if existing is not None:
             return _with_metadata(existing, pull_request)
         raise PublicationError(f"pull request for run {pull_request.run_id} could not be opened")
 
     # -- internals ---------------------------------------------------------
 
-    def _find_open(self, repository_slug: str, head_branch: str) -> PullRequest | None:
+    @staticmethod
+    def _expected_base(pull_request: PullRequest) -> str:
+        return pull_request.base_branch or DEFAULT_BASE_BRANCH
+
+    def _find_open(
+        self, repository_slug: str, head_branch: str, base_branch: str
+    ) -> PullRequest | None:
         owner = repository_slug.split("/", 1)[0]
         payload = self._get(
             f"/repos/{repository_slug}/pulls",
@@ -99,7 +119,7 @@ class GitHubPullRequestSink(PullRequestSink):
         if not isinstance(payload, Sequence) or isinstance(payload, str):
             return None
         for item in payload:
-            mapped = _map_pull_request(item, repository_slug, head_branch)
+            mapped = _map_pull_request(item, repository_slug, head_branch, base_branch)
             if mapped is not None:
                 return mapped
         return None
@@ -129,7 +149,7 @@ def _map_created(payload: Any, pull_request: PullRequest) -> PullRequest | None:
     return PullRequest(
         repository_slug=pull_request.repository_slug,
         head_branch=pull_request.head_branch,
-        base_branch=pull_request.base_branch,
+        base_branch=pull_request.base_branch or DEFAULT_BASE_BRANCH,
         title=pull_request.title,
         body=pull_request.body,
         number=number,
@@ -140,7 +160,19 @@ def _map_created(payload: Any, pull_request: PullRequest) -> PullRequest | None:
     )
 
 
-def _map_pull_request(item: Any, repository_slug: str, head_branch: str) -> PullRequest | None:  # noqa: ANN401
+def _map_pull_request(
+    item: Any,  # noqa: ANN401
+    repository_slug: str,
+    head_branch: str,
+    base_branch: str,
+) -> PullRequest | None:
+    """Map a provider PR only when its full identity matches the expectation.
+
+    Untrusted: every field is read structurally and a missing, malformed or
+    different value makes the item *not* a match (so the caller keeps searching),
+    never an error. Provider payload content is never copied into a result or an
+    exception.
+    """
     if not isinstance(item, Mapping):
         return None
     if item.get("state") != "open":
@@ -148,22 +180,49 @@ def _map_pull_request(item: Any, repository_slug: str, head_branch: str) -> Pull
     number = item.get("number")
     if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
         return None
+
     head = item.get("head")
-    branch = head.get("ref") if isinstance(head, Mapping) else None
-    if branch != head_branch:
+    if not isinstance(head, Mapping):
         return None
+    if head.get("ref") != head_branch:
+        return None
+    if _repo_full_name(head.get("repo")) != repository_slug:
+        return None
+
     base = item.get("base")
-    base_branch = base.get("ref") if isinstance(base, Mapping) else None
+    if not isinstance(base, Mapping):
+        return None
+    if base.get("ref") != base_branch:
+        return None
+    base_repo = base.get("repo")
+    # ``base.repo`` is not always present; when GitHub does supply it, it must be
+    # the target repository too.
+    if base_repo is not None and _repo_full_name(base_repo) != repository_slug:
+        return None
+
     title = item.get("title")
     url = item.get("html_url")
     return PullRequest(
         repository_slug=repository_slug,
         head_branch=head_branch,
-        base_branch=base_branch if isinstance(base_branch, str) else DEFAULT_BASE_BRANCH,
+        base_branch=base_branch,
         title=_bound_title(title if isinstance(title, str) else "factory pull request"),
         number=number,
         url=url if isinstance(url, str) else None,
     )
+
+
+def _repo_full_name(repo: Any) -> str | None:  # noqa: ANN401
+    """Return ``repo.full_name`` when it is a well-formed ``owner/name`` string."""
+    if not isinstance(repo, Mapping):
+        return None
+    full_name = repo.get("full_name")
+    if not isinstance(full_name, str) or full_name.count("/") != 1:
+        return None
+    owner, name = full_name.split("/", 1)
+    if not owner or not name:
+        return None
+    return full_name
 
 
 def _with_metadata(found: PullRequest, source: PullRequest) -> PullRequest:

@@ -104,7 +104,7 @@ def test_github_sink_error_never_carries_the_secret() -> None:
         )
     )
     with pytest.raises(PublicationError) as caught:
-        sink.find_open_pull_request(_repository(), "factory/task-1/ws-1")
+        sink.find_open_pull_request(_repository(), "factory/task-1/ws-1", "main")
     _assert_secret_absent(caught.value)
     assert SECRET not in repr(sink)
 

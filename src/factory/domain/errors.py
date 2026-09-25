@@ -259,6 +259,25 @@ class WorkspaceRevisionError(FactoryError):
         self.workspace_id = workspace_id
 
 
+class PullRequestIdentityError(PublicationError):
+    """A recovered pull request's identity is not the intended publication.
+
+    Raised when the provider PR returned by a lookup — or a PR already persisted
+    for the run — has the right head branch but a different repository, head
+    repository, or base branch than the factory pushed. Such a PR is not the
+    factory's publication, so the task is not reconciled to ``WAITING_HUMAN`` and
+    the stored identity is never overwritten. The message names factory ids only;
+    no provider payload, URL or repository text is included.
+    """
+
+    def __init__(self, task_id: str, run_id: str) -> None:
+        super().__init__(
+            f"pull request for run {run_id} of task {task_id} does not match the publication"
+        )
+        self.task_id = task_id
+        self.run_id = run_id
+
+
 class UnsafeRemoteError(PublicationError):
     """A git remote URL is unsafe to authenticate through and was refused.
 

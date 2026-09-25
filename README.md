@@ -232,8 +232,12 @@ revision, and the push then sources that verified commit SHA directly
 (`<commit_sha>:refs/heads/<branch>`) rather than the mutable local branch, so a
 concurrent move of the branch cannot change what reaches the remote.
 
-`GitHubPullRequestSink` finds an open PR by head branch or opens one, with an
-explicit base branch (`FACTORY_TARGET_DEFAULT_BRANCH`, default `main`). The PR
+`GitHubPullRequestSink` recovers an open PR only when its provider identity
+matches the intended publication exactly — same target repository, head
+repository, head branch, base branch and `state == open` — and otherwise opens
+one, with an explicit base branch (`FACTORY_TARGET_DEFAULT_BRANCH`, default
+`main`). A PR with the right head branch but a different base, or a head from a
+fork, is never adopted. The PR
 body carries only safe factory metadata — source Issue reference, task/run ids,
 validation outcome and gate names/statuses. GitHub's own response text is never
 propagated: only the numeric HTTP status crosses the client boundary.
@@ -337,8 +341,9 @@ Present today:
   only and never merges.
 - **A `GitWorkspacePublisher`**: argv-only, hook-isolated, credential-separated
   commit and non-force push of exactly the workspace's branch.
-- **A `GitHubPullRequestSink`** and write-capable `GitHubWriteClient`: find an
-  open PR by head branch or open one, with only the numeric status escaping a
+- **A `GitHubPullRequestSink`** and write-capable `GitHubWriteClient`: recover an
+  open PR only on an exact provider identity match (repository, head repository,
+  head branch, base branch) or open one, with only the numeric status escaping a
   failed request.
 - **Durable PR persistence** (`SqlitePullRequestRepository`): one PR per run,
   enforced by a unique index and surviving a repository reopen.

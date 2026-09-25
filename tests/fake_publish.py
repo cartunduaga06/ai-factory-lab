@@ -49,27 +49,33 @@ class FakeWorkspacePublisher(WorkspacePublisher):
 
 
 class FakePullRequestSink(PullRequestSink):
-    """An in-memory provider: remembers open PRs and opens each at most once."""
+    """An in-memory provider: remembers open PRs and opens each at most once.
+
+    The key is the full provider identity ``(repository, head_branch, base_branch)``,
+    mirroring the real sink's exact-match requirement, so a PR with the wrong base
+    can never be recovered as the factory's.
+    """
 
     def __init__(self, *, fail_create: bool = False) -> None:
         self._fail_create = fail_create
-        #: Open PRs keyed by (repository_slug, head_branch).
-        self._open: dict[tuple[str, str], PullRequest] = {}
+        #: Open PRs keyed by (repository_slug, head_branch, base_branch).
+        self._open: dict[tuple[str, str, str], PullRequest] = {}
         self.find_calls = 0
         self.create_calls = 0
         self.next_number = 100
 
     def find_open_pull_request(
-        self, repository: Repository, head_branch: str
+        self, repository: Repository, head_branch: str, base_branch: str
     ) -> PullRequest | None:
         self.find_calls += 1
-        return self._open.get((repository.slug, head_branch))
+        return self._open.get((repository.slug, head_branch, base_branch))
 
     def open_pull_request(self, pull_request: PullRequest) -> PullRequest:
         self.create_calls += 1
         if self._fail_create:
             raise PublicationError("provider refused to open a pull request")
-        key = (pull_request.repository_slug, pull_request.head_branch)
+        base_branch = pull_request.base_branch or "main"
+        key = (pull_request.repository_slug, pull_request.head_branch, base_branch)
         existing = self._open.get(key)
         if existing is not None:
             return existing
@@ -77,7 +83,7 @@ class FakePullRequestSink(PullRequestSink):
         opened = PullRequest(
             repository_slug=pull_request.repository_slug,
             head_branch=pull_request.head_branch,
-            base_branch=pull_request.base_branch,
+            base_branch=base_branch,
             title=pull_request.title,
             body=pull_request.body,
             number=self.next_number,
@@ -90,7 +96,10 @@ class FakePullRequestSink(PullRequestSink):
 
     def seed(self, pull_request: PullRequest) -> None:
         """Pre-populate the provider with an already-open PR (crash window C)."""
-        self._open[(pull_request.repository_slug, pull_request.head_branch)] = pull_request
+        base_branch = pull_request.base_branch or "main"
+        self._open[(pull_request.repository_slug, pull_request.head_branch, base_branch)] = (
+            pull_request
+        )
 
 
 class FakeWriteTransport:

@@ -418,6 +418,25 @@ API base URL with no userinfo, refusing anything else with
 `InsecureWriteTargetError` before the transport is invoked. Local filesystem
 remotes are unaffected and are pushed without a credential.
 
+### Pull request identity
+
+A PR is adopted as the factory's publication only when its provider identity
+matches the intended one exactly: the target repository, the **head repository**
+(GitHub `head.repo.full_name`, so a fork or another owner's repository is never
+adopted), the head branch (`Workspace.branch`), the configured base branch, and
+`state == open`. A PR with the right head branch but a different base — e.g.
+`factory/task/ws -> release` where the factory expects `main` — is not a match;
+the lookup keeps searching and may still find a later, correct PR. Missing or
+malformed identity fields are treated as a non-match, never as success.
+
+The same identity is enforced on recovery from durable storage:
+`PublicationService` re-checks a PR returned by `get_for_run`/`find_by_branch`
+(repository, head branch, base branch, and run/task ownership) before it can
+short-circuit publication, and refuses a mismatch with `PullRequestIdentityError`
+instead of reconciling the task to `WAITING_HUMAN`. A mismatched stored row is
+never overwritten, and a failed-create fallback that finds only a wrong-base or
+fork PR raises a sanitized `PublicationError`.
+
 ### Pull request persistence
 
 `SqlitePullRequestRepository` stores one PR per run. The `pull_requests` table
@@ -437,7 +456,7 @@ flow, so a retry after a crash window:
 |---|---|---|
 | A | commit done, before push | reuse the existing commit and push it |
 | B | push done, before PR | reuse the pushed branch, open the PR |
-| C | provider PR created, before local persistence | find the open PR by branch, persist it, no second PR |
+| C | provider PR created, before local persistence | find the open PR by exact identity (repository, head repository, head branch, base branch), persist it, no second PR |
 | D | PR persisted, before `VALIDATING → PR_OPEN` | reconcile the lifecycle |
 | E | task `PR_OPEN`, before `WAITING_HUMAN` | reconcile the lifecycle |
 | F | task already `WAITING_HUMAN` | no-op returning the same PR |

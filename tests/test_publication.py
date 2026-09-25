@@ -6,6 +6,7 @@ doubles from :mod:`tests.fake_publish`. No git, no network, no engine.
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskStatus
 from factory.domain.errors import (
     PublicationError,
+    PullRequestIdentityError,
     TaskNotPublishableError,
     ValidatedRevisionMissingError,
 )
@@ -433,6 +435,64 @@ def test_provider_failure_does_not_persist_or_advance(db_path: str, tmp_path: Pa
     assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
 
 
+def test_create_failure_with_only_wrong_base_pr_does_not_persist(
+    db_path: str, tmp_path: Path
+) -> None:
+    """REGRESSION 5: a create failure must not adopt a wrong-base provider PR."""
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+    sink = FakePullRequestSink(fail_create=True)
+    sink.seed(
+        PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="release",  # same head, wrong base
+            title="wrong base",
+            number=55,
+            url="https://example.invalid/55",
+        )
+    )
+    publisher = FakeWorkspacePublisher()
+
+    with pytest.raises(PublicationError):
+        _service(db_path, publisher=publisher, sink=sink).publish(task.task_id, run.run_id)
+
+    assert _prs(db_path).get_for_run(run.run_id) is None
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_wrong_base_provider_pr_is_not_adopted_and_a_correct_one_is_opened(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+    sink = FakePullRequestSink()
+    sink.seed(
+        PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="release",
+            title="wrong base",
+            number=56,
+            url="https://example.invalid/56",
+        )
+    )
+
+    result = _service(db_path, sink=sink).publish(task.task_id, run.run_id)
+
+    # The wrong-base PR was ignored; a new correct PR was created and persisted.
+    assert result.pull_request.number != 56
+    assert result.pull_request.base_branch == "main"
+    assert sink.create_calls == 1
+    assert result.task_status is TaskStatus.WAITING_HUMAN
+
+
 def test_unknown_task_or_run_raises_key_error(db_path: str, tmp_path: Path) -> None:
     tasks = _tasks(db_path)
     task = _task(tasks)
@@ -501,3 +561,133 @@ def test_missing_validated_revision_does_not_affect_recovery(db_path: str, tmp_p
     assert result.pull_request.number == 11
     assert publisher.calls == 0
     assert tasks.get(task.task_id).status is TaskStatus.WAITING_HUMAN
+
+
+# -- persisted PR identity -------------------------------------------------
+
+
+def test_persisted_pr_with_wrong_base_is_refused(db_path: str, tmp_path: Path) -> None:
+    """REGRESSION 6: a stored wrong-base row must not be reconciled or overwritten."""
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+    _prs(db_path).save(
+        PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="release",  # factory expects "main"
+            title="persisted",
+            number=12,
+            run_id=run.run_id,
+        )
+    )
+    publisher = FakeWorkspacePublisher()
+    sink = FakePullRequestSink()
+
+    with pytest.raises(PullRequestIdentityError):
+        _service(db_path, publisher=publisher, sink=sink).publish(task.task_id, run.run_id)
+
+    # No lifecycle advancement, no new commit/push/PR, and the row is untouched.
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+    assert publisher.calls == 0
+    assert sink.create_calls == 0
+    stored = _prs(db_path).get_for_run(run.run_id)
+    assert stored is not None
+    assert stored.base_branch == "release"
+
+
+def test_persisted_pr_with_wrong_repository_is_refused(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+    _prs(db_path).save(
+        PullRequest(
+            repository_slug="example/other-repo",
+            head_branch=workspace.branch,
+            base_branch="main",
+            title="persisted",
+            number=13,
+            run_id=run.run_id,
+        )
+    )
+    publisher = FakeWorkspacePublisher()
+
+    with pytest.raises(PullRequestIdentityError):
+        _service(db_path, publisher=publisher).publish(task.task_id, run.run_id)
+
+    assert publisher.calls == 0
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_persisted_pr_for_another_run_is_refused(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+
+    # A different run (of a different task, same target repository) is the one
+    # that actually owns the persisted PR, sharing head branch text. Publishing
+    # this run must not adopt it.
+    other_task = tasks.save(
+        FactoryTask(
+            title="Other",
+            target_repository="example/target",
+            source=TaskSource("github", "example/control", 8),
+        )
+    )
+    other_run = _validated_run(_runs(db_path), other_task, tmp_path, run_id="run-2")
+    _prs(db_path).save(
+        PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="main",
+            title="persisted",
+            number=14,
+            task_id=other_task.task_id,
+            run_id=other_run.run_id,
+        )
+    )
+    publisher = FakeWorkspacePublisher()
+
+    with pytest.raises(PullRequestIdentityError):
+        _service(db_path, publisher=publisher).publish(task.task_id, run.run_id)
+
+    assert publisher.calls == 0
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_persisted_pr_identity_error_is_sanitized(db_path: str, tmp_path: Path) -> None:
+    secret = "MY_PRIVATE_PUSH_PASSWORD_93726"
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+    _prs(db_path).save(
+        PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="release",
+            title=secret,
+            body=secret,
+            number=15,
+            url=f"https://example.invalid/{secret}",
+            run_id=run.run_id,
+        )
+    )
+
+    with pytest.raises(PullRequestIdentityError) as caught:
+        _service(db_path).publish(task.task_id, run.run_id)
+
+    error = caught.value
+    formatted = "".join(traceback.format_exception(error))
+    for text in (secret, "release", "https://", "example.invalid"):
+        assert text not in str(error)
+        assert text not in repr(error)
+        assert text not in formatted
+    assert error.__cause__ is None and error.__context__ is None

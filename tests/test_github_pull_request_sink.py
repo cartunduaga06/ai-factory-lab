@@ -29,14 +29,24 @@ def _sink(transport: FakeWriteTransport) -> GitHubPullRequestSink:
     return GitHubPullRequestSink(client)
 
 
-def _open_payload(number: int = 5, branch: str = "factory/task/ws") -> dict[str, object]:
+def _open_payload(
+    number: int = 5,
+    branch: str = "factory/task/ws",
+    base: str = "main",
+    *,
+    head_repo: str = "example/target",
+    base_repo: str | None = "example/target",
+) -> dict[str, object]:
+    base_obj: dict[str, object] = {"ref": base}
+    if base_repo is not None:
+        base_obj["repo"] = {"full_name": base_repo}
     return {
         "number": number,
         "state": "open",
         "html_url": f"https://github.com/example/target/pull/{number}",
         "title": "Add widget",
-        "head": {"ref": branch},
-        "base": {"ref": "main"},
+        "head": {"ref": branch, "repo": {"full_name": head_repo}},
+        "base": base_obj,
     }
 
 
@@ -45,7 +55,7 @@ def _open_payload(number: int = 5, branch: str = "factory/task/ws") -> dict[str,
 
 def test_existing_open_pr_is_discovered_by_head_branch() -> None:
     transport = FakeWriteTransport([[_open_payload(11)]])
-    found = _sink(transport).find_open_pull_request(REPO, "factory/task/ws")
+    found = _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main")
 
     assert found is not None
     assert found.number == 11
@@ -61,7 +71,49 @@ def test_existing_open_pr_is_discovered_by_head_branch() -> None:
 
 def test_no_open_pr_returns_none() -> None:
     transport = FakeWriteTransport([[]])
-    assert _sink(transport).find_open_pull_request(REPO, "factory/task/ws") is None
+    assert _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main") is None
+
+
+def test_wrong_base_pr_is_not_discovered() -> None:
+    """REGRESSION 1: a PR with the right head but the wrong base is not a match."""
+    transport = FakeWriteTransport([[_open_payload(12, base="release")]])
+    assert _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main") is None
+
+
+def test_correct_pr_after_a_wrong_base_pr_is_selected() -> None:
+    """REGRESSION 2: search continues past a wrong-base PR to the correct one."""
+    transport = FakeWriteTransport([[_open_payload(13, base="release"), _open_payload(14)]])
+    found = _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main")
+    assert found is not None
+    assert found.number == 14
+    assert found.base_branch == "main"
+
+
+def test_fork_head_repository_is_not_discovered() -> None:
+    """REGRESSION 3: a same-named branch from a fork is never recovered."""
+    transport = FakeWriteTransport([[_open_payload(15, head_repo="example/fork-or-other-repo")]])
+    assert _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main") is None
+
+
+def test_missing_head_repository_identity_is_not_discovered() -> None:
+    """A payload without ``head.repo.full_name`` must not be accepted."""
+    payload = _open_payload(16)
+    payload["head"] = {"ref": "factory/task/ws"}
+    transport = FakeWriteTransport([[payload]])
+    assert _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main") is None
+
+
+def test_wrong_base_repository_identity_is_not_discovered() -> None:
+    transport = FakeWriteTransport([[_open_payload(17, base_repo="example/other-repo")]])
+    assert _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main") is None
+
+
+def test_exact_identity_is_recovered() -> None:
+    """REGRESSION 4: an exact-identity PR is recovered normally."""
+    transport = FakeWriteTransport([[_open_payload(18)]])
+    found = _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main")
+    assert found is not None
+    assert found.number == 18
 
 
 # -- creation --------------------------------------------------------------
@@ -82,7 +134,7 @@ def test_pr_is_created_once_when_absent() -> None:
         body="body",
     )
     sink = _sink(transport)
-    assert sink.find_open_pull_request(REPO, requested.head_branch) is None
+    assert sink.find_open_pull_request(REPO, requested.head_branch, requested.base_branch) is None
     opened = sink.open_pull_request(requested)
 
     assert opened.number == 21
@@ -117,6 +169,69 @@ def test_repeated_open_finds_the_same_pr_after_a_failed_create() -> None:
     assert opened.number == 31
     assert opened.run_id == "run-1"
     assert opened.task_id == "task-1"
+
+
+def test_create_422_with_only_wrong_base_pr_is_refused() -> None:
+    """REGRESSION 5: a 422 fallback must not recover a wrong-base PR."""
+    transport = FakeWriteTransport(
+        [
+            GitHubWriteError(422),  # create refused
+            [_open_payload(32, base="release")],  # lookup: same head, wrong base
+        ]
+    )
+    requested = PullRequest(
+        repository_slug="example/target",
+        head_branch="factory/task/ws",
+        base_branch="main",
+        title="Add widget",
+    )
+    with pytest.raises(PublicationError) as caught:
+        _sink(transport).open_pull_request(requested)
+
+    error = caught.value
+    assert SECRET not in str(error)
+    assert error.__cause__ is None and error.__context__ is None
+    assert "release" not in str(error)
+
+
+def test_create_422_with_only_fork_pr_is_refused() -> None:
+    """A 422 fallback must not recover a PR whose head is a fork."""
+    transport = FakeWriteTransport(
+        [
+            GitHubWriteError(422),
+            [_open_payload(33, head_repo="example/fork-or-other-repo")],
+        ]
+    )
+    requested = PullRequest(
+        repository_slug="example/target",
+        head_branch="factory/task/ws",
+        base_branch="main",
+        title="Add widget",
+    )
+    with pytest.raises(PublicationError):
+        _sink(transport).open_pull_request(requested)
+
+
+def test_create_422_with_matching_pr_is_recovered() -> None:
+    """A 422 fallback recovers the exact-identity PR."""
+    transport = FakeWriteTransport(
+        [
+            GitHubWriteError(422),
+            [_open_payload(34)],
+        ]
+    )
+    requested = PullRequest(
+        repository_slug="example/target",
+        head_branch="factory/task/ws",
+        base_branch="main",
+        title="Add widget",
+        task_id="task-1",
+        run_id="run-1",
+    )
+    opened = _sink(transport).open_pull_request(requested)
+
+    assert opened.number == 34
+    assert opened.base_branch == "main"
 
 
 def test_base_branch_is_explicit() -> None:
@@ -162,7 +277,7 @@ def test_authorization_header_never_appears_in_errors_or_repr() -> None:
     sink = _sink(transport)
     error = None
     try:
-        sink.find_open_pull_request(REPO, "factory/task/ws")
+        sink.find_open_pull_request(REPO, "factory/task/ws", "main")
     except PublicationError as exc:  # noqa: PERF203
         error = exc
     assert error is not None
@@ -198,7 +313,7 @@ def test_no_merge_or_issue_mutation_endpoint_is_invoked() -> None:
         title="Add widget",
     )
     sink = _sink(transport)
-    sink.find_open_pull_request(REPO, requested.head_branch)
+    sink.find_open_pull_request(REPO, requested.head_branch, requested.base_branch)
     sink.open_pull_request(requested)
 
     for method, url, _headers, _body in transport.requests:
@@ -269,7 +384,7 @@ def test_userinfo_bearing_api_url_is_refused_before_transport() -> None:
 
 def test_https_default_api_url_still_works() -> None:
     transport = FakeWriteTransport([[_open_payload(71)]])
-    found = _sink(transport).find_open_pull_request(REPO, "factory/task/ws")
+    found = _sink(transport).find_open_pull_request(REPO, "factory/task/ws", "main")
     assert found is not None
     assert found.number == 71
     assert transport.requests[0][1].startswith("https://api.github.com/")
