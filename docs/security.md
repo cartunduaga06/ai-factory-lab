@@ -180,6 +180,12 @@ the easiest thing to get wrong. Every one of these is enforced in code:
   destination ref is validated explicitly, `main`/`master`/`HEAD`/`+`-refs and
   option-like refs are refused, and no force option is ever used. History is
   never rewritten.
+- **The pushed source is the verified commit, not the mutable branch.** After the
+  commit tree is checked against `AgentRun.validated_revision`, the push sources
+  that commit SHA directly (`<commit_sha>:refs/heads/<branch>`), so a local branch
+  moved between verification and the push — a TOCTOU window — cannot change what
+  the remote receives. The verified commit is the commit published, and the
+  destination branch is exactly `Workspace.branch`.
 - **Git hooks cannot run with factory credentials.** Factory-controlled commit
   and push run with `core.hooksPath=/dev/null` passed inline, so a
   repository-controlled hook never executes with the write credential in the

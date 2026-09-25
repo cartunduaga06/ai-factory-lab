@@ -227,7 +227,10 @@ altered state.
 `main`/`master`/`HEAD` are refused and history is never rewritten. The commit
 message is deterministic (`factory: implement task <task-id>`); task and agent
 text are never copied into it. A branch with no publishable diff is refused
-rather than committed empty.
+rather than committed empty. The commit's tree is re-checked against the validated
+revision, and the push then sources that verified commit SHA directly
+(`<commit_sha>:refs/heads/<branch>`) rather than the mutable local branch, so a
+concurrent move of the branch cannot change what reaches the remote.
 
 `GitHubPullRequestSink` finds an open PR by head branch or opens one, with an
 explicit base branch (`FACTORY_TARGET_DEFAULT_BRANCH`, default `main`). The PR

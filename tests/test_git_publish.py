@@ -240,6 +240,111 @@ def test_push_retry_is_idempotent(tmp_path: Path) -> None:
     assert second == first
 
 
+def test_local_branch_move_between_verification_and_push_cannot_change_pushed_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verified commit is pushed explicitly, closing the branch-move TOCTOU.
+
+    Commit C is verified (``tree(C) == validated_revision``) and then, in the same
+    window where a concurrent process could move the local branch, the branch is
+    moved to a different commit C2 that never passed validation. Because the push
+    uses C as its source ref — not ``refs/heads/<branch>`` — the remote must
+    receive C, not C2.
+    """
+    source, remote, workspace, run = _setup(tmp_path)
+    worktree = Path(workspace.path)
+    (worktree / "validated.py").write_text("validated\n", encoding="utf-8")
+
+    real_run = GitWorkspacePublisher._run
+    raced = False
+
+    def racing_run(
+        inner_self: GitWorkspacePublisher,
+        args: list[str],
+        ws: Workspace,
+        **kwargs: object,
+    ) -> None:
+        nonlocal raced
+        # Arm only on the push itself (the last argv entry is the refspec), so the
+        # race lands exactly between commit verification and `git push`.
+        if not raced and "push" in args and ws.branch in args[-1]:
+            raced = True
+            verified = _rev(worktree, "HEAD")
+            (worktree / "unvalidated.py").write_text("unvalidated\n", encoding="utf-8")
+            _git(worktree, "add", "-A")
+            _git(worktree, "commit", "-m", "unvalidated")
+            # The worktree is on the workspace branch, so committing moved the
+            # branch ref away from the verified commit — the exact race.
+            assert _rev(source, ws.branch) != verified
+        real_run(inner_self, args, ws, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(GitWorkspacePublisher, "_run", racing_run)
+
+    revision = _publish(_publisher(), _task(), run)
+
+    assert raced
+    validated_revision = run.validated_revision
+    assert validated_revision is not None
+
+    remote_sha = _rev(remote, workspace.branch)
+    assert remote_sha == revision.commit_sha
+    # The remote got the validated commit, not the branch-moved commit.
+    assert remote_sha != _rev(source, workspace.branch)
+    assert _rev(remote, f"{remote_sha}^{{tree}}") == validated_revision
+    # The unvalidated content never reached the remote.
+    files = _git(remote, "show", "--name-only", "--format=", remote_sha).stdout.decode()
+    assert "validated.py" in files
+    assert "unvalidated.py" not in files
+
+
+def test_verified_commit_tree_is_rechecked_before_push(tmp_path: Path) -> None:
+    """A refused tree check stops publication before anything is pushed."""
+    source, remote, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+
+    # Bind a revision that no commit can match, so the post-commit tree check
+    # fails and no push happens.
+    run.validated_revision = "0" * 40
+
+    with pytest.raises(ValidatedRevisionMismatchError):
+        _publisher().publish(_task(), run)
+
+    branches = _git(remote, "branch", "--list", "--format=%(refname:short)").stdout.decode()
+    assert branches.strip() == ""
+
+
+def test_local_bare_remote_push_uses_immutable_commit_refspec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The local (credential-free) push also sources the verified commit SHA."""
+    source, remote, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+
+    pushes: list[list[str]] = []
+    real_run = GitWorkspacePublisher._run
+
+    def recording_run(
+        inner_self: GitWorkspacePublisher,
+        args: list[str],
+        ws: Workspace,
+        **kwargs: object,
+    ) -> None:
+        if "push" in args:
+            pushes.append(list(args))
+        real_run(inner_self, args, ws, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(GitWorkspacePublisher, "_run", recording_run)
+
+    revision = _publish(_publisher(), _task(), run)
+
+    assert pushes, "the local push should run"
+    refspec = f"{revision.commit_sha}:refs/heads/{workspace.branch}"
+    assert pushes[0][-1] == refspec
+    assert not refspec.startswith("+")
+    assert not refspec.startswith("refs/heads/")
+    assert refspec.split(":", 1)[0] == revision.commit_sha
+
+
 def test_no_changes_and_no_factory_commit_is_refused(tmp_path: Path) -> None:
     source, remote, workspace, run = _setup(tmp_path)
 
@@ -480,9 +585,9 @@ def test_https_remote_reaches_the_authenticated_push_path(
     spy = _PushSpy()
     spy.install(monkeypatch)
 
-    _publish(_publisher(write_token=SECRET), _task(), run)
+    revision = _publish(_publisher(write_token=SECRET), _task(), run)
 
-    refspec = f"refs/heads/{workspace.branch}:refs/heads/{workspace.branch}"
+    refspec = f"{revision.commit_sha}:refs/heads/{workspace.branch}"
     assert spy.token_pushes == [refspec]
     # The authenticated path owns the push; the plaintext path did not run one.
     assert not spy.pushed()
@@ -805,14 +910,14 @@ def test_safe_https_push_uses_remote_name_and_isolated_refspec(
     recorder = _PushRecorder()
     recorder.install(monkeypatch)
 
-    _publish(_publisher(write_token=SECRET), _task(), run)
+    revision = _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert len(recorder.authenticated) == 1
     args, env = recorder.authenticated[0]
-    refspec = f"refs/heads/{workspace.branch}:refs/heads/{workspace.branch}"
+    # The source ref is the immutable verified commit SHA, never the mutable
+    # local branch (see the TOCTOU regression below).
+    refspec = f"{revision.commit_sha}:refs/heads/{workspace.branch}"
 
-    # Pushed by remote name — the same resolution that was validated — with an
-    # exact, non-force refspec, and no main/master.
     assert args == [
         "-c",
         "core.hooksPath=/dev/null",
@@ -823,7 +928,13 @@ def test_safe_https_push_uses_remote_name_and_isolated_refspec(
         refspec,
     ]
     assert "--force" not in args and "-f" not in args
+    assert "--force-with-lease" not in args
+    assert not refspec.startswith("+")
     assert not any("main" in arg or "master" in arg for arg in args)
+    # Source is not HEAD and not a branch ref.
+    assert not refspec.startswith("HEAD")
+    assert refspec.split(":", 1)[0] == revision.commit_sha
+    assert not refspec.startswith("refs/heads/")
     # The token is never in argv or a URL; the URL is not in argv at all.
     assert SECRET not in " ".join(args)
     assert "https://" not in " ".join(args)

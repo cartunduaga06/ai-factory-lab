@@ -384,6 +384,15 @@ destination ref is validated explicitly; `main`, `master`, `HEAD` and any
 history is never rewritten. The push runs with git hooks disabled
 (`core.hooksPath=/dev/null`) and credential helpers cleared.
 
+The push **source** is the immutable commit SHA that was just verified against
+`AgentRun.validated_revision` — never the mutable `refs/heads/<branch>`. A local
+branch can be moved by another process between the tree check and `git push`
+(a TOCTOU window), so sourcing the branch ref could send a commit that never
+passed validation. The refspec is `<commit_sha>:refs/heads/<workspace.branch>`:
+the source is pinned to the verified commit, the destination is exactly the
+workspace branch, and there is no leading `+`, so this remains a normal
+non-force push.
+
 The write credential is a **separate** token (`GITHUB_WRITE_TOKEN`), never the
 read-only intake token. HTTPS authentication uses a temporary `GIT_ASKPASS`
 helper that contains no credential and reads it from a process environment

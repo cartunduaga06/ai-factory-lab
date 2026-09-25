@@ -7,9 +7,10 @@ neither the domain nor orchestration ever runs git.
 ```
 Workspace (isolated worktree, branch factory/<task>/<workspace>)
       ↓  git status / commit          (inside Workspace.path only)
-   deterministic factory commit        "factory: implement task <task-id>"
-      ↓  git push <remote> refs/heads/<branch>:refs/heads/<branch>
-   remote branch with the SAME name
+   deterministic factory commit C      "factory: implement task <task-id>"
+      ↓  verify tree(C) == run.validated_revision
+      ↓  git push <remote> <C>:refs/heads/<branch>
+   remote branch with the SAME name, pointing at the verified commit
 ```
 
 Safety properties, all enforced below:
@@ -23,9 +24,11 @@ Safety properties, all enforced below:
 * **Sanitized errors.** Raw stdout/stderr are discarded. Git echoes failing
   commands and remote URLs (which can embed a token), so the underlying exception
   is never chained as ``__cause__``/``__context__``.
-* **Only the workspace's own branch is pushed.** The destination ref is validated
-  explicitly, ``main``/``master``/``HEAD`` are refused, and no force option is
-  ever used, so history is never rewritten.
+* **Only the workspace's own branch is pushed, at an immutable revision.** The
+  destination ref is validated explicitly, ``main``/``master``/``HEAD`` are
+  refused, and no force option is ever used, so history is never rewritten. The
+  *source* is the verified commit SHA, never the mutable local branch, so a branch
+  moved between verification and the push cannot change what is sent.
 * **Hook isolation.** Factory-controlled commit and push run with
   ``core.hooksPath=/dev/null`` via a command-line ``-c`` override (never
   persisted), so a repository hook cannot execute with the write credential in
@@ -174,7 +177,7 @@ class GitWorkspacePublisher(WorkspacePublisher):
         if self._tree_of(commit_sha, workspace) != validated:
             # The commit does not contain exactly the tree that passed validation.
             raise ValidatedRevisionMismatchError(workspace.workspace_id)
-        self._push(task, workspace)
+        self._push(task, workspace, commit_sha)
         return PublishedRevision(commit_sha=commit_sha, branch=workspace.branch)
 
     # -- revision identity -------------------------------------------------
@@ -282,8 +285,15 @@ class GitWorkspacePublisher(WorkspacePublisher):
 
     # -- push --------------------------------------------------------------
 
-    def _push(self, task: FactoryTask, workspace: Workspace) -> None:
-        """Push exactly ``workspace.branch`` to the same remote branch name.
+    def _push(self, task: FactoryTask, workspace: Workspace, commit_sha: str) -> None:
+        """Push the verified immutable commit to exactly ``workspace.branch``.
+
+        The source ref is the commit SHA that was just verified against
+        ``run.validated_revision`` — never the mutable local branch. The branch
+        ref could be moved by another process between verification and the push
+        (a TOCTOU window), so ``refs/heads/<branch>`` as a *source* would risk
+        sending a commit that never passed validation. Using the SHA makes the
+        published commit immutable and independent of local branch movement.
 
         The destination ref is explicit and non-force, so ``main``/``master``,
         ``HEAD`` and history rewrites are impossible.
@@ -308,7 +318,7 @@ class GitWorkspacePublisher(WorkspacePublisher):
         if branch in PROTECTED_BRANCHES or branch.startswith("+"):
             raise PublicationError(f"workspace {workspace.workspace_id} has an unsafe branch")
 
-        refspec = f"refs/heads/{branch}:refs/heads/{branch}"
+        refspec = f"{commit_sha}:refs/heads/{branch}"
         destinations = self._effective_push_urls(workspace)
         network = [url for url in destinations if not _is_local_path(url)]
 
