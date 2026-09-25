@@ -457,3 +457,415 @@ def test_https_remote_reaches_the_authenticated_push_path(
     assert spy.token_pushes == [refspec]
     # The authenticated path owns the push; the plaintext path did not run one.
     assert not spy.pushed()
+
+
+# -- effective push destination pinning ------------------------------------
+#
+# A completed agent can edit remote configuration, so the publisher must inspect
+# what Git will *actually* push to — pushurl, insteadOf/pushInsteadOf — and pin it
+# to one allowed HTTPS GitHub target before the write credential is exposed.
+
+_SAFE_GITHUB_URL = "https://" + "github.com/example/target.git"
+
+
+class _PushRecorder:
+    """Records every git invocation and intercepts only the authenticated push.
+
+    Repository-local git commands still run for real (so a commit can be made),
+    but an authenticated network push is short-circuited, so no test performs a
+    network request.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, str]]] = []
+        self.authenticated: list[tuple[list[str], dict[str, str]]] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_execute = GitWorkspacePublisher._execute
+
+        def recording_execute(
+            inner_self: GitWorkspacePublisher,
+            args: list[str],
+            workspace: Workspace,
+            *,
+            env: dict[str, str],
+        ) -> subprocess.CompletedProcess[bytes]:
+            self.calls.append((list(args), dict(env)))
+            if "push" in args and "GIT_ASKPASS" in env:
+                self.authenticated.append((list(args), dict(env)))
+                return subprocess.CompletedProcess(["git", *args], 0, b"", b"")
+            return real_execute(inner_self, args, workspace, env=env)
+
+        monkeypatch.setattr(GitWorkspacePublisher, "_execute", recording_execute)
+
+    def child_envs(self) -> list[dict[str, str]]:
+        return [env for _, env in self.calls]
+
+    def pushed(self) -> bool:
+        return any("push" in args for args, _ in self.calls)
+
+
+def _assert_refusal_clean(error: BaseException, *forbidden: str) -> None:
+    formatted = "".join(traceback.format_exception(error))
+    for text in forbidden:
+        assert text not in str(error)
+        assert text not in repr(error)
+        assert text not in formatted
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def _network_setup(tmp_path: Path, url: str) -> tuple[Path, Path, Workspace, AgentRun]:
+    source, remote, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    _git(source, "remote", "set-url", "origin", url)
+    return source, remote, workspace, run
+
+
+def _source_for(workspace: Workspace) -> Path:
+    """The main checkout backing ``workspace``'s linked worktree."""
+    common = (
+        subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=workspace.path,
+            capture_output=True,
+            env=_env(Path(workspace.path)),
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    return Path(common).resolve().parent
+
+
+def test_malicious_pushurl_is_detected_and_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # remote.origin.url is safe; remote.origin.pushurl is malicious. Inspecting
+    # only remote.<name>.url would miss it and leak the token to the wrong host.
+    evil_url = "https://" + "evil.example/example/target.git"
+    source, _, workspace, run = _network_setup(tmp_path, _SAFE_GITHUB_URL)
+    _git(source, "config", "--add", "remote.origin.pushurl", evil_url)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert not recorder.pushed()
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "evil.example", evil_url, _SAFE_GITHUB_URL)
+
+
+def test_multiple_network_push_destinations_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _, workspace, run = _network_setup(tmp_path, _SAFE_GITHUB_URL)
+    # Two distinct push URLs: the branch and credential must never fan out.
+    _git(source, "config", "--add", "remote.origin.pushurl", _SAFE_GITHUB_URL)
+    _git(source, "config", "--add", "remote.origin.pushurl", _SAFE_GITHUB_URL + "/mirror")
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, _SAFE_GITHUB_URL)
+
+
+def test_wrong_repository_effective_url_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wrong_repo = "https://github.com/example/another-repo.git"
+    _, _, workspace, run = _network_setup(tmp_path, wrong_repo)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "another-repo", wrong_repo)
+
+
+def test_wrong_owner_effective_url_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wrong_owner = "https://github.com/attacker/target.git"
+    _, _, workspace, run = _network_setup(tmp_path, wrong_owner)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "attacker", wrong_owner)
+
+
+def test_wrong_host_https_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # HTTPS alone is not sufficient: the host must be the configured allowed host.
+    evil_host = "https://evil.example/example/target.git"
+    _, _, workspace, run = _network_setup(tmp_path, evil_host)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "evil.example", evil_host)
+
+
+def test_additional_path_components_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nested = "https://github.com/example/target/evilpath.git"
+    _, _, workspace, run = _network_setup(tmp_path, nested)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "evilpath", nested)
+
+
+def test_query_string_on_effective_url_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_query = "https://github.com/example/target.git?x=1"
+    _, _, workspace, run = _network_setup(tmp_path, with_query)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, with_query, "x=1")
+
+
+def test_insteadof_rewrite_is_detected_and_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A literal, safe origin URL is rewritten by configuration to a malicious
+    # host. The publisher must validate the effective destination, not the URL
+    # written in remote.origin.url.
+    _, _, workspace, run = _network_setup(tmp_path, _SAFE_GITHUB_URL)
+    _git(
+        _source_for(workspace),
+        "config",
+        "url.https://evil.example/.insteadOf",
+        "https://github.com/",
+    )
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "evil.example")
+
+
+def test_pushinsteadof_rewrite_is_detected_and_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _, workspace, run = _network_setup(tmp_path, _SAFE_GITHUB_URL)
+    _git(source, "config", "url.https://evil.example/.pushInsteadOf", "https://github.com/")
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "evil.example")
+
+
+def test_scp_style_network_remote_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scp = "git@github.com:example/target.git"
+    _, _, workspace, run = _network_setup(tmp_path, scp)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    # No child process may receive ambient SSH credentials or the write token.
+    assert not recorder.pushed()
+    assert recorder.authenticated == []
+    for env in recorder.child_envs():
+        assert "SSH_AUTH_SOCK" not in env
+        assert "GITHUB_WRITE_TOKEN" not in env
+        assert "GIT_FACTORY_PASSWORD" not in env
+    _assert_refusal_clean(caught.value, SECRET, "git@github.com", scp)
+
+
+def test_ssh_url_network_remote_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ssh = "ssh://git@github.com/example/target.git"
+    _, _, workspace, run = _network_setup(tmp_path, ssh)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    for env in recorder.child_envs():
+        assert "SSH_AUTH_SOCK" not in env
+        assert "GITHUB_WRITE_TOKEN" not in env
+        assert "GIT_FACTORY_PASSWORD" not in env
+    _assert_refusal_clean(caught.value, SECRET, "ssh://", ssh)
+
+
+def test_git_protocol_network_remote_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git_url = "git://github.com/example/target.git"
+    _, _, workspace, run = _network_setup(tmp_path, git_url)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "git://", git_url)
+
+
+def test_https_remote_with_port_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with_port = "https://github.com:8443/example/target.git"
+    _, _, workspace, run = _network_setup(tmp_path, with_port)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "8443", with_port)
+
+
+# -- safe HTTPS happy path -------------------------------------------------
+
+
+def test_safe_https_push_uses_remote_name_and_isolated_refspec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, workspace, run = _network_setup(tmp_path, _SAFE_GITHUB_URL)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert len(recorder.authenticated) == 1
+    args, env = recorder.authenticated[0]
+    refspec = f"refs/heads/{workspace.branch}:refs/heads/{workspace.branch}"
+
+    # Pushed by remote name — the same resolution that was validated — with an
+    # exact, non-force refspec, and no main/master.
+    assert args == [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "credential.helper=",
+        "push",
+        "origin",
+        refspec,
+    ]
+    assert "--force" not in args and "-f" not in args
+    assert not any("main" in arg or "master" in arg for arg in args)
+    # The token is never in argv or a URL; the URL is not in argv at all.
+    assert SECRET not in " ".join(args)
+    assert "https://" not in " ".join(args)
+    # The credential travels only through the askpass environment.
+    assert "GIT_ASKPASS" in env
+    assert env["GIT_FACTORY_PASSWORD"] == SECRET
+    assert "GITHUB_WRITE_TOKEN" not in env
+
+
+def test_local_bare_remote_still_works_without_a_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, remote, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    revision = _publisher().publish(_task(), run)
+
+    # A local destination needs no credential and is pushed normally.
+    assert recorder.authenticated == []
+    branches = _git(remote, "branch", "--list", "--format=%(refname:short)").stdout.decode()
+    assert branches.strip() == workspace.branch
+    assert _rev(remote, workspace.branch) == revision.commit_sha
+    for env in recorder.child_envs():
+        assert "GITHUB_WRITE_TOKEN" not in env
+        assert "GIT_FACTORY_PASSWORD" not in env
+        assert "GIT_ASKPASS" not in env
+
+
+def test_push_follows_the_validated_local_destination_under_a_rewrite(tmp_path: Path) -> None:
+    # A local remote whose effective destination is redirected by insteadOf. The
+    # publisher validates the *effective* destination (a local path) and pushes by
+    # remote name; Git resolves the name with the same algorithm, so the branch
+    # lands exactly where validation said — not at the literal origin URL.
+    source, _, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+
+    redirected = tmp_path / "redirected.git"
+    redirected.mkdir()
+    _git(redirected, "init", "--bare", "-b", "main")
+    literal = tmp_path / "literal.git"
+    literal.mkdir()
+    _git(literal, "init", "--bare", "-b", "main")
+    _git(source, "remote", "set-url", "origin", str(literal))
+    _git(source, "config", f"url.{redirected.as_posix()}.insteadOf", str(literal))
+
+    revision = _publisher().publish(_task(), run)
+
+    redirected_branches = _git(redirected, "branch", "--list", "--format=%(refname:short)")
+    assert redirected_branches.stdout.decode().strip() == workspace.branch
+    assert _rev(redirected, workspace.branch) == revision.commit_sha
+    # The literal destination was never touched.
+    literal_branches = _git(literal, "branch", "--list", "--format=%(refname:short)")
+    assert literal_branches.stdout.decode() == ""
+
+
+def test_malformed_network_url_is_refused_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unterminated IPv6 literal makes urlsplit raise; that must surface as a
+    # sanitized refusal, never as an escaping ValueError.
+    malformed = "https://[::1/example/target.git"
+    _, _, workspace, run = _network_setup(tmp_path, malformed)
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    assert recorder.authenticated == []
+    _assert_refusal_clean(caught.value, SECRET, "::1", malformed)

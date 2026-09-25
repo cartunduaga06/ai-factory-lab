@@ -30,11 +30,29 @@ Safety properties, all enforced below:
   ``core.hooksPath=/dev/null`` via a command-line ``-c`` override (never
   persisted), so a repository hook cannot execute with the write credential in
   the environment.
-* **No credential in a URL or argv.** The remote URL is inspected first; a
-  userinfo-bearing URL or a plaintext ``http://`` remote is refused, so the write
-  credential never crosses an unencrypted transport. HTTPS authentication uses a
-  temporary ``GIT_ASKPASS`` helper that contains no credential and reads it from
-  a process environment variable; the helper is removed after use.
+* **The effective push destination is pinned.** The remote *name* is never
+  trusted as evidence of where a push lands: a completed agent can edit
+  ``remote.<name>.url``, add ``remote.<name>.pushurl``, or install
+  ``url.<base>.insteadOf`` / ``url.<base>.pushInsteadOf`` rewrites. The publisher
+  therefore asks Git for its own resolution — ``git remote get-url --push --all``
+  — and validates what Git will actually push to. A network publication must
+  resolve to exactly one destination, and an authenticated push is then performed
+  by remote name, which Git resolves with the very same algorithm (an explicit
+  URL argument is *not* used, because a rewrite can retarget it).
+* **The destination is pinned to an allowed host and the task's repository.**
+  An HTTPS network push is parsed with URL parsing — never substring matching —
+  and accepted only when the host equals the configured allowed Git host, the
+  path is exactly ``/<owner>/<repo>`` or ``/<owner>/<repo>.git``, and there is no
+  userinfo, port, query or fragment. HTTPS alone is not sufficient.
+* **Network publication is HTTPS-only.** ``ssh://``, ``git://``, plaintext
+  ``http://`` and scp-style ``git@host:owner/repo.git`` remotes are refused:
+  they could authenticate with ambient machine credentials (``~/.ssh``, an SSH
+  agent) instead of the dedicated write credential. Local filesystem remotes are
+  unaffected and still need no credential.
+* **No credential in a URL or argv.** A userinfo-bearing destination is refused,
+  and HTTPS authentication uses a temporary ``GIT_ASKPASS`` helper that contains
+  no credential and reads it from a process environment variable; the helper is
+  removed after use. The token never reaches a URL or argv.
 * **No empty commit.** A branch with no publishable diff and no previous factory
   commit is refused rather than committed. A retry reuses the existing factory
   commit instead of creating a duplicate.
@@ -48,6 +66,7 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from factory.domain.errors import (
     PublicationError,
@@ -62,6 +81,10 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 
 #: Branches the factory must never publish to.
 PROTECTED_BRANCHES = frozenset({"main", "master"})
+
+#: The Git host an authenticated HTTPS push may target. Injectable so a future
+#: deployment (a GitHub Enterprise host, say) does not require editing this class.
+DEFAULT_GIT_HOST = "github.com"
 
 #: Environment variables git legitimately needs. Everything else — including any
 #: credential the factory process happens to hold — is not forwarded.
@@ -100,14 +123,16 @@ class GitWorkspacePublisher(WorkspacePublisher):
         remote: str = "origin",
         write_token: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        allowed_git_host: str = DEFAULT_GIT_HOST,
     ) -> None:
         self._remote = remote
         self._write_token = write_token
         self._timeout = timeout
+        self._allowed_git_host = allowed_git_host.strip().lower().rstrip(".")
 
     def __repr__(self) -> str:
         # The write token is never rendered.
-        return f"GitWorkspacePublisher(remote={self._remote!r})"
+        return f"GitWorkspacePublisher(remote={self._remote!r}, host={self._allowed_git_host!r})"
 
     # -- WorkspacePublisher ------------------------------------------------
 
@@ -125,7 +150,7 @@ class GitWorkspacePublisher(WorkspacePublisher):
         self._require_isolated_workspace(task, workspace)
 
         commit_sha = self._commit_if_needed(task, workspace)
-        self._push(workspace)
+        self._push(task, workspace)
         return PublishedRevision(commit_sha=commit_sha, branch=workspace.branch)
 
     # -- validation --------------------------------------------------------
@@ -215,39 +240,53 @@ class GitWorkspacePublisher(WorkspacePublisher):
 
     # -- push --------------------------------------------------------------
 
-    def _push(self, workspace: Workspace) -> None:
+    def _push(self, task: FactoryTask, workspace: Workspace) -> None:
         """Push exactly ``workspace.branch`` to the same remote branch name.
 
         The destination ref is explicit and non-force, so ``main``/``master``,
-        ``HEAD`` and history rewrites are impossible. HTTPS authentication uses a
-        temporary, credential-free askpass helper, created and removed around the
-        single push.
+        ``HEAD`` and history rewrites are impossible.
 
-        A plaintext ``http://`` remote is refused before any push: the write
-        credential must never cross an unencrypted transport.
+        The *effective* push destination — what Git itself resolves, including
+        ``remote.<name>.pushurl`` and ``url.*.insteadOf``/``pushInsteadOf``
+        rewrites — is inspected before anything else happens:
+
+        * a single local filesystem destination is pushed without a credential;
+        * a single network destination must be an allowed HTTPS GitHub target for
+          the task's repository, and is then pushed with the write credential;
+        * anything else (another host, another owner/repository, a plaintext or
+          SSH/scp scheme, userinfo, multiple destinations) is refused with a
+          sanitized :class:`UnsafeRemoteError` before the credential is exposed.
+
+        The push is issued *by remote name*. Git resolves a remote name with the
+        same algorithm ``git remote get-url --push --all`` used, so the validated
+        destination is the destination pushed to. An explicit URL argument is
+        deliberately avoided: a rewrite rule can retarget one.
         """
         branch = workspace.branch
         if branch in PROTECTED_BRANCHES or branch.startswith("+"):
             raise PublicationError(f"workspace {workspace.workspace_id} has an unsafe branch")
 
-        url = self._remote_url(workspace)
         refspec = f"refs/heads/{branch}:refs/heads/{branch}"
+        destinations = self._effective_push_urls(workspace)
+        network = [url for url in destinations if not _is_local_path(url)]
 
-        if _is_http(url):
-            # Defense in depth: an unencrypted remote must never reach the
-            # authenticated push path, even if the earlier check were bypassed.
-            raise UnsafeRemoteError(workspace.workspace_id)
-
-        if _is_https(url):
-            if self._write_token is None:
-                # Never fall back to the read-only intake credential implicitly.
-                raise PublicationError(
-                    f"workspace {workspace.workspace_id} requires a write credential"
-                )
-            self._push_with_token(workspace, refspec)
+        if not network:
+            # Local disposable remotes need no credential and keep working.
+            self._run(["-c", "core.hooksPath=/dev/null", "push", self._remote, refspec], workspace)
             return
 
-        self._run(["-c", "core.hooksPath=/dev/null", "push", self._remote, refspec], workspace)
+        if len(destinations) != 1:
+            # Never fan a branch or a credential out to more than one destination.
+            raise UnsafeRemoteError(workspace.workspace_id)
+
+        self._validate_network_destination(task, workspace, destinations[0])
+
+        if self._write_token is None:
+            # Never fall back to the read-only intake credential implicitly.
+            raise PublicationError(
+                f"workspace {workspace.workspace_id} requires a write credential"
+            )
+        self._push_with_token(workspace, refspec)
 
     def _push_with_token(self, workspace: Workspace, refspec: str) -> None:
         askpass = _AskpassHelper()
@@ -262,6 +301,8 @@ class GitWorkspacePublisher(WorkspacePublisher):
             self._run(
                 # Credential helpers are cleared and global/system config disabled
                 # for this operation, so nothing caches or echoes the credential.
+                # The remote name is resolved with the same algorithm that was
+                # validated, so the destination cannot drift after validation.
                 [
                     "-c",
                     "core.hooksPath=/dev/null",
@@ -279,23 +320,58 @@ class GitWorkspacePublisher(WorkspacePublisher):
 
     # -- git plumbing ------------------------------------------------------
 
-    def _remote_url(self, workspace: Workspace) -> str:
-        """Return the configured remote URL, refusing one with embedded userinfo
-        or a plaintext ``http://`` scheme.
+    def _effective_push_urls(self, workspace: Workspace) -> list[str]:
+        """Return the effective push URLs Git will actually use for the remote.
 
-        The factory never authenticates through a credential-bearing remote, so a
-        URL such as ``https://token@host/...`` is refused before any push. A
-        plaintext ``http://`` remote is likewise refused, because the write
-        credential must never cross an unencrypted transport. The URL is never
-        surfaced in the error.
+        Uses Git's own resolution (``git remote get-url --push --all``) rather
+        than reading ``remote.<name>.url`` directly: a ``pushurl`` or a
+        ``url.*.insteadOf``/``pushInsteadOf`` rewrite can retarget a push without
+        changing the configured URL. The returned URLs are never logged or
+        surfaced in an error.
         """
-        url = self._capture(["config", "--get", f"remote.{self._remote}.url"], workspace)
-        if url is None or not url.strip():
+        output = self._capture(["remote", "get-url", "--push", "--all", self._remote], workspace)
+        if output is None:
             raise PublicationError(f"workspace {workspace.workspace_id} has no remote configured")
-        url = url.strip()
-        if _has_embedded_credentials(url) or _is_http(url):
+        urls = [line.strip() for line in output.splitlines() if line.strip()]
+        if not urls:
+            raise PublicationError(f"workspace {workspace.workspace_id} has no remote configured")
+        return urls
+
+    def _validate_network_destination(
+        self, task: FactoryTask, workspace: Workspace, url: str
+    ) -> None:
+        """Refuse a network destination that is not the allowed HTTPS target.
+
+        The URL is parsed structurally — never by substring matching — and
+        accepted only when the scheme is HTTPS, the host equals the configured
+        allowed Git host, and the path is exactly ``/<owner>/<repo>`` (an
+        optional trailing ``.git`` aside) for the task's target repository. Any
+        userinfo, explicit port, query or fragment is refused. The URL is never
+        echoed in the error.
+        """
+        parts = urlsplit(url) if _splittable(url) else None
+        if parts is None:
             raise UnsafeRemoteError(workspace.workspace_id)
-        return url
+        if parts.scheme.lower() != "https":
+            # http://, ssh://, git:// and scp-style remotes may authenticate with
+            # ambient machine credentials; MVP 0.1 publishes over HTTPS only.
+            raise UnsafeRemoteError(workspace.workspace_id)
+        if "@" in parts.netloc or parts.username is not None or parts.password is not None:
+            raise UnsafeRemoteError(workspace.workspace_id)
+        try:
+            port = parts.port
+        except ValueError:
+            raise UnsafeRemoteError(workspace.workspace_id) from None
+        if port is not None:
+            raise UnsafeRemoteError(workspace.workspace_id)
+        host = (parts.hostname or "").lower().rstrip(".")
+        if host != self._allowed_git_host:
+            raise UnsafeRemoteError(workspace.workspace_id)
+        if parts.query or parts.fragment:
+            raise UnsafeRemoteError(workspace.workspace_id)
+        expected = "/" + task.target_repository
+        if parts.path not in (expected, expected + ".git"):
+            raise UnsafeRemoteError(workspace.workspace_id)
 
     def _capture(self, args: list[str], workspace: Workspace) -> str | None:
         result = self._execute(args, workspace, env=self._env())
@@ -350,22 +426,38 @@ class GitWorkspacePublisher(WorkspacePublisher):
         return env
 
 
-def _is_https(url: str) -> bool:
-    return url.lower().startswith("https://")
+def _splittable(url: str) -> bool:
+    """Whether ``urlsplit`` can parse ``url`` without raising.
 
-
-def _is_http(url: str) -> bool:
-    """Whether ``url`` is plaintext HTTP (as opposed to HTTPS or another scheme)."""
-    return url.lower().startswith("http://")
-
-
-def _has_embedded_credentials(url: str) -> bool:
-    """Whether ``url`` carries userinfo (``scheme://user:pass@host``)."""
-    scheme, sep, remainder = url.partition("://")
-    if not sep:
+    A malformed authority (for example an unterminated IPv6 literal) makes
+    ``urlsplit`` raise; the caller treats that as an unsafe destination rather
+    than letting the exception escape.
+    """
+    try:
+        urlsplit(url)
+    except ValueError:
         return False
-    authority = remainder.split("/", 1)[0]
-    return "@" in authority
+    return True
+
+
+def _is_local_path(url: str) -> bool:
+    """Whether ``url`` is a local path rather than a network destination.
+
+    A local path is what a disposable test remote looks like: a filesystem path
+    (absolute, or ``./``/``../``-relative) or a ``file://`` URL. These need no
+    credential and are not subject to destination pinning.
+    """
+    if url.lower().startswith("file://"):
+        return True
+    if url.startswith(("/", "./", "../", "~")):
+        return True
+    # A Windows drive path (C:\...) or a path without a URI scheme.
+    if len(url) >= 2 and url[1] == ":" and url[0].isalpha():
+        return True
+    scheme, sep, _ = url.partition("://")
+    if sep:
+        return False
+    return ":" not in scheme
 
 
 class _AskpassHelper:
@@ -386,6 +478,7 @@ class _AskpassHelper:
 
 
 __all__ = [
+    "DEFAULT_GIT_HOST",
     "DEFAULT_TIMEOUT_SECONDS",
     "GitWorkspacePublisher",
     "PROTECTED_BRANCHES",

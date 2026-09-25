@@ -64,6 +64,18 @@ def test_git_publisher_repr_never_carries_the_token(tmp_path: Path) -> None:
     assert SECRET not in repr(publisher)
 
 
+def test_git_publisher_allowed_host_is_injectable() -> None:
+    # The allowed Git host is a construction-time policy, not a hard-coded global,
+    # so a GitHub Enterprise deployment can pin a different host without code
+    # changes. A hostname is not a secret.
+    from factory.integrations.workspace.git_publish import DEFAULT_GIT_HOST
+
+    assert DEFAULT_GIT_HOST == "github.com"
+    publisher = GitWorkspacePublisher(write_token=SECRET, allowed_git_host="github.example.com")
+    assert "github.example.com" in repr(publisher)
+    assert SECRET not in repr(publisher)
+
+
 # -- GitHub boundary -------------------------------------------------------
 
 

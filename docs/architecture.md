@@ -386,14 +386,27 @@ history is never rewritten. The push runs with git hooks disabled
 The write credential is a **separate** token (`GITHUB_WRITE_TOKEN`), never the
 read-only intake token. HTTPS authentication uses a temporary `GIT_ASKPASS`
 helper that contains no credential and reads it from a process environment
-variable; the helper is removed after the single push. A remote URL that already
-carries userinfo (`https://user:pass@host/...`) or uses plaintext `http://` is
-**refused** with `UnsafeRemoteError` before any authenticated operation, and the
-URL is never echoed. For the same reason the GitHub write client accepts only an
-`https://` API base URL with no userinfo, refusing anything else with
-`InsecureWriteTargetError` before the transport is invoked. The write token is
-never placed in a URL, argv, `.git/config`, a log or an exception, and it is
-never handed to quality-gate subprocesses.
+variable; the helper is removed after the single push. The write token is never
+placed in a URL, argv, `.git/config`, a log or an exception, and it is never
+handed to quality-gate subprocesses.
+
+The push destination is pinned to what Git will **actually** push to. The
+publisher asks Git for its own resolution — `git remote get-url --push --all` —
+so a `remote.<name>.pushurl` or a `url.*.insteadOf`/`url.*.pushInsteadOf` rewrite
+cannot hide the real destination. A network publication must resolve to exactly
+one target; multiple network destinations are refused. The target is parsed with
+URL parsing — never substring matching — and accepted only when its host equals
+`FACTORY_GITHUB_GIT_HOST` (default `github.com`) and its path is exactly
+`/<owner>/<repo>` or `/<owner>/<repo>.git` for the task's `target_repository`. A
+plaintext `http://`, `ssh://`, `git://` or scp-style remote, another host,
+another owner or repository, a port, userinfo, a query or a fragment is
+**refused** with `UnsafeRemoteError` before the credential is exposed. HTTPS
+alone is not sufficient, and the URL is never echoed. The authenticated push is
+issued by remote name, which Git resolves with the same algorithm that was
+validated. For the same reason the GitHub write client accepts only an `https://`
+API base URL with no userinfo, refusing anything else with
+`InsecureWriteTargetError` before the transport is invoked. Local filesystem
+remotes are unaffected and are pushed without a credential.
 
 ### Pull request persistence
 

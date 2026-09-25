@@ -178,19 +178,35 @@ the easiest thing to get wrong. Every one of these is enforced in code:
   credential but has none fails rather than falling back to the read credential.
   OpenHands/LLM credentials remain separate again, and the write token is never
   handed to quality-gate subprocesses.
-- **No credential in a URL, argv or a file.** HTTPS authentication uses a
-  temporary `GIT_ASKPASS` helper that contains no credential and reads it from a
-  process environment variable; the helper is removed after the single push. A
-  remote URL that already carries userinfo is refused with `UnsafeRemoteError`
-  before any authenticated operation, and the URL is never surfaced. The token is
-  never written to a URL, `.git/config`, argv, a log or an exception.
-- **Write credentials travel over TLS only.** The write token is never sent over
-  a plaintext transport. A `http://` Git remote is refused with
-  `UnsafeRemoteError` before any push — the authenticated path is never entered —
-  and the GitHub write client refuses a non-`https://` or userinfo-bearing API
-  base URL with `InsecureWriteTargetError` before the transport is invoked. The
-  rejected URL is never surfaced. The restriction is on the write path only: the
-  Phase 2A read-only client is unchanged.
+- **Write credentials travel over TLS only, to a pinned destination.** The write
+  token is never sent over a plaintext transport. The factory validates the
+  *effective* push destination — what Git itself resolves, including
+  `remote.<name>.pushurl` and `url.*.insteadOf`/`url.*.pushInsteadOf` rewrites,
+  via `git remote get-url --push --all` — rather than trusting
+  `remote.<name>.url` or `Workspace.repository_slug`. A network publication must
+  resolve to exactly one target; multiple network destinations are refused. The
+  single target is parsed with URL parsing (never substring matching) and must be
+  `https://<allowed-host>/<owner>/<repo>[.git]`, where the host equals
+  `FACTORY_GITHUB_GIT_HOST` (default `github.com`) and the path is exactly the
+  task's `target_repository`. Another host, another owner or repository, extra
+  path components, a port, userinfo, a query or a fragment is refused with
+  `UnsafeRemoteError` before the credential is exposed. HTTPS alone is never
+  sufficient, and the rejected URL is never surfaced. The authenticated push is
+  issued by remote name, which Git resolves with the same algorithm that was
+  validated, so the destination cannot drift after validation. The restriction is
+  on the write path only: the Phase 2A read-only client is unchanged.
+- **Network publication is HTTPS-only.** `ssh://`, `git://`, plaintext `http://`
+  and scp-style (`git@host:owner/repo.git`) remotes are refused with
+  `UnsafeRemoteError` — they can authenticate with ambient machine credentials
+  (`~/.ssh`, an SSH agent) rather than the dedicated write credential. The
+  authenticated push also runs with credential helpers cleared, global/system
+  config disabled, `GIT_TERMINAL_PROMPT=0` and hook isolation, so there is no
+  silent fallback to a credential helper or ambient credential. Local filesystem
+  remotes are unaffected and need no credential.
+- **The write token is never placed in a URL or argv.** HTTPS authentication uses
+  a temporary `GIT_ASKPASS` helper that holds no credential and reads it from a
+  process environment variable; the helper is removed after the single push. The
+  token is never written to a URL, `.git/config`, argv, a log or an exception.
 - **Git failures are sanitized, not chained.** `PublicationError` carries only
   factory identifiers. Git echoes failing commands and can print a
   credential-bearing remote URL, so raw stdout/stderr and the underlying

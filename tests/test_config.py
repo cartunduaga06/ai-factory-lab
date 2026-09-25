@@ -291,3 +291,23 @@ def test_write_token_placeholder_is_treated_as_unset() -> None:
     config = FactoryConfig.from_env({"GITHUB_WRITE_TOKEN": "<your-write-token>"})
     assert config.github_write_token is None
     assert config.redacted()["github_write_token"] is None
+
+
+def test_github_git_host_defaults_to_github_com_and_is_configurable() -> None:
+    from factory.infrastructure.config import DEFAULT_GITHUB_GIT_HOST
+
+    default = FactoryConfig.from_env({})
+    assert default.github_git_host == DEFAULT_GITHUB_GIT_HOST == "github.com"
+    # A hostname is not a secret, so the redacted view may show it.
+    assert default.redacted()["github_git_host"] == "github.com"
+
+    custom = FactoryConfig.from_env({"FACTORY_GITHUB_GIT_HOST": "github.example.com"})
+    assert custom.github_git_host == "github.example.com"
+    assert custom.redacted()["github_git_host"] == "github.example.com"
+
+
+def test_github_git_host_placeholder_is_treated_as_unset() -> None:
+    from factory.infrastructure.config import DEFAULT_GITHUB_GIT_HOST
+
+    config = FactoryConfig.from_env({"FACTORY_GITHUB_GIT_HOST": "<your-git-host>"})
+    assert config.github_git_host == DEFAULT_GITHUB_GIT_HOST
