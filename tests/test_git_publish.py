@@ -351,3 +351,109 @@ def test_force_push_is_never_used(tmp_path: Path) -> None:
     with pytest.raises(PublicationError):
         _publisher().publish(_task(), run)
     assert _rev(remote, workspace.branch) == _rev(other, "HEAD")
+
+
+# -- transport security ----------------------------------------------------
+
+
+class _PushSpy:
+    """Records factory-controlled git commands and authenticated-push entries."""
+
+    def __init__(self) -> None:
+        self.commands: list[list[str]] = []
+        self.token_pushes: list[str] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_run = GitWorkspacePublisher._run
+
+        def recording_run(
+            inner_self: GitWorkspacePublisher,
+            args: list[str],
+            workspace: Workspace,
+            **kwargs: object,
+        ) -> None:
+            self.commands.append(list(args))
+            real_run(inner_self, args, workspace, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(GitWorkspacePublisher, "_run", recording_run)
+        monkeypatch.setattr(
+            GitWorkspacePublisher,
+            "_push_with_token",
+            lambda inner_self, workspace, refspec: self.token_pushes.append(refspec),
+        )
+
+    def pushed(self) -> bool:
+        return any("push" in args for args in self.commands)
+
+
+def test_plain_http_remote_is_refused_before_any_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, remote, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    # Plaintext HTTP: the write credential must never cross an unencrypted
+    # transport. Built by concatenation so no traceback source line carries the
+    # literal URL value.
+    unsafe_url = "http" + "://example.invalid/target.git"
+    _git(source, "remote", "set-url", "origin", unsafe_url)
+
+    spy = _PushSpy()
+    spy.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    error = caught.value
+    formatted = "".join(traceback.format_exception(error))
+    assert not spy.pushed()
+    assert spy.token_pushes == []
+    for text in (SECRET, "http://example.invalid/target.git", "example.invalid", "http://"):
+        assert text not in str(error)
+        assert text not in repr(error)
+        assert text not in formatted
+    assert error.__cause__ is None and error.__context__ is None
+
+
+def test_http_remote_with_userinfo_secret_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, remote, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    unsafe_url = "http://" + "vault_user_93726" + ":" + SECRET + "@example.invalid/target.git"
+    _git(source, "remote", "set-url", "origin", unsafe_url)
+
+    spy = _PushSpy()
+    spy.install(monkeypatch)
+
+    with pytest.raises(UnsafeRemoteError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    error = caught.value
+    formatted = "".join(traceback.format_exception(error))
+    assert not spy.pushed()
+    assert spy.token_pushes == []
+    for text in (SECRET, "vault_user_93726", "example.invalid", "http://"):
+        assert text not in str(error)
+        assert text not in repr(error)
+        assert text not in formatted
+    assert error.__cause__ is None and error.__context__ is None
+
+
+def test_https_remote_reaches_the_authenticated_push_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, remote, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    # TLS is the only transport the write credential may use. The push itself is
+    # intercepted, so no live network call is made.
+    _git(source, "remote", "set-url", "origin", "https://github.com/example/target.git")
+
+    spy = _PushSpy()
+    spy.install(monkeypatch)
+
+    _publisher(write_token=SECRET).publish(_task(), run)
+
+    refspec = f"refs/heads/{workspace.branch}:refs/heads/{workspace.branch}"
+    assert spy.token_pushes == [refspec]
+    # The authenticated path owns the push; the plaintext path did not run one.
+    assert not spy.pushed()

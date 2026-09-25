@@ -226,8 +226,9 @@ propagated: only the numeric HTTP status crosses the client boundary.
 
 The write credential is a **separate** `GITHUB_WRITE_TOKEN`, never the read-only
 intake token. HTTPS push uses a temporary `GIT_ASKPASS` helper that holds no
-credential; a remote URL with embedded userinfo is refused. Git hooks are
-disabled for factory-controlled commit and push.
+credential; a remote URL with embedded userinfo, or a plaintext `http://` remote,
+is refused, and the GitHub write client accepts only an `https://` API base URL.
+Git hooks are disabled for factory-controlled commit and push.
 
 **The factory stops at `WAITING_HUMAN`.** It may commit, push a branch, open and
 persist a PR, and hand off to a human. It may never merge, enable auto-merge, push

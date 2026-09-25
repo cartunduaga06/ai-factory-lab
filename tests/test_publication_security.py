@@ -97,6 +97,60 @@ def test_github_sink_error_never_carries_the_secret() -> None:
     assert SECRET not in repr(sink)
 
 
+# -- TLS boundary ----------------------------------------------------------
+
+_UNSAFE_HTTP_API = "http" + "://api.example.invalid"
+_UNSAFE_USERINFO_API = "https://" + "api_user_93726" + ":" + SECRET + "@api.example.invalid"
+
+
+class _CountingTransport:
+    """A transport that records every invocation."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def request_json(self, method: str, url: str, headers: object, body: object) -> object:  # noqa: ANN401
+        self.calls += 1
+        return []
+
+
+def test_write_client_refuses_http_api_url_before_transport() -> None:
+    transport = _CountingTransport()
+    unsafe_url = _UNSAFE_HTTP_API
+    with pytest.raises(GitHubWriteError) as caught:
+        GitHubWriteClient(token=SECRET, api_url=unsafe_url, transport=transport)
+    assert transport.calls == 0
+    _assert_secret_absent(caught.value)
+
+
+def test_write_client_refuses_userinfo_api_url_before_transport() -> None:
+    transport = _CountingTransport()
+    unsafe_url = _UNSAFE_USERINFO_API
+    with pytest.raises(GitHubWriteError) as caught:
+        GitHubWriteClient(token=SECRET, api_url=unsafe_url, transport=transport)
+    assert transport.calls == 0
+    _assert_secret_absent(caught.value)
+
+
+def test_unsafe_url_never_appears_in_the_write_error() -> None:
+    transport = _CountingTransport()
+    unsafe_url = _UNSAFE_USERINFO_API
+    with pytest.raises(GitHubWriteError) as caught:
+        GitHubWriteClient(token=SECRET, api_url=unsafe_url, transport=transport)
+    formatted = "".join(traceback.format_exception(caught.value))
+    for text in (unsafe_url, "api.example.invalid", "api_user_93726"):
+        assert text not in str(caught.value)
+        assert text not in repr(caught.value)
+        assert text not in formatted
+
+
+def test_secure_api_url_still_reaches_the_transport() -> None:
+    transport = _CountingTransport()
+    client = GitHubWriteClient(token=SECRET, api_url="https://api.github.com", transport=transport)
+    assert client.get("/repos/example/target/pulls") == []
+    assert transport.calls == 1
+
+
 def _repository() -> object:
     from factory.domain.models import Repository
 

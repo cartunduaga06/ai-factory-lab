@@ -184,6 +184,13 @@ the easiest thing to get wrong. Every one of these is enforced in code:
   remote URL that already carries userinfo is refused with `UnsafeRemoteError`
   before any authenticated operation, and the URL is never surfaced. The token is
   never written to a URL, `.git/config`, argv, a log or an exception.
+- **Write credentials travel over TLS only.** The write token is never sent over
+  a plaintext transport. A `http://` Git remote is refused with
+  `UnsafeRemoteError` before any push — the authenticated path is never entered —
+  and the GitHub write client refuses a non-`https://` or userinfo-bearing API
+  base URL with `InsecureWriteTargetError` before the transport is invoked. The
+  rejected URL is never surfaced. The restriction is on the write path only: the
+  Phase 2A read-only client is unchanged.
 - **Git failures are sanitized, not chained.** `PublicationError` carries only
   factory identifiers. Git echoes failing commands and can print a
   credential-bearing remote URL, so raw stdout/stderr and the underlying

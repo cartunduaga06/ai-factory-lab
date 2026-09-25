@@ -22,6 +22,7 @@ from factory.integrations.github.pull_requests import GitHubPullRequestSink
 from factory.integrations.github.write_client import (
     GitHubWriteClient,
     GitHubWriteError,
+    InsecureWriteTargetError,
     UrllibWriteTransport,
     WriteTransport,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "GitHubRequestError",
     "GitHubWriteClient",
     "GitHubWriteError",
+    "InsecureWriteTargetError",
     "Transport",
     "UrllibTransport",
     "UrllibWriteTransport",

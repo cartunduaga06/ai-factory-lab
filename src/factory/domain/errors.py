@@ -215,12 +215,15 @@ class RevisionNotPublishableError(PublicationError):
 
 
 class UnsafeRemoteError(PublicationError):
-    """A git remote URL carries embedded credentials and was refused.
+    """A git remote URL is unsafe to authenticate through and was refused.
 
-    The factory never authenticates through a credential-bearing remote: it must
-    not reuse, mutate or persist a userinfo-embedded URL. Publication stops before
-    any authenticated operation runs. The message names the workspace only — never
-    the URL, which is the very thing that could contain a secret.
+    Raised when the remote carries embedded credentials
+    (``scheme://user:pass@host``) or uses plaintext ``http://``. The factory never
+    authenticates through such a remote: it must not reuse, mutate or persist a
+    userinfo-embedded URL, and the write credential must never cross an
+    unencrypted transport. Publication stops before any authenticated operation
+    runs. The message names the workspace only — never the URL, which is the very
+    thing that could contain a secret.
     """
 
     def __init__(self, workspace_id: str) -> None:

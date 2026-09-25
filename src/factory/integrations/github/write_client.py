@@ -8,6 +8,10 @@ pull request), so this client is deliberately separate from the read-only
   ``error``, ``detail``, an arbitrary string) is *never* propagated into an
   exception. Only the trusted numeric HTTP status escapes, so no provider text
   can reach a log, a traceback or a persisted value.
+* **TLS is mandatory.** The API base URL must be ``https://`` with no embedded
+  userinfo. A plaintext ``http://`` target — or one that already carries
+  credentials — is refused before any request, so the write credential can never
+  cross an unencrypted transport. The rejection never names the URL.
 * **No credential in the error surface.** The token is held privately and is
   never placed in a URL, a header value that is echoed, an exception message, a
   ``repr``, ``__cause__`` or ``__context__``.
@@ -39,6 +43,21 @@ class GitHubWriteError(RuntimeError):
     def __init__(self, status: int) -> None:
         super().__init__(f"GitHub write request failed with status {status}")
         self.status = status
+
+
+class InsecureWriteTargetError(GitHubWriteError):
+    """The GitHub API base URL is not safe to authenticate a write request.
+
+    Raised when the configured base URL is plaintext ``http://`` or carries
+    embedded userinfo: the write credential must never cross an unencrypted
+    transport, and the factory must not reuse a credential-bearing URL. The
+    rejection happens before the transport is invoked, and the message names
+    neither the URL, a username, a password nor the token.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(0)
+        self.args = ("GitHub write refused: API base URL is not HTTPS",)
 
 
 class WriteTransport(Protocol):
@@ -92,7 +111,13 @@ class UrllibWriteTransport:
 
 
 class GitHubWriteClient:
-    """Write-capable GitHub REST client scoped to a single API base URL."""
+    """Write-capable GitHub REST client scoped to a single HTTPS API base URL.
+
+    The base URL is validated eagerly and must be ``https://`` with no embedded
+    userinfo: a write credential must never cross an unencrypted transport, and
+    the client refuses rather than silently upgrading or reusing a
+    credential-bearing URL. The rejection names neither the URL nor the token.
+    """
 
     _DEFAULT_ACCEPT = "application/vnd.github+json"
 
@@ -102,8 +127,13 @@ class GitHubWriteClient:
         api_url: str,
         transport: WriteTransport | None = None,
     ) -> None:
+        normalized = api_url.strip().rstrip("/")
+        if not _is_secure_https(normalized) or _has_embedded_credentials(normalized):
+            # Refuse before the transport is created or ever called, so no
+            # credential can be transmitted over an unsafe transport.
+            raise InsecureWriteTargetError()
         self._token = token
-        self._api_url = api_url.rstrip("/")
+        self._api_url = normalized
         self._transport = transport or UrllibWriteTransport()
 
     def __repr__(self) -> str:
@@ -153,9 +183,24 @@ class GitHubWriteClient:
         }
 
 
+def _is_secure_https(url: str) -> bool:
+    """Whether ``url`` is an ``https://`` URL (the only transport a write may use)."""
+    return url.lower().startswith("https://")
+
+
+def _has_embedded_credentials(url: str) -> bool:
+    """Whether ``url`` carries userinfo (``scheme://user:pass@host``)."""
+    scheme, sep, remainder = url.partition("://")
+    if not sep:
+        return False
+    authority = remainder.split("/", 1)[0]
+    return "@" in authority
+
+
 __all__ = [
     "GitHubWriteClient",
     "GitHubWriteError",
+    "InsecureWriteTargetError",
     "UrllibWriteTransport",
     "WriteTransport",
 ]

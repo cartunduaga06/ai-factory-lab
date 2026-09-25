@@ -387,10 +387,13 @@ The write credential is a **separate** token (`GITHUB_WRITE_TOKEN`), never the
 read-only intake token. HTTPS authentication uses a temporary `GIT_ASKPASS`
 helper that contains no credential and reads it from a process environment
 variable; the helper is removed after the single push. A remote URL that already
-carries userinfo (`https://user:pass@host/...`) is **refused** with
-`UnsafeRemoteError` before any authenticated operation, and the URL is never
-echoed. The write token is never placed in a URL, argv, `.git/config`, a log or
-an exception, and it is never handed to quality-gate subprocesses.
+carries userinfo (`https://user:pass@host/...`) or uses plaintext `http://` is
+**refused** with `UnsafeRemoteError` before any authenticated operation, and the
+URL is never echoed. For the same reason the GitHub write client accepts only an
+`https://` API base URL with no userinfo, refusing anything else with
+`InsecureWriteTargetError` before the transport is invoked. The write token is
+never placed in a URL, argv, `.git/config`, a log or an exception, and it is
+never handed to quality-gate subprocesses.
 
 ### Pull request persistence
 

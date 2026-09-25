@@ -31,9 +31,10 @@ Safety properties, all enforced below:
   persisted), so a repository hook cannot execute with the write credential in
   the environment.
 * **No credential in a URL or argv.** The remote URL is inspected first; a
-  userinfo-bearing URL is refused. HTTPS authentication uses a temporary
-  ``GIT_ASKPASS`` helper that contains no credential and reads it from a process
-  environment variable; the helper is removed after use.
+  userinfo-bearing URL or a plaintext ``http://`` remote is refused, so the write
+  credential never crosses an unencrypted transport. HTTPS authentication uses a
+  temporary ``GIT_ASKPASS`` helper that contains no credential and reads it from
+  a process environment variable; the helper is removed after use.
 * **No empty commit.** A branch with no publishable diff and no previous factory
   commit is refused rather than committed. A retry reuses the existing factory
   commit instead of creating a duplicate.
@@ -221,6 +222,9 @@ class GitWorkspacePublisher(WorkspacePublisher):
         ``HEAD`` and history rewrites are impossible. HTTPS authentication uses a
         temporary, credential-free askpass helper, created and removed around the
         single push.
+
+        A plaintext ``http://`` remote is refused before any push: the write
+        credential must never cross an unencrypted transport.
         """
         branch = workspace.branch
         if branch in PROTECTED_BRANCHES or branch.startswith("+"):
@@ -228,6 +232,11 @@ class GitWorkspacePublisher(WorkspacePublisher):
 
         url = self._remote_url(workspace)
         refspec = f"refs/heads/{branch}:refs/heads/{branch}"
+
+        if _is_http(url):
+            # Defense in depth: an unencrypted remote must never reach the
+            # authenticated push path, even if the earlier check were bypassed.
+            raise UnsafeRemoteError(workspace.workspace_id)
 
         if _is_https(url):
             if self._write_token is None:
@@ -271,17 +280,20 @@ class GitWorkspacePublisher(WorkspacePublisher):
     # -- git plumbing ------------------------------------------------------
 
     def _remote_url(self, workspace: Workspace) -> str:
-        """Return the configured remote URL, refusing one with embedded userinfo.
+        """Return the configured remote URL, refusing one with embedded userinfo
+        or a plaintext ``http://`` scheme.
 
         The factory never authenticates through a credential-bearing remote, so a
-        URL such as ``https://token@host/...`` is refused before any push. The URL
-        is never surfaced in the error.
+        URL such as ``https://token@host/...`` is refused before any push. A
+        plaintext ``http://`` remote is likewise refused, because the write
+        credential must never cross an unencrypted transport. The URL is never
+        surfaced in the error.
         """
         url = self._capture(["config", "--get", f"remote.{self._remote}.url"], workspace)
         if url is None or not url.strip():
             raise PublicationError(f"workspace {workspace.workspace_id} has no remote configured")
         url = url.strip()
-        if _has_embedded_credentials(url):
+        if _has_embedded_credentials(url) or _is_http(url):
             raise UnsafeRemoteError(workspace.workspace_id)
         return url
 
@@ -339,8 +351,12 @@ class GitWorkspacePublisher(WorkspacePublisher):
 
 
 def _is_https(url: str) -> bool:
-    lowered = url.lower()
-    return lowered.startswith("https://") or lowered.startswith("http://")
+    return url.lower().startswith("https://")
+
+
+def _is_http(url: str) -> bool:
+    """Whether ``url`` is plaintext HTTP (as opposed to HTTPS or another scheme)."""
+    return url.lower().startswith("http://")
 
 
 def _has_embedded_credentials(url: str) -> bool:
