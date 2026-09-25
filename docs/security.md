@@ -155,6 +155,112 @@ The Phase 4 stop line is itself a safety property: a green validation leaves the
 task in `VALIDATING` and **does not** open a PR. Nothing in this phase commits,
 pushes, opens a pull request, merges or deploys.
 
+## Publication and the human gate (Phase 5)
+
+Phase 5 is where the factory first writes to a remote, so the boundary is again
+the easiest thing to get wrong. Every one of these is enforced in code:
+
+- **Publication is guarded twice.** It is refused before any write unless the
+  run is the task's latest, `SUCCEEDED`, and `READY_FOR_NEXT_PHASE` with an
+  isolated workspace. A red or incomplete validation never produces a commit, a
+  push or a PR, and a superseded run never publishes.
+- **Only the validated revision is published.** A green gate result alone is not
+  enough: validation binds the exact workspace revision that passed the gates (for
+  Git, the tree object id of the complete publishable state), and publication
+  re-verifies it. `RunTrackingService` fingerprints the workspace immediately
+  before and after the gates; if it changed, a required `workspace_integrity` gate
+  is recorded as failed and no revision is bound (the configured gates are never
+  re-run). `PublicationService` refuses a run with no bound revision, and
+  `GitWorkspacePublisher` refuses a workspace (or a commit tree) that no longer
+  matches, **before** any commit or credential exposure. A completed agent that
+  edits the workspace — or its Git configuration — after validation cannot get the
+  altered state pushed or published.
+- **Only the isolated branch is committed and pushed.** The commit happens inside
+  `Workspace.path` only — never in the source checkout, never on `main`. The
+  destination ref is validated explicitly, `main`/`master`/`HEAD`/`+`-refs and
+  option-like refs are refused, and no force option is ever used. History is
+  never rewritten.
+- **The pushed source is the verified commit, not the mutable branch.** After the
+  commit tree is checked against `AgentRun.validated_revision`, the push sources
+  that commit SHA directly (`<commit_sha>:refs/heads/<branch>`), so a local branch
+  moved between verification and the push — a TOCTOU window — cannot change what
+  the remote receives. The verified commit is the commit published, and the
+  destination branch is exactly `Workspace.branch`.
+- **Git hooks cannot run with factory credentials.** Factory-controlled commit
+  and push run with `core.hooksPath=/dev/null` passed inline, so a
+  repository-controlled hook never executes with the write credential in the
+  environment.
+- **The write token is separate and never implicit.** `GITHUB_WRITE_TOKEN` is
+  distinct from the read-only intake token; a publication that needs a write
+  credential but has none fails rather than falling back to the read credential.
+  OpenHands/LLM credentials remain separate again, and the write token is never
+  handed to quality-gate subprocesses.
+- **Write credentials travel over TLS only, to a pinned destination.** The write
+  token is never sent over a plaintext transport. The factory validates the
+  *effective* push destination — what Git itself resolves, including
+  `remote.<name>.pushurl` and `url.*.insteadOf`/`url.*.pushInsteadOf` rewrites,
+  via `git remote get-url --push --all` — rather than trusting
+  `remote.<name>.url` or `Workspace.repository_slug`. A network publication must
+  resolve to exactly one target; multiple network destinations are refused. The
+  single target is parsed with URL parsing (never substring matching) and must be
+  `https://<allowed-host>/<owner>/<repo>[.git]`, where the host equals
+  `FACTORY_GITHUB_GIT_HOST` (default `github.com`) and the path is exactly the
+  task's `target_repository`. Another host, another owner or repository, extra
+  path components, a port, userinfo, a query or a fragment is refused with
+  `UnsafeRemoteError` before the credential is exposed. HTTPS alone is never
+  sufficient, and the rejected URL is never surfaced. The authenticated push is
+  issued by remote name, which Git resolves with the same algorithm that was
+  validated, so the destination cannot drift after validation. The restriction is
+  on the write path only: the Phase 2A read-only client is unchanged.
+- **Network publication is HTTPS-only.** `ssh://`, `git://`, plaintext `http://`
+  and scp-style (`git@host:owner/repo.git`) remotes are refused with
+  `UnsafeRemoteError` — they can authenticate with ambient machine credentials
+  (`~/.ssh`, an SSH agent) rather than the dedicated write credential. The
+  authenticated push also runs with credential helpers cleared, global/system
+  config disabled, `GIT_TERMINAL_PROMPT=0` and hook isolation, so there is no
+  silent fallback to a credential helper or ambient credential. Local filesystem
+  remotes are unaffected and need no credential.
+- **The write token is never placed in a URL or argv.** HTTPS authentication uses
+  a temporary `GIT_ASKPASS` helper that holds no credential and reads it from a
+  process environment variable; the helper is removed after the single push. The
+  token is never written to a URL, `.git/config`, argv, a log or an exception.
+- **Git failures are sanitized, not chained.** `PublicationError` carries only
+  factory identifiers. Git echoes failing commands and can print a
+  credential-bearing remote URL, so raw stdout/stderr and the underlying
+  exception are discarded — never attached as `__cause__`/`__context__`, which
+  Python would render in a traceback.
+- **GitHub response bodies are untrusted.** For every Phase 5 write, a GitHub
+  error body (`message`, `error`, `detail`, an arbitrary network reason) is never
+  propagated. `GitHubWriteError` carries only the numeric HTTP status, and it is
+  raised outside the `except` block so the discarded exception is not retained as
+  `__context__` either. No token, header value, body or URL credential can reach
+  `str(error)`, `repr(error)` or a traceback.
+- **A created PR is validated like a recovered one.** A successful
+  `POST /pulls` response is untrusted: it is accepted only when it structurally
+  confirms the full expected identity (`state == open`, head repository/ref, base
+  repository/ref, positive integer number) through the same matcher used for
+  lookups. A wrong, closed or malformed success payload is never persisted and
+  never advances the task; it is resolved through an exact lookup or refused with
+  a sanitized error. Factory identity is never synthesized over provider text.
+- **PR content is deterministic and bounded.** A PR title is derived from the task
+  title, bounded and stripped of non-printables. The body carries only safe
+  factory metadata — source Issue reference, task/run ids, validation outcome and
+  gate names/statuses. No raw agent output, provider payload, stdout/stderr,
+  environment value or secret is ever copied into a PR.
+- **No empty publication.** A branch with no publishable diff and no previous
+  factory commit is refused rather than committed empty, and an empty PR is never
+  opened.
+- **Publication is idempotent and restart-safe.** A persisted PR short-circuits
+  the flow, and every step is retry-safe, so a crash at any point (commit/push/PR
+  create/persist/lifecycle) is recovered without a duplicate commit, push, PR row
+  or transition. Storage enforces one PR per run and one publication identity per
+  branch.
+- **No automatic merge, ever.** The factory may commit, push, open a PR, persist
+  it and move a task to `WAITING_HUMAN` — and stops there. There is no merge,
+  auto-merge, close, deploy or Issue-mutation operation in `PullRequestSink`,
+  `GitHubWriteClient` or the domain. Automatic merge is not merely discouraged;
+  it is unreachable.
+
 ## Credential separation
 
 Two different credentials exist around this project and must never be conflated:
@@ -167,6 +273,19 @@ Two different credentials exist around this project and must never be conflated:
 The factory runtime credential requires no write scope. The execution credential
 is used only by the environment that builds the factory; it is never written into
 configuration, code, test fixtures, documentation, logs or a git remote URL.
+
+Phase 5 adds a third, **write-scoped** credential for the factory itself:
+
+| Credential | Purpose |
+|---|---|
+| `GITHUB_WRITE_TOKEN` | push an isolated branch and open a PR on the target repository |
+
+It is deliberately separate from `GITHUB_TOKEN`: the intake credential is
+read-only, and the factory must not implicitly reuse a read-scoped token for a
+write. A publication that needs a write credential but has none fails rather than
+falling back to the intake token. The write token is masked by
+`--show-config`, is never in a URL, argv or `.git/config`, and is never handed to
+quality-gate subprocesses.
 
 ## Secrets handling
 

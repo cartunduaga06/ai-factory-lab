@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from factory.domain.enums import QualityGateStatus, RunStatus, TaskStatus, ValidationOutcome
-from factory.domain.errors import AgentCollectError, FactoryError
+from factory.domain.errors import AgentCollectError, FactoryError, WorkspaceRevisionError
 from factory.domain.models import (
     AgentAdapter,
     AgentRun,
@@ -35,9 +35,24 @@ from factory.domain.models import (
     QualityGateSpec,
     Workspace,
 )
-from factory.domain.ports import QualityGateRunner, RunRepository, TaskRepository
+from factory.domain.ports import (
+    QualityGateRunner,
+    RunRepository,
+    TaskRepository,
+    WorkspaceRevisionInspector,
+)
 from factory.orchestration.machine import InvalidTransitionError
 from factory.orchestration.transitions import TaskLifecycleService
+
+#: Name of the factory-controlled integrity gate recorded when the workspace
+#: changes while the configured gates are executing. It is required, so a
+#: mutation makes the run's validation outcome ``GATES_FAILED`` (which blocks
+#: publication) rather than silently publishing an unverified revision.
+WORKSPACE_INTEGRITY_GATE = "workspace_integrity"
+
+#: Sanitized, non-identifying detail for the integrity gate. Never a path, a delta
+#: or raw git output.
+_WORKSPACE_MUTATED_DETAIL = "workspace changed during validation"
 
 
 @dataclass(slots=True, frozen=True)
@@ -68,11 +83,13 @@ class RunTrackingService:
         *,
         gate_specs: Sequence[QualityGateSpec] = (),
         gate_runner: QualityGateRunner | None = None,
+        revision_inspector: WorkspaceRevisionInspector | None = None,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
         self._gate_specs = tuple(gate_specs)
         self._gate_runner = gate_runner
+        self._revision_inspector = revision_inspector
         self._lifecycle = TaskLifecycleService(tasks)
 
     def refresh(self, run_id: str, adapter: AgentAdapter) -> RunRefresh:
@@ -118,7 +135,7 @@ class RunTrackingService:
             raise AgentCollectError(run.run_id, run.task_id)
 
         if run.status is RunStatus.SUCCEEDED:
-            run.gates = self._evaluate_gates(run)
+            run.gates, run.validated_revision = self._validate_revision(run)
 
         self._runs.update_run(run)
         self._drive_task(run)
@@ -138,6 +155,12 @@ class RunTrackingService:
         gates are evaluated once and persisted. With no gate specs configured the
         factory invents nothing — an empty gate list is the documented result.
 
+        A successful run with green gates but **no** bound revision (a crash
+        between running the gates and persisting the revision, from a build that
+        predates revision binding) is left unbound. The factory never invents a
+        revision from stale gate results: an unverified revision is never claimed
+        green, so such a run is simply not publishable until it is re-validated.
+
         Only the task's latest run may drive the task. A superseded terminal run
         (the task was retried and now has a newer run) must not rewind the
         lifecycle, so it is left alone.
@@ -145,7 +168,7 @@ class RunTrackingService:
         if not self._is_latest_run(run):
             return
         if run.status is RunStatus.SUCCEEDED and not run.gates and self._gate_specs:
-            run.gates = self._evaluate_gates(run)
+            run.gates, run.validated_revision = self._validate_revision(run)
             self._runs.update_run(run)
         self._drive_task(run)
 
@@ -160,6 +183,71 @@ class RunTrackingService:
         return bool(runs) and runs[-1].run_id == run.run_id
 
     # -- internals ---------------------------------------------------------
+
+    def _validate_revision(self, run: AgentRun) -> tuple[tuple[QualityGate, ...], str | None]:
+        """Run the gates against the workspace and bind a validated revision.
+
+        Returns the gate results and the durable revision identity that passed
+        them (or ``None`` if no revision may be bound).
+
+        The revision is inspected **before** and **after** the gates. Binding it
+        only when the two match is what makes "only the exact revision that passed
+        the gates may be published" true: a gate that mutated the workspace (or a
+        concurrent writer) is detected and the run is not marked publishable. The
+        gates are never silently re-run.
+
+        * required gates failed → ``validated_revision`` is ``None``;
+        * workspace changed during validation → a required
+          ``workspace_integrity`` gate is recorded as failed and the revision is
+          not bound;
+        * no revision inspector is injected → no revision is bound. The factory
+          never guesses one; publication then refuses the run.
+        """
+        if run.workspace is None:
+            # `_evaluate_gates` records every gate as failed; nothing is bound.
+            return self._evaluate_gates(run), None
+
+        before = self._fingerprint(run.workspace)
+        gates = self._evaluate_gates(run)
+        after = self._fingerprint(run.workspace)
+
+        if before is None or after is None:
+            # The workspace could not be inspected, so no revision can be bound.
+            return gates, None
+        if before != after:
+            # The workspace changed while the gates ran. Record a deterministic,
+            # required integrity failure rather than trusting either snapshot, and
+            # do not bind a revision. No gate is re-run.
+            gates = (
+                *gates,
+                QualityGate(
+                    name=WORKSPACE_INTEGRITY_GATE,
+                    status=QualityGateStatus.FAILED,
+                    detail=_WORKSPACE_MUTATED_DETAIL,
+                    required=True,
+                ),
+            )
+            return gates, None
+        if not all(gate.is_green for gate in gates if gate.required):
+            # A required gate is not green: nothing may be published.
+            return gates, None
+        return gates, after
+
+    def _fingerprint(self, workspace: Workspace) -> str | None:
+        """Return the workspace revision, or ``None`` if it cannot be inspected.
+
+        A revision inspector is optional and an inspection failure is normalized
+        to ``None`` — a failed inspection never publishes, and the sanitized
+        error is discarded rather than chained.
+        """
+        if self._revision_inspector is None:
+            return None
+        try:
+            return self._revision_inspector.fingerprint(workspace)
+        except WorkspaceRevisionError:
+            return None
+        except Exception:  # noqa: BLE001 - a defective inspector must not leak
+            return None
 
     def _evaluate_gates(self, run: AgentRun) -> tuple[QualityGate, ...]:
         """Run every configured gate in the run's workspace.

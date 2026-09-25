@@ -19,8 +19,10 @@ from enum import StrEnum
 from factory.domain.models import QualityGateSpec
 
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
+DEFAULT_GITHUB_GIT_HOST = "github.com"
 DEFAULT_WORKSPACE_ROOT = "./.workspaces"
 DEFAULT_DATABASE_PATH = "./factory.db"
+DEFAULT_TARGET_BRANCH = "main"
 
 
 class DatabaseScheme(StrEnum):
@@ -212,6 +214,15 @@ class FactoryConfig:
     # Declarative gate definitions supplied by the application layer. The factory
     # never invents a gate a repository did not define.
     quality_gates: tuple[QualityGateSpec, ...] = ()
+    # Separate WRITE credential for Phase 5 publication (push + PR). Distinct from
+    # the read-only intake token: the factory must not implicitly reuse a
+    # read-scoped credential for writes.
+    github_write_token: str | None = None
+    # Explicit base branch a published PR targets. Defaults to ``main``.
+    target_default_branch: str = DEFAULT_TARGET_BRANCH
+    # Git host an authenticated HTTPS push may target. Injectable so a GitHub
+    # Enterprise deployment does not need code changes. Not a secret.
+    github_git_host: str = DEFAULT_GITHUB_GIT_HOST
 
     @property
     def database(self) -> DatabaseConfig:
@@ -246,6 +257,13 @@ class FactoryConfig:
             source_checkout=_clean(source.get("FACTORY_SOURCE_CHECKOUT")),
             workspace_base_ref=_clean(source.get("FACTORY_WORKSPACE_BASE_REF")),
             quality_gates=parse_gate_specs(source.get("FACTORY_QUALITY_GATES")),
+            github_write_token=_clean(source.get("GITHUB_WRITE_TOKEN")),
+            target_default_branch=(
+                _clean(source.get("FACTORY_TARGET_DEFAULT_BRANCH")) or DEFAULT_TARGET_BRANCH
+            ),
+            github_git_host=(
+                _clean(source.get("FACTORY_GITHUB_GIT_HOST")) or DEFAULT_GITHUB_GIT_HOST
+            ),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -275,6 +293,9 @@ class FactoryConfig:
             "quality_gates": [
                 {"name": spec.name, "required": spec.required} for spec in self.quality_gates
             ],
+            "github_write_token": "***" if self.github_write_token else None,
+            "target_default_branch": self.target_default_branch,
+            "github_git_host": self.github_git_host,
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
 
@@ -321,6 +342,8 @@ def parse_gate_specs(raw: str | None) -> tuple[QualityGateSpec, ...]:
 __all__ = [
     "DEFAULT_DATABASE_PATH",
     "DEFAULT_GITHUB_API_URL",
+    "DEFAULT_GITHUB_GIT_HOST",
+    "DEFAULT_TARGET_BRANCH",
     "DEFAULT_WORKSPACE_ROOT",
     "AgentConfig",
     "DatabaseConfig",

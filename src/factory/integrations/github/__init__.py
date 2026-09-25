@@ -1,7 +1,8 @@
 """GitHub integration.
 
-Read-only in Phase 2A: the factory observes Issues and does not yet control the
-GitHub issue lifecycle (no labelling, commenting, closing or editing).
+Read-only in Phase 2A for issue intake; Phase 5 adds a strictly bounded
+write path for pull requests (push a branch, open a PR). The factory still never
+merges, closes or otherwise mutates an Issue.
 """
 
 from factory.integrations.github.client import (
@@ -17,6 +18,14 @@ from factory.integrations.github.issues import (
     GITHUB_PROVIDER,
     GitHubIssueSource,
 )
+from factory.integrations.github.pull_requests import GitHubPullRequestSink
+from factory.integrations.github.write_client import (
+    GitHubWriteClient,
+    GitHubWriteError,
+    InsecureWriteTargetError,
+    UrllibWriteTransport,
+    WriteTransport,
+)
 
 __all__ = [
     "ELIGIBILITY_LABEL",
@@ -25,7 +34,13 @@ __all__ = [
     "GitHubClient",
     "GitHubError",
     "GitHubIssueSource",
+    "GitHubPullRequestSink",
     "GitHubRequestError",
+    "GitHubWriteClient",
+    "GitHubWriteError",
+    "InsecureWriteTargetError",
     "Transport",
     "UrllibTransport",
+    "UrllibWriteTransport",
+    "WriteTransport",
 ]

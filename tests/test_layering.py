@@ -158,6 +158,65 @@ def test_ports_define_the_phase_4_contracts() -> None:
     assert hasattr(ports.RunRepository, "update_run")
 
 
+def test_ports_define_the_phase_5_contracts() -> None:
+    # Publication ports live in the domain, so orchestration never imports
+    # factory.integrations to see the PullRequestSink contract.
+    from factory.domain import ports
+
+    assert hasattr(ports, "WorkspacePublisher")
+    assert hasattr(ports, "PullRequestSink")
+    assert hasattr(ports, "PullRequestRepository")
+
+
+def test_pull_request_sink_is_accessible_without_orchestration_importing_integrations() -> None:
+    # The contract can be reached from the domain boundary alone.
+    from factory.domain.ports import PullRequestSink
+
+    assert hasattr(PullRequestSink, "find_open_pull_request")
+    assert hasattr(PullRequestSink, "open_pull_request")
+    # And there is deliberately no merge capability anywhere in the contract.
+    assert not hasattr(PullRequestSink, "merge_pull_request")
+    assert not hasattr(PullRequestSink, "merge")
+
+
+def test_concrete_publication_components_live_outside_core_layers() -> None:
+    assert (SRC / "integrations" / "workspace" / "git_publish.py").exists()
+    assert (SRC / "integrations" / "github" / "pull_requests.py").exists()
+    assert (SRC / "integrations" / "github" / "write_client.py").exists()
+    for layer in ("domain", "orchestration"):
+        violations = _violations(layer, "factory.integrations.github")
+        violations += _violations(layer, "factory.integrations.workspace.git_publish")
+        assert violations == []
+
+
+def test_publication_module_imports_no_concrete_implementation() -> None:
+    # PublicationService is the Phase 5 orchestration seam: it may see only domain
+    # ports, never GitHub, OpenHands, git, subprocess or SQLite.
+    modules = _imports_in(SRC / "orchestration" / "publication.py")
+    forbidden = {
+        module
+        for module in modules
+        if module.startswith(
+            (
+                "factory.integrations",
+                "factory.infrastructure",
+                "sqlite3",
+                "subprocess",
+                "git",
+            )
+        )
+    }
+    assert forbidden == set()
+
+
+def test_domain_has_no_merge_or_github_write_capability() -> None:
+    # The domain model must not grow a merge or deploy capability.
+    from factory.domain import models
+
+    for name in ("merge_pull_request", "merge_pr", "deploy"):
+        assert not hasattr(models.PullRequest, name)
+
+
 @pytest.mark.parametrize(
     "package",
     ["domain", "orchestration", "integrations", "infrastructure"],

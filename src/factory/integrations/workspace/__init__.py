@@ -7,5 +7,11 @@ filesystem and a version-control tool, so it lives here — outside ``domain`` a
 """
 
 from factory.integrations.workspace.git import GitWorktreeWorkspaceProvisioner
+from factory.integrations.workspace.git_publish import GitWorkspacePublisher
+from factory.integrations.workspace.revision import GitWorkspaceRevisionInspector
 
-__all__ = ["GitWorktreeWorkspaceProvisioner"]
+__all__ = [
+    "GitWorkspacePublisher",
+    "GitWorkspaceRevisionInspector",
+    "GitWorktreeWorkspaceProvisioner",
+]

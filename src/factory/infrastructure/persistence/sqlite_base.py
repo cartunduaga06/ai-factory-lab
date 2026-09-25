@@ -12,7 +12,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from factory.infrastructure.persistence.schema import SCHEMA_STATEMENTS
+from factory.infrastructure.persistence.schema import (
+    MIGRATION_STATEMENTS,
+    SCHEMA_STATEMENTS,
+)
 
 
 class SqliteRepository:
@@ -28,12 +31,27 @@ class SqliteRepository:
         return self._path
 
     def initialize(self) -> None:
-        """Create the schema if it does not exist. Safe to call repeatedly."""
+        """Create the schema if it does not exist. Safe to call repeatedly.
+
+        Idempotent ``CREATE ... IF NOT EXISTS`` statements add any missing table
+        or index. The migration statements then bring an older database up to
+        date — for example adding ``agent_runs.validated_revision`` — and are
+        applied tolerantly, since a column that already exists (or a fresh
+        database that was created with it) would otherwise raise a duplicate-column
+        error. No migration drops or rewrites existing data.
+        """
         if self._path != ":memory:":
             Path(self._path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
+            for statement in MIGRATION_STATEMENTS:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    # The column already exists (a fresh database, or a repeat
+                    # initialization). Nothing to migrate; leave the data alone.
+                    continue
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)

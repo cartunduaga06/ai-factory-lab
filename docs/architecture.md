@@ -72,8 +72,11 @@ Two repositories are involved and must stay separate:
 ┌───────────────────────────────────────────────────────────────┐
 │                            domain                             │
 │  FactoryTask · TaskSource · TaskTransition · AgentRun ·       │
-│  Repository · Workspace · PullRequest · QualityGate ·         │
-│  AgentAdapter (protocol) · IssueSource/TaskRepository (ports) │
+│  Repository · Workspace · PullRequest · PublishedRevision ·   │
+│  QualityGate · AgentAdapter (protocol) · IssueSource/         │
+│  TaskRepository/RunRepository/WorkspaceProvisioner/           │
+│  QualityGateRunner/WorkspacePublisher/PullRequestSink/        │
+│  WorkspaceRevisionInspector/PullRequestRepository (ports)     │
 │  pure data + invariants — no I/O                              │
 └───────────────────────────▲───────────────────────────────────┘
                             │ depends on
@@ -81,6 +84,7 @@ Two repositories are involved and must stay separate:
 │                        orchestration                          │
 │  TaskStateMachine · lifecycle table · IssueIntakeService ·    │
 │  TaskLifecycleService · DispatchService · RunTrackingService  │
+│  PublicationService                                           │
 │  depends on ports and the lifecycle, never a concrete engine, │
 │  GitHub client, SQLite implementation, git or subprocess      │
 └───────────────────────────▲───────────────────────────────────┘
@@ -88,17 +92,19 @@ Two repositories are involved and must stay separate:
 ┌───────────────────────────┴───────────────────────────────────┐
 │                        integrations                           │
 │  GitHub: GitHubClient (read-only) · GitHubIssueSource         │
+│  GitHub: GitHubWriteClient · GitHubPullRequestSink (Phase 5)  │
 │  OpenHands: OpenHandsClient · OpenHandsExecution · status     │
 │  mapping · OpenHandsAdapter (AgentAdapter implementation)     │
 │  Workspaces: GitWorktreeWorkspaceProvisioner (git worktree)   │
+│  Workspaces: GitWorkspacePublisher (commit + secure push)     │
 │  Gates: LocalQualityGateRunner (argv, no shell, bounded)      │
-│  PullRequestSink · AgentAdapterBase                           │
+│  AgentAdapterBase                                             │
 └───────────────────────────▲───────────────────────────────────┘
                             │ depends on
 ┌───────────────────────────┴───────────────────────────────────┐
 │                      infrastructure                           │
 │  FactoryConfig (env) · logging · SqliteTaskRepository ·       │
-│  SqliteRunRepository                                          │
+│  SqliteRunRepository · SqlitePullRequestRepository            │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -115,25 +121,32 @@ src/factory/
 ├── domain/
 │   ├── enums.py             # TaskStatus, RunStatus, QualityGateStatus, ...
 │   ├── models.py            # dataclasses + AgentAdapter protocol + TaskSource
-│   ├── errors.py            # domain errors (duplicate source, lost update, dispatch)
+│   ├── errors.py            # domain errors (duplicate source, lost update, dispatch,
+│   │                        #   publication, unsafe remote, duplicate PR)
 │   └── ports.py             # IssueSource, TaskRepository, RunRepository +
-│                            #   WorkspaceProvisioner, QualityGateRunner
+│                            #   WorkspaceProvisioner, QualityGateRunner +
+│                            #   WorkspacePublisher, WorkspaceRevisionInspector,
+│                            #   PullRequestSink, PullRequestRepository
 ├── orchestration/
 │   ├── lifecycle.py         # transition table (single source of truth)
 │   ├── machine.py           # TaskStateMachine, InvalidTransitionError
 │   ├── intake.py            # IssueIntakeService (provider-agnostic)
 │   ├── dispatch.py          # DispatchService (claim + workspace + run)
 │   ├── tracking.py          # RunTrackingService (collect → validate → lifecycle)
+│   ├── publication.py       # PublicationService (publish → PR → WAITING_HUMAN)
 │   └── transitions.py       # TaskLifecycleService (state machine + persistence)
 ├── integrations/
-│   ├── base.py              # PullRequestSink, AgentAdapterBase
+│   ├── base.py              # AgentAdapterBase; re-exports the domain ports
 │   ├── gates/
 │   │   └── local.py         # LocalQualityGateRunner (argv, no shell, bounded)
 │   ├── workspace/
-│   │   └── git.py           # GitWorktreeWorkspaceProvisioner (worktree per run)
+│   │   ├── git.py           # GitWorktreeWorkspaceProvisioner (worktree per run)
+│   │   └── git_publish.py   # GitWorkspacePublisher (commit + secure push)
 │   ├── github/
 │   │   ├── client.py        # read-only REST client, injectable transport
-│   │   └── issues.py        # GitHubIssueSource (IssueSource implementation)
+│   │   ├── issues.py        # GitHubIssueSource (IssueSource implementation)
+│   │   ├── write_client.py  # write-capable REST client, sanitized errors
+│   │   └── pull_requests.py # GitHubPullRequestSink (find/open only, never merge)
 │   └── openhands/
 │       ├── client.py        # Agent Server HTTP client, injectable transport
 │       ├── execution.py     # task -> conversation request + instruction
@@ -147,7 +160,8 @@ src/factory/
         ├── codec.py         # shared datetime encoding
         ├── sqlite_base.py   # shared connection + idempotent initialize
         ├── sqlite.py        # SqliteTaskRepository (TaskRepository implementation)
-        └── run_sqlite.py    # SqliteRunRepository (RunRepository implementation)
+        ├── run_sqlite.py    # SqliteRunRepository (RunRepository implementation)
+        └── pr_sqlite.py     # SqlitePullRequestRepository (PullRequestRepository)
 ```
 
 ## Domain model
@@ -159,14 +173,19 @@ The seven concepts from the specification, and where they are defined:
 | `FactoryTask` | `domain/models.py` | `source: TaskSource` gives structured identity; `external_ref` is derived for display only. |
 | `TaskSource` | `domain/models.py` | Frozen identity triple `(provider, repository_slug, issue_number)`. |
 | `TaskTransition` | `domain/models.py` | Frozen audit record of one `from_status → to_status` change. |
-| `AgentRun` | `domain/models.py` | One attempt; carries `adapter: AgentKind`, its `Workspace` and `QualityGate[]`. |
+| `AgentRun` | `domain/models.py` | One attempt; carries `adapter: AgentKind`, its `Workspace`, `QualityGate[]` and the bound `validated_revision`. |
+| `WorkspaceRevisionInspector` | `domain/ports.py` | Binds/verifies an opaque identity of a workspace's publishable state; concrete Git implementation in `integrations/workspace/revision.py`. |
 | `Repository` | `domain/models.py` | `slug` + `RepositoryRole` (`CONTROL_PLANE` / `TARGET`). |
 | `Workspace` | `domain/models.py` | Ephemeral, per-run, must have a branch. |
 | `PullRequest` | `domain/models.py` | Records the proposal; merge is external and human. |
 | `QualityGate` | `domain/models.py` | Named check with `QualityGateStatus`; required gates block. |
+| `PublishedRevision` | `domain/models.py` | Frozen `(commit_sha, branch)` identity of a published workspace revision. |
 | `AgentAdapter` | `domain/models.py` | `runtime_checkable` `Protocol` — the engine seam. |
 | `IssueSource` | `domain/ports.py` | Port: supplies work items. Read-only in Phase 2A. |
 | `TaskRepository` | `domain/ports.py` | Port: persists tasks and transition history. |
+| `WorkspacePublisher` | `domain/ports.py` | Port: commits a workspace and pushes its isolated branch. |
+| `PullRequestSink` | `domain/ports.py` | Port: find/open pull requests. Deliberately has no merge. |
+| `PullRequestRepository` | `domain/ports.py` | Port: durable storage of the PRs the factory opens. |
 
 Design intent:
 
@@ -296,6 +315,174 @@ transition with the pure `TaskStateMachine`, then applies the status change and
 inserts the history row **in one transaction**. If either half fails, neither is
 committed: the status stays put and no history row appears. An invalid
 transition raises before any write occurs.
+
+## Publication and the human gate (Phase 5)
+
+Phase 5 is the first time the factory writes to a remote: it commits the
+validated run's workspace, pushes its isolated branch, opens a pull request and
+stops at `WAITING_HUMAN`. Merging is a human action and is **not** implemented
+anywhere.
+
+```
+VALIDATING
+   ↓  guard:  task == VALIDATING, run belongs to task, run is latest,
+   ↓          run.status == SUCCEEDED, validation == READY_FOR_NEXT_PHASE,
+   ↓          workspace exists, workspace branch is not the default branch
+   ↓  WorkspacePublisher.publish   (commit + push the isolated branch)
+   ↓  PullRequestSink.find_open / open   (recover or create the PR)
+   ↓  PullRequestRepository.save   (durable, one PR per run)
+   ↓  VALIDATING → PR_OPEN → WAITING_HUMAN
+STOP  (never merge)
+```
+
+### Publication orchestration
+
+`PublicationService` (orchestration) takes a task id and run id and depends only
+on domain ports — `TaskRepository`, `RunRepository`, `PullRequestRepository`,
+`WorkspacePublisher` and `PullRequestSink`. It never imports GitHub, OpenHands,
+SQLite, git or `subprocess`. The concrete work lives in integrations:
+
+- `integrations/workspace/git_publish.py` — `GitWorkspacePublisher`;
+- `integrations/github/pull_requests.py` — `GitHubPullRequestSink`;
+- `integrations/github/write_client.py` — `GitHubWriteClient`.
+
+### Publication guard
+
+Publication is refused before any write unless every condition holds. A task that
+is not `VALIDATING`, a run that does not belong to the task, a **superseded**
+run, a run that did not `SUCCEED` or whose validation is not
+`READY_FOR_NEXT_PHASE`, a missing workspace, or a workspace branch that is a
+default branch all raise `TaskNotPublishableError` with no commit, push or PR.
+Combined with the validation outcome, this means **a red or incomplete
+validation can never be published**; Phase 5 consumes the durable Phase 4 gate
+result rather than re-running gates.
+
+The latest-run guard reuses the Phase 4 durable ordering: only the newest run for
+a task may drive publication, so a stale attempt cannot publish after a retry.
+
+### Commit
+
+`GitWorkspacePublisher` runs git with argv only, `shell=False`, a bounded timeout
+and a minimal environment. Before committing it verifies, inside the run's
+workspace only:
+
+- the path exists and is a Git worktree;
+- the checked-out branch is **exactly** `Workspace.branch`;
+- that branch is not `main`/`master`/the configured default;
+- the workspace belongs to the task's target repository.
+
+The commit is never made on `main`, never in the source checkout. The message is
+deterministic and factory-controlled — `factory: implement task <task-id>` — and
+task/agent text is never copied into it. A branch with no publishable diff and no
+previous factory commit is **refused** rather than committed empty.
+
+### Secure push
+
+Only `Workspace.branch` is pushed, to the same branch name on the remote. The
+destination ref is validated explicitly; `main`, `master`, `HEAD` and any
+`+`-prefixed or option-like ref are refused, and no force option is ever used, so
+history is never rewritten. The push runs with git hooks disabled
+(`core.hooksPath=/dev/null`) and credential helpers cleared.
+
+The push **source** is the immutable commit SHA that was just verified against
+`AgentRun.validated_revision` — never the mutable `refs/heads/<branch>`. A local
+branch can be moved by another process between the tree check and `git push`
+(a TOCTOU window), so sourcing the branch ref could send a commit that never
+passed validation. The refspec is `<commit_sha>:refs/heads/<workspace.branch>`:
+the source is pinned to the verified commit, the destination is exactly the
+workspace branch, and there is no leading `+`, so this remains a normal
+non-force push.
+
+The write credential is a **separate** token (`GITHUB_WRITE_TOKEN`), never the
+read-only intake token. HTTPS authentication uses a temporary `GIT_ASKPASS`
+helper that contains no credential and reads it from a process environment
+variable; the helper is removed after the single push. The write token is never
+placed in a URL, argv, `.git/config`, a log or an exception, and it is never
+handed to quality-gate subprocesses.
+
+The push destination is pinned to what Git will **actually** push to. The
+publisher asks Git for its own resolution — `git remote get-url --push --all` —
+so a `remote.<name>.pushurl` or a `url.*.insteadOf`/`url.*.pushInsteadOf` rewrite
+cannot hide the real destination. A network publication must resolve to exactly
+one target; multiple network destinations are refused. The target is parsed with
+URL parsing — never substring matching — and accepted only when its host equals
+`FACTORY_GITHUB_GIT_HOST` (default `github.com`) and its path is exactly
+`/<owner>/<repo>` or `/<owner>/<repo>.git` for the task's `target_repository`. A
+plaintext `http://`, `ssh://`, `git://` or scp-style remote, another host,
+another owner or repository, a port, userinfo, a query or a fragment is
+**refused** with `UnsafeRemoteError` before the credential is exposed. HTTPS
+alone is not sufficient, and the URL is never echoed. The authenticated push is
+issued by remote name, which Git resolves with the same algorithm that was
+validated. For the same reason the GitHub write client accepts only an `https://`
+API base URL with no userinfo, refusing anything else with
+`InsecureWriteTargetError` before the transport is invoked. Local filesystem
+remotes are unaffected and are pushed without a credential.
+
+### Pull request identity
+
+A PR is adopted as the factory's publication only when its provider identity
+matches the intended one exactly: the target repository, the **head repository**
+(GitHub `head.repo.full_name`, so a fork or another owner's repository is never
+adopted), the head branch (`Workspace.branch`), the configured base branch, and
+`state == open`. A PR with the right head branch but a different base — e.g.
+`factory/task/ws -> release` where the factory expects `main` — is not a match;
+the lookup keeps searching and may still find a later, correct PR. Missing or
+malformed identity fields are treated as a non-match, never as success.
+
+The same identity is enforced on recovery from durable storage:
+`PublicationService` re-checks a PR returned by `get_for_run`/`find_by_branch`
+(repository, head branch, base branch, and run/task ownership) before it can
+short-circuit publication, and refuses a mismatch with `PullRequestIdentityError`
+instead of reconciling the task to `WAITING_HUMAN`. A mismatched stored row is
+never overwritten, and a failed-create fallback that finds only a wrong-base or
+fork PR raises a sanitized `PublicationError`.
+
+The same bar applies to a **successful create**. The `POST /pulls` response is
+untrusted provider text, so it is mapped through the same structural matcher as a
+lookup: it is accepted only when it confirms `state == open`, the head
+repository/ref and the base repository/ref, and a positive integer number.
+Factory identity is never synthesized over a response that does not match. A
+wrong, closed or malformed success payload is instead resolved through an exact
+lookup (recovering the real open PR if one exists); if none exists, publication
+fails with a sanitized `PublicationError` and the task stays `VALIDATING`.
+`PublicationService` re-validates the created PR's repository/head/base as
+defense in depth before persisting it.
+
+### Pull request persistence
+
+`SqlitePullRequestRepository` stores one PR per run. The `pull_requests` table
+carries `UNIQUE(run_id)` and `UNIQUE(repository_slug, head_branch)`, so a second,
+different PR for the same run or branch is refused (`DuplicatePullRequestError`)
+rather than silently changing identity. `save` is a plain insert, never an
+upsert. The `opened_at` and `merged` fields round-trip; `merged` is bookkeeping
+only. Initialization is idempotent `CREATE TABLE`/`CREATE INDEX`: an existing
+database gains the table without losing data.
+
+### Idempotency and crash recovery
+
+Every step is independently retry-safe, and a persisted PR short-circuits the
+flow, so a retry after a crash window:
+
+| Window | Crash point | Retry behaviour |
+|---|---|---|
+| A | commit done, before push | reuse the existing commit and push it |
+| B | push done, before PR | reuse the pushed branch, open the PR |
+| C | provider PR created, before local persistence | find the open PR by exact identity (repository, head repository, head branch, base branch), persist it, no second PR |
+| D | PR persisted, before `VALIDATING → PR_OPEN` | reconcile the lifecycle |
+| E | task `PR_OPEN`, before `WAITING_HUMAN` | reconcile the lifecycle |
+| F | task already `WAITING_HUMAN` | no-op returning the same PR |
+
+Reconciliation applies only the legal publication edges, so repeated publication
+adds no commit, no push, no PR row and no duplicate transition history. A retry
+reuses the same commit, branch and PR, and leaves the task at `WAITING_HUMAN`.
+
+### The stop line
+
+`WAITING_HUMAN` is the hard stop. The factory may commit, push a branch, open a
+PR, persist it and move a task to `WAITING_HUMAN`; it may **never** merge a PR,
+enable auto-merge, push to main, or deploy after a PR. There is deliberately no
+merge operation in `PullRequestSink`, `GitHubWriteClient` or the domain — an
+automatic merge is not merely discouraged, it is unreachable.
 
 ## Configuration model
 
@@ -545,8 +732,52 @@ Two guards make reconciliation safe and deterministic:
   evaluated once and its gates persisted (the one recovery case). With no gate
   specs configured the factory invents nothing and only reconciles.
 
+A `SUCCEEDED` run with persisted, green gates but **no** bound revision (a crash
+between running the gates and persisting the revision, in a build that predates
+revision binding) is left unbound. Reconciliation never invents a revision from
+stale gate results: the run is simply not publishable until it is re-validated.
+
 `CLAIMED → RUNNING` happens only *after* the run is durable, so a task is never
 `RUNNING` without a run behind it.
+
+### The validated workspace revision
+
+A green gate result is necessary but not sufficient to publish. The run must also
+carry the identity of the exact workspace revision that passed the gates, and
+publication must re-verify it, because a completed coding agent (or a concurrent
+writer) can change the workspace — or its Git configuration — after validation.
+
+`RunTrackingService` inspects the workspace through the optional
+`WorkspaceRevisionInspector` port immediately **before** and **after** the gates
+run, and binds the identity only when the two match:
+
+- required gate failed → no revision bound;
+- workspace changed while the gates ran → a required, factory-controlled
+  `workspace_integrity` gate is recorded as failed (detail
+  `workspace changed during validation`) and no revision is bound. The configured
+  gates are **never silently re-run**;
+- no inspector injected → no revision is bound. The factory never guesses.
+
+The concrete `GitWorkspaceRevisionInspector` computes a **Git tree object id**
+over a private temporary index (`read-tree HEAD` → `add -A` → `write-tree`). That
+is exactly the publishable state a later `git add -A && git commit` would produce
+— including deletions, modes and symlinks, excluding ignored files — without
+touching the real index or creating a commit. The identity is durable: it is
+persisted on `AgentRun.validated_revision` and survives a restart.
+
+Publication verifies it twice:
+
+- `PublicationService` refuses a new publication when the run has no bound
+  revision (`ValidatedRevisionMissingError`). This is deliberately checked only on
+  the *create* path, so reconciling an already-published run (crash windows C–F)
+  is never blocked;
+- `GitWorkspacePublisher` re-inspects the workspace and refuses on a mismatch
+  (`ValidatedRevisionMismatchError`) **before** any commit or credential exposure,
+  and again checks the resulting commit's tree before the push.
+
+The fingerprint is opaque to `domain` and `orchestration`; materialising it needs
+the filesystem and a VCS, so the port lives in `domain` and the Git implementation
+in `integrations/workspace`.
 
 ### Collection security boundary
 
@@ -613,5 +844,5 @@ domain nor orchestration hard-codes a command.
 | 2B | ✅ Run lifecycle persistence (`AgentRun`, `Workspace`) + `DispatchService` |
 | 3 | ✅ OpenHands `AgentAdapter` (dispatch, collect, cancel) |
 | 4 | ✅ Isolated Git worktree workspace per run; quality-gate validation in `VALIDATING` |
-| 5 | PR creation, `WAITING_HUMAN` handoff; Codex adapter |
-| 6 | API / dashboard over the orchestrator |
+| 5 | ✅ Commit/push the isolated branch, open a PR, persist it, hand off at `WAITING_HUMAN` |
+| 6 | API / dashboard over the orchestrator; Codex adapter (not started) |

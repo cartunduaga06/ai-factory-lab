@@ -18,6 +18,8 @@ from factory.domain.enums import TaskStatus
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
+    PublishedRevision,
+    PullRequest,
     QualityGate,
     QualityGateSpec,
     Repository,
@@ -247,10 +249,142 @@ class QualityGateRunner(ABC):
         """
 
 
+class WorkspaceRevisionInspector(ABC):
+    """Produces a durable identity of a workspace's publishable state.
+
+    Validation binds a revision, and publication verifies it before committing or
+    pushing, so only the exact revision that passed the quality gates can be
+    published. The orchestration layer binds and compares *opaque* strings and
+    never inspects the workspace itself: materialising the identity (for Git, a
+    tree object id) requires the filesystem and a version-control tool, so it
+    belongs outside ``domain`` and ``orchestration``.
+
+    Implementations must be **side-effect free** with respect to the workspace:
+    computing a fingerprint never stages, commits, checks out, pushes or mutates
+    the working tree or its real index. They own every safety requirement — argv
+    only, no shell, a bounded timeout, and a sanitized error that never carries
+    raw process output, a command line or a credential.
+    """
+
+    @abstractmethod
+    def fingerprint(self, workspace: Workspace) -> str:
+        """Return an opaque, deterministic identity of the workspace state.
+
+        The identity must represent the complete publishable state and be stable
+        for identical content. It must not include ignored files that publication
+        would not commit.
+
+        Raises:
+            WorkspaceRevisionError: if the workspace cannot be inspected. The
+                error is sanitized.
+        """
+
+
+class WorkspacePublisher(ABC):
+    """Publishes a validated run's workspace revision to an isolated branch.
+
+    This is the engine- and provider-agnostic seam for Phase 5. The orchestration
+    layer must not run git itself: it asks this port to commit the workspace's
+    changes and push its branch, and receives back a
+    :class:`~factory.domain.models.PublishedRevision` (commit sha + branch).
+
+    The port is deliberately tiny because publishing is the most dangerous thing
+    the factory does. Implementations own every safety requirement: argv-only git
+    commands with no shell, a bounded timeout, hook and credential isolation, a
+    sanitized error, and a refusal to push anything but the workspace's own
+    isolated branch.
+    """
+
+    @abstractmethod
+    def publish(self, task: FactoryTask, run: AgentRun) -> PublishedRevision:
+        """Commit ``run``'s workspace changes (if any) and push its branch.
+
+        The operation must be idempotent: a retry reuses the commit and branch a
+        previous attempt already produced rather than creating a second commit or
+        a new branch identity. A branch with no publishable diff and no previous
+        factory commit is refused.
+
+        Raises:
+            PublicationError: if the revision cannot be published safely. The
+                error is sanitized — it never carries raw process output, a
+                command line, a remote URL or a credential.
+        """
+
+
+class PullRequestSink(ABC):
+    """A provider that hosts pull requests (currently GitHub).
+
+    The factory may open and look up pull requests but must never merge one, so
+    this contract deliberately exposes **no** merge, close or issue-mutation
+    operation. GitHub is one implementation; the orchestration layer depends only
+    on this interface.
+    """
+
+    @abstractmethod
+    def find_open_pull_request(
+        self, repository: Repository, head_branch: str, base_branch: str
+    ) -> PullRequest | None:
+        """Return the open PR from ``head_branch`` into ``base_branch``, if any.
+
+        The match is exact on provider identity: the repository, the head branch
+        and the base branch must all agree, and the head must come from the same
+        repository (not a fork). A PR with the right head branch but a different
+        base is not the factory's publication.
+        """
+
+    @abstractmethod
+    def open_pull_request(self, pull_request: PullRequest) -> PullRequest:
+        """Open a pull request and return it enriched with its number and URL.
+
+        Implementations must be retry-safe: if an open PR for the same head
+        branch already exists, that PR is returned instead of a second one being
+        created.
+        """
+
+
+class PullRequestRepository(ABC):
+    """Persistence boundary for the pull requests the factory opens.
+
+    A PR created for a run is durable: it must survive a process restart so
+    publication is idempotent and a crash after the PR was created but before it
+    was recorded can be reconciled. As with the other ports, orchestration sees
+    only this interface.
+
+    ``save`` is deliberately not an upsert that silently changes identity: a
+    second, different PR for a run (or for the same target repository/head
+    branch) is refused by storage rather than overwriting the first.
+    """
+
+    @abstractmethod
+    def initialize(self) -> None:
+        """Create the schema if needed. Idempotent and safe to call repeatedly."""
+
+    @abstractmethod
+    def save(self, pull_request: PullRequest) -> PullRequest:
+        """Persist a newly discovered/created ``pull_request`` and return it.
+
+        Raises:
+            DuplicatePullRequestError: if the run already has a persisted PR, or
+                if an active publication already owns this repository/head branch.
+        """
+
+    @abstractmethod
+    def get_for_run(self, run_id: str) -> PullRequest | None:
+        """Return the PR persisted for ``run_id``, or ``None`` if unknown."""
+
+    @abstractmethod
+    def find_by_branch(self, repository_slug: str, head_branch: str) -> PullRequest | None:
+        """Return the PR persisted for ``repository_slug`` + ``head_branch``."""
+
+
 __all__ = [
     "IssueSource",
+    "PullRequestRepository",
+    "PullRequestSink",
     "QualityGateRunner",
     "RunRepository",
     "TaskRepository",
     "WorkspaceProvisioner",
+    "WorkspacePublisher",
+    "WorkspaceRevisionInspector",
 ]

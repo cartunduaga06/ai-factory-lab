@@ -523,3 +523,158 @@ def test_workspace_association_survives_reopen(db_path: str) -> None:
     assert again is not None
     assert again.workspace is not None
     assert again.workspace.workspace_id == "ws-1"
+
+
+# -- validated revision ----------------------------------------------------
+
+
+def test_validated_revision_round_trips(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    run.validated_revision = "tree-abc123"
+    repository.save_run(run)
+
+    loaded = repository.get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.validated_revision == "tree-abc123"
+
+
+def test_validated_revision_is_none_by_default(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    repository.save_run(run)
+
+    loaded = repository.get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.validated_revision is None
+
+
+def test_validated_revision_survives_reopen(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    run = _run(task.task_id)
+    run.validated_revision = "tree-reopen"
+    _runs(db_path).save_run(run)
+
+    reloaded = _runs(db_path).get_run(run.run_id)
+    assert reloaded is not None
+    assert reloaded.validated_revision == "tree-reopen"
+
+
+def test_update_run_persists_validated_revision(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    repository.save_run(run)
+    assert repository.get_run(run.run_id).validated_revision is None  # type: ignore[union-attr]
+
+    run.status = RunStatus.SUCCEEDED
+    run.gates = (QualityGate("tests", QualityGateStatus.PASSED),)
+    run.validated_revision = "tree-after-validation"
+    repository.update_run(run)
+
+    loaded = _runs(db_path).get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.validated_revision == "tree-after-validation"
+    # Unrelated identity is unchanged.
+    assert loaded.task_id == task.task_id
+    assert loaded.workspace is not None
+    assert loaded.workspace.workspace_id == "ws-1"
+
+
+def test_validated_revision_can_be_cleared(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    run.validated_revision = "tree-then-cleared"
+    repository.save_run(run)
+
+    run.validated_revision = None
+    repository.update_run(run)
+
+    loaded = _runs(db_path).get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.validated_revision is None
+
+
+def test_old_database_migrates_without_data_loss(tmp_path: Path) -> None:
+    # A Phase 4/5 database created before revision binding: build the runs table
+    # without ``validated_revision``, insert a row, then initialize.
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.db")
+    tasks = SqliteTaskRepository(db_path)
+    tasks.initialize()
+    task = tasks.save(_task())
+
+    conn = sqlite3.connect(db_path)
+    # Recreate the legacy shape: drop and recreate agent_runs without the column.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("DROP TABLE IF EXISTS agent_runs")
+    conn.execute(
+        """
+        CREATE TABLE agent_runs (
+            run_id        TEXT PRIMARY KEY,
+            task_id       TEXT NOT NULL,
+            adapter       TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            workspace_id  TEXT,
+            summary       TEXT,
+            started_at    TEXT,
+            finished_at   TEXT,
+            gates         TEXT NOT NULL DEFAULT '[]',
+            created_at    TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO agent_runs (
+            run_id, task_id, adapter, status, summary, gates, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("legacy-run", task.task_id, "OTHER", "FAILED", "old", "[]", "2026-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    # Initialize the current repository: it must add the column idempotently.
+    repository = _runs(db_path)
+
+    loaded = repository.get_run("legacy-run")
+    assert loaded is not None
+    assert loaded.status is RunStatus.FAILED
+    assert loaded.summary == "old"
+    # An old row loads with no validated revision.
+    assert loaded.validated_revision is None
+
+    # A new run with a revision can be stored alongside the migrated row.
+    new_run = AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, run_id="new-run")
+    new_run.validated_revision = "tree-new"
+    repository.save_run(new_run)
+    assert repository.get_run("new-run").validated_revision == "tree-new"  # type: ignore[union-attr]
+    # The legacy row is still intact.
+    assert repository.get_run("legacy-run") is not None
+
+
+def test_migration_is_idempotent(db_path: str) -> None:
+    # Repeated initialization on a current database is a no-op, not an error.
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    run.validated_revision = "tree-keep"
+    repository.save_run(run)
+
+    for _ in range(3):
+        repository.initialize()
+
+    loaded = repository.get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.validated_revision == "tree-keep"

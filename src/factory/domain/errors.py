@@ -172,17 +172,165 @@ class WorkspaceProvisioningError(DispatchError):
         self.workspace_id = workspace_id
 
 
+class PublicationError(FactoryError):
+    """A run's work could not be published.
+
+    The base class for every controlled Phase 5 publication failure. Like the
+    dispatch errors, it carries factory-domain identifiers only and never retains
+    the underlying git, HTTP or storage exception as ``__cause__`` or
+    ``__context__``: those messages can embed a remote URL, a response body or a
+    credential, and Python would render them in a traceback.
+    """
+
+
+class TaskNotPublishableError(PublicationError):
+    """A task or run does not meet the guard conditions for publication.
+
+    Raised before any commit, push or PR when the run is not ready to publish:
+    the task is not ``VALIDATING``, the run does not belong to the task, it is not
+    the latest run, it did not succeed, its validation outcome is not
+    ``READY_FOR_NEXT_PHASE``, or it has no workspace. A red or incomplete
+    validation is never published.
+    """
+
+    def __init__(self, task_id: str, run_id: str, reason: str) -> None:
+        super().__init__(f"run {run_id} for task {task_id} is not publishable: {reason}")
+        self.task_id = task_id
+        self.run_id = run_id
+        self.reason = reason
+
+
+class RevisionNotPublishableError(PublicationError):
+    """The workspace has nothing the factory may publish.
+
+    Raised when the isolated branch has no publishable diff relative to its base
+    and carries no previous factory publication commit, so publishing would
+    produce an empty, meaningless commit (or an empty PR). The message names the
+    workspace only.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} has no publishable changes")
+        self.workspace_id = workspace_id
+
+
+class ValidatedRevisionMissingError(PublicationError):
+    """A run carries no durable revision identity, so it cannot be published.
+
+    Raised when publication is attempted for a run whose ``validated_revision``
+    is ``None``. A green validation *must* have bound a workspace revision before
+    it can be published; a run that merely looks successful (SUCCEEDED with green
+    gate objects) but carries no revision identity is not publishable. The message
+    names factory identifiers only.
+    """
+
+    def __init__(self, task_id: str, run_id: str) -> None:
+        super().__init__(f"run {run_id} for task {task_id} has no validated revision")
+        self.task_id = task_id
+        self.run_id = run_id
+
+
+class ValidatedRevisionMismatchError(PublicationError):
+    """The workspace no longer matches the revision that passed validation.
+
+    Raised when the current workspace fingerprint differs from the run's
+    ``validated_revision`` — the workspace changed after the gates ran — or when
+    the factory commit's tree does not equal it. Publication stops before the
+    credential is used or anything is pushed. The message names the workspace
+    only; the tree ids, changed paths and any git output are never included.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} does not match its validated revision")
+        self.workspace_id = workspace_id
+
+
+class WorkspaceRevisionError(FactoryError):
+    """The workspace revision could not be inspected.
+
+    Raised by a :class:`~factory.domain.ports.WorkspaceRevisionInspector` when the
+    workspace is unusable (missing, not a Git checkout, or git failed). Sanitized:
+    never carries raw git stdout/stderr, a command line or a credential, and never
+    chains the underlying process error.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} revision could not be inspected")
+        self.workspace_id = workspace_id
+
+
+class PullRequestIdentityError(PublicationError):
+    """A recovered pull request's identity is not the intended publication.
+
+    Raised when the provider PR returned by a lookup — or a PR already persisted
+    for the run — has the right head branch but a different repository, head
+    repository, or base branch than the factory pushed. Such a PR is not the
+    factory's publication, so the task is not reconciled to ``WAITING_HUMAN`` and
+    the stored identity is never overwritten. The message names factory ids only;
+    no provider payload, URL or repository text is included.
+    """
+
+    def __init__(self, task_id: str, run_id: str) -> None:
+        super().__init__(
+            f"pull request for run {run_id} of task {task_id} does not match the publication"
+        )
+        self.task_id = task_id
+        self.run_id = run_id
+
+
+class UnsafeRemoteError(PublicationError):
+    """A git remote URL is unsafe to authenticate through and was refused.
+
+    Raised when the remote carries embedded credentials
+    (``scheme://user:pass@host``) or uses plaintext ``http://``. The factory never
+    authenticates through such a remote: it must not reuse, mutate or persist a
+    userinfo-embedded URL, and the write credential must never cross an
+    unencrypted transport. Publication stops before any authenticated operation
+    runs. The message names the workspace only — never the URL, which is the very
+    thing that could contain a secret.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} remote configuration is unsafe")
+        self.workspace_id = workspace_id
+
+
+class DuplicatePullRequestError(FactoryError):
+    """A pull request would duplicate existing persisted PR state.
+
+    Raised by persistence when the run already has a stored PR, or when an active
+    publication already owns the same target repository and head branch. The
+    uniqueness is enforced by storage — the defense-in-depth guard behind
+    one-PR-per-run publication idempotency — not only by an application check.
+    The message names factory identifiers only.
+    """
+
+    def __init__(self, run_id: str, repository_slug: str, head_branch: str) -> None:
+        super().__init__(f"run {run_id} already has a persisted pull request")
+        self.run_id = run_id
+        self.repository_slug = repository_slug
+        self.head_branch = head_branch
+
+
 __all__ = [
     "AgentCollectError",
     "AgentDispatchError",
     "DispatchConflictError",
     "DispatchError",
+    "DuplicatePullRequestError",
     "DuplicateRunError",
     "DuplicateTaskError",
     "FactoryError",
     "PersistenceError",
+    "PublicationError",
+    "RevisionNotPublishableError",
+    "TaskNotPublishableError",
     "TaskNotReadyError",
     "TaskSourceError",
     "TaskStateChangedError",
+    "UnsafeRemoteError",
+    "ValidatedRevisionMismatchError",
+    "ValidatedRevisionMissingError",
     "WorkspaceProvisioningError",
+    "WorkspaceRevisionError",
 ]

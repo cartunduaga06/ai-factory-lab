@@ -25,7 +25,12 @@ from factory.domain.models import (
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
 from factory.orchestration import RunTrackingService
 from tests.fake_adapter import FakeAgentAdapter
-from tests.fake_workspace import FakeQualityGateRunner, specs, statuses
+from tests.fake_workspace import (
+    FakeQualityGateRunner,
+    FakeRevisionInspector,
+    specs,
+    statuses,
+)
 
 
 @pytest.fixture
@@ -83,12 +88,14 @@ def _service(
     *,
     gate_specs: tuple[QualityGateSpec, ...] = (),
     runner: FakeQualityGateRunner | None = None,
+    revision_inspector: FakeRevisionInspector | None = None,
 ) -> RunTrackingService:
     return RunTrackingService(
         _tasks(db_path),
         _runs(db_path),
         gate_specs=gate_specs,
         gate_runner=runner,
+        revision_inspector=revision_inspector,
     )
 
 
@@ -639,3 +646,173 @@ def test_collect_failure_is_retryable(db_path: str, tmp_path: Path) -> None:
     assert stored is not None
     assert stored.status is RunStatus.SUCCEEDED
     assert [gate.name for gate in stored.gates] == ["tests"]
+
+
+# -- validated revision binding --------------------------------------------
+#
+# A successful validation must bind the exact workspace revision that passed the
+# gates. Publication later verifies it, so an unbound run is not publishable.
+
+
+def test_green_gates_bind_the_validated_revision(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    (Path(run.workspace.path) / "impl.py").write_text("A\n", encoding="utf-8")  # type: ignore[union-attr]
+    runner = FakeQualityGateRunner(statuses(tests=QualityGateStatus.PASSED))
+    inspector = FakeRevisionInspector()
+    expected = inspector.fingerprint(run.workspace)  # type: ignore[arg-type]
+
+    result = _service(
+        db_path, gate_specs=specs("tests"), runner=runner, revision_inspector=inspector
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
+
+    assert result.outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+    assert result.run.validated_revision == expected
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_zero_gates_still_bind_a_revision(db_path: str, tmp_path: Path) -> None:
+    # Zero configured gates: no artificial gate is required, but publication still
+    # needs an exact revision identity, so it is captured.
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    (Path(run.workspace.path) / "impl.py").write_text("A\n", encoding="utf-8")  # type: ignore[union-attr]
+    inspector = FakeRevisionInspector()
+    expected = inspector.fingerprint(run.workspace)  # type: ignore[arg-type]
+
+    result = _service(db_path, revision_inspector=inspector).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+    assert result.run.gates == ()
+    assert result.run.validated_revision == expected
+
+
+def test_failed_required_gate_binds_no_revision(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner(statuses(tests=QualityGateStatus.FAILED))
+
+    result = _service(
+        db_path,
+        gate_specs=specs("tests"),
+        runner=runner,
+        revision_inspector=FakeRevisionInspector(),
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
+
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+    assert result.run.validated_revision is None
+
+
+def test_workspace_mutation_during_validation_is_not_bound(db_path: str, tmp_path: Path) -> None:
+    # A gate that mutates the workspace while validation runs: the before/after
+    # revisions differ, so no revision may be claimed green. Gates are not re-run.
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    workspace = run.workspace
+    assert workspace is not None
+
+    def mutate(name: str, ws: Workspace) -> None:
+        (Path(ws.path) / "mutated.py").write_text("sneaky\n", encoding="utf-8")
+
+    runner = FakeQualityGateRunner(statuses(tests=QualityGateStatus.PASSED), on_run=mutate)
+
+    result = _service(
+        db_path,
+        gate_specs=specs("tests"),
+        runner=runner,
+        revision_inspector=FakeRevisionInspector(),
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
+
+    assert result.run.validated_revision is None
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+    # A deterministic, factory-controlled integrity gate records the refusal.
+    integrity = [g for g in result.run.gates if g.name == "workspace_integrity"]
+    assert len(integrity) == 1
+    assert integrity[0].status is QualityGateStatus.FAILED
+    assert integrity[0].required is True
+    assert integrity[0].detail == "workspace changed during validation"
+    # No path, content or raw git output leaked into the detail.
+    assert "mutated.py" not in (integrity[0].detail or "")
+    # The configured gate ran exactly once; it was not silently re-run.
+    assert runner.calls == [("tests", workspace.path)]
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_revision_binding_survives_sqlite_reopen(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    (Path(run.workspace.path) / "impl.py").write_text("A\n", encoding="utf-8")  # type: ignore[union-attr]
+    inspector = FakeRevisionInspector()
+    expected = inspector.fingerprint(run.workspace)  # type: ignore[arg-type]
+
+    _service(
+        db_path,
+        gate_specs=specs("tests"),
+        runner=FakeQualityGateRunner(),
+        revision_inspector=inspector,
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
+
+    reloaded = _runs(db_path).get_run(run.run_id)
+    assert reloaded is not None
+    assert reloaded.validated_revision == expected
+
+
+def test_no_revision_inspector_binds_nothing(db_path: str, tmp_path: Path) -> None:
+    # Without an inspector the factory never guesses a revision.
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+
+    result = _service(db_path, gate_specs=specs("tests"), runner=FakeQualityGateRunner()).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+
+    assert result.run.validated_revision is None
+
+
+def test_inspection_failure_binds_no_revision(db_path: str, tmp_path: Path) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+
+    def boom(_workspace: Workspace) -> str:
+        raise RuntimeError("revision inspector exploded with a secret")
+
+    result = _service(
+        db_path,
+        gate_specs=specs("tests"),
+        runner=FakeQualityGateRunner(),
+        revision_inspector=FakeRevisionInspector(revision_factory=boom),
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
+
+    # A defective inspector is normalized to "no revision", never a leaked error.
+    assert result.run.validated_revision is None
+
+
+def test_reconcile_does_not_invent_a_revision_from_stale_gates(
+    db_path: str, tmp_path: Path
+) -> None:
+    # CASE B: a SUCCEEDED run with green gates but no bound revision (interrupted
+    # before durable completion) is left unbound; the factory never claims an
+    # unverified revision is green.
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    gates = (QualityGate("tests", QualityGateStatus.PASSED, detail="exit_code=0"),)
+    run = _persist_terminal_run(
+        _runs(db_path), task, tmp_path, status=RunStatus.SUCCEEDED, gates=gates
+    )
+
+    result = _service(db_path, gate_specs=specs("tests"), runner=FakeQualityGateRunner()).refresh(
+        run.run_id, FakeAgentAdapter()
+    )
+
+    assert result.run.validated_revision is None
+    # Lifecycle is still reconciled from the terminal run.
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING

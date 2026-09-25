@@ -187,6 +187,77 @@ FACTORY_QUALITY_GATES=[{"name":"tests","argv":["pytest"],"required":true}]
 No secrets are required for this phase's tests or smoke run: they use disposable
 local repositories.
 
+## 1d. Publication and the human gate (Phase 5)
+
+Phase 5 turns a green validation into a reviewable proposal and stops at a
+mandatory human checkpoint:
+
+```
+Task VALIDATING · run SUCCEEDED · validation READY_FOR_NEXT_PHASE · isolated workspace
+      ↓  guard
+WorkspacePublisher.publish          commit + push the isolated branch
+      ↓
+PullRequestSink.find_open / open    recover or create the PR
+      ↓
+PullRequestRepository.save          durable, one PR per run
+      ↓
+VALIDATING → PR_OPEN → WAITING_HUMAN
+STOP                                never merge
+```
+
+Publication is refused before any write unless the run is the task's **latest**,
+`SUCCEEDED`, `READY_FOR_NEXT_PHASE`, with an isolated workspace on a non-default
+branch. A red or incomplete gate result therefore can never become a commit, a
+push or a PR — Phase 5 consumes the durable Phase 4 validation result rather than
+re-running gates.
+
+The guard is not just "the gates were green": the run must also carry the
+identity of the exact workspace revision that passed them. Validation fingerprints
+the workspace immediately before and after the gates and binds that identity on
+`AgentRun.validated_revision` (a Git tree object id, computed over a private
+temporary index so the real index is never touched and no commit is created). If
+the workspace changed while the gates ran, a required `workspace_integrity` gate
+fails and nothing is bound. `GitWorkspacePublisher` re-verifies the revision
+before committing and again on the resulting commit's tree before pushing, so a
+completed agent that edits the workspace after validation cannot publish the
+altered state.
+
+`GitWorkspacePublisher` commits only inside the run's workspace and pushes only
+`Workspace.branch`, to the same branch name, with no force option ever used:
+`main`/`master`/`HEAD` are refused and history is never rewritten. The commit
+message is deterministic (`factory: implement task <task-id>`); task and agent
+text are never copied into it. A branch with no publishable diff is refused
+rather than committed empty. The commit's tree is re-checked against the validated
+revision, and the push then sources that verified commit SHA directly
+(`<commit_sha>:refs/heads/<branch>`) rather than the mutable local branch, so a
+concurrent move of the branch cannot change what reaches the remote.
+
+`GitHubPullRequestSink` recovers an open PR only when its provider identity
+matches the intended publication exactly — same target repository, head
+repository, head branch, base branch and `state == open` — and otherwise opens
+one, with an explicit base branch (`FACTORY_TARGET_DEFAULT_BRANCH`, default
+`main`). A PR with the right head branch but a different base, or a head from a
+fork, is never adopted. The same bar applies to a create: the POST response is
+accepted only when it confirms that identity, so an inconsistent, closed or
+malformed success payload is resolved through an exact lookup (recovering the
+real PR if one exists) instead of being persisted. The PR
+body carries only safe factory metadata — source Issue reference, task/run ids,
+validation outcome and gate names/statuses. GitHub's own response text is never
+propagated: only the numeric HTTP status crosses the client boundary.
+
+The write credential is a **separate** `GITHUB_WRITE_TOKEN`, never the read-only
+intake token. HTTPS push uses a temporary `GIT_ASKPASS` helper that holds no
+credential; a remote URL with embedded userinfo, or a plaintext `http://` remote,
+is refused, and the GitHub write client accepts only an `https://` API base URL.
+Git hooks are disabled for factory-controlled commit and push.
+
+**The factory stops at `WAITING_HUMAN`.** It may commit, push a branch, open and
+persist a PR, and hand off to a human. It may never merge, enable auto-merge, push
+to `main` or deploy — there is deliberately no merge capability anywhere in the
+domain, the sink contract or the GitHub client. Publication is idempotent and
+restart-safe: a retry after a crash at any step reuses the same commit, branch and
+PR and adds no duplicate row or transition.
+
 ## 2. Why it is separate from product repositories
 
 `ai-factory-lab` and `finanza-ia` have different lifespans, secrets and risk
@@ -226,7 +297,8 @@ multiple agents coexist. Full diagram and rationale:
 **Phase 2A — GitHub issue intake + persistence. Complete.**
 **Phase 2B — run lifecycle and dispatch. Complete.**
 **Phase 3 — OpenHands adapter. Complete.**
-**Phase 4 — isolated workspaces and quality gates. Implemented on this branch.**
+**Phase 4 — isolated workspaces and quality gates. Complete.**
+**Phase 5 — commit/push, Pull Request and the human gate. Implemented on this branch.**
 
 Present today:
 
@@ -265,21 +337,34 @@ Present today:
   `shell=False`, workspace-scoped, bounded, sanitized results.
 - **Durable run updates**: `RunRepository.update_run()` refreshes a stored run's
   status, summary, timestamps, workspace and gates without creating a duplicate.
+- **A `PublicationService`** that publishes a validated run: it commits and pushes
+  the run's isolated branch through `WorkspacePublisher`, recovers or opens a PR
+  through `PullRequestSink`, persists it through `PullRequestRepository`, and
+  advances the task `VALIDATING → PR_OPEN → WAITING_HUMAN`. It depends on ports
+  only and never merges.
+- **A `GitWorkspacePublisher`**: argv-only, hook-isolated, credential-separated
+  commit and non-force push of exactly the workspace's branch.
+- **A `GitHubPullRequestSink`** and write-capable `GitHubWriteClient`: recover an
+  open PR only on an exact provider identity match (repository, head repository,
+  head branch, base branch) or open one — validating a successful create response
+  against the same identity rather than trusting it — with only the numeric status
+  escaping a failed request.
+- **Durable PR persistence** (`SqlitePullRequestRepository`): one PR per run,
+  enforced by a unique index and surviving a repository reopen.
 
 Not present yet — deliberately deferred:
 
 - **Codex and other engines.** OpenHands is the only concrete engine; the
   `AgentAdapter` seam still admits others.
-- **Commits, pushes and PR creation.** A green validation leaves the task in
-  `VALIDATING`; the factory never commits, pushes or opens a pull request in
-  Phase 4.
-- **A scheduler or daemon.** Intake is a single manual run; dispatch and tracking
-  are called programmatically.
+- **Any merge capability.** The factory stops at `WAITING_HUMAN`; merge,
+  auto-merge and deploy are human actions and are absent from the code.
+- **A scheduler or daemon.** Intake is a single manual run; dispatch, tracking and
+  publication are called programmatically.
 - **A dashboard, API or FastAPI service.**
 - **PostgreSQL.** Persistence is SQLite only; `DATABASE_URL` rejects other
   schemes.
 
-These are Phase 5 and later work. See the [roadmap](#7-planned-roadmap).
+These are Phase 6 and later work. See the [roadmap](#7-planned-roadmap).
 
 ## 5. Local development setup
 
@@ -340,7 +425,7 @@ policy is stated in full — with the reasoning behind each boundary — in
 | 2B ✅ | Run lifecycle persistence (`AgentRun`, `Workspace`); `DispatchService` over the `AgentAdapter` protocol |
 | 3 ✅ | `OpenHandsAdapter`: real OpenHands Agent Server dispatch, collect and cancel |
 | 4 ✅ | Isolated `git worktree` workspace per run; quality gates evaluated in `VALIDATING` |
-| 5 | PR creation and `WAITING_HUMAN` handoff; Codex adapter as a second engine |
+| 5 ✅ | Commit/push the isolated branch, open and persist a PR, hand off at `WAITING_HUMAN` (never merge) |
 | 6 | API / dashboard on top of the orchestrator |
 
 Each phase is delivered through a Pull Request and is never merged by the agent
