@@ -76,7 +76,7 @@ Two repositories are involved and must stay separate:
 │  QualityGate · AgentAdapter (protocol) · IssueSource/         │
 │  TaskRepository/RunRepository/WorkspaceProvisioner/           │
 │  QualityGateRunner/WorkspacePublisher/PullRequestSink/        │
-│  PullRequestRepository (ports)                                │
+│  WorkspaceRevisionInspector/PullRequestRepository (ports)     │
 │  pure data + invariants — no I/O                              │
 └───────────────────────────▲───────────────────────────────────┘
                             │ depends on
@@ -125,8 +125,8 @@ src/factory/
 │   │                        #   publication, unsafe remote, duplicate PR)
 │   └── ports.py             # IssueSource, TaskRepository, RunRepository +
 │                            #   WorkspaceProvisioner, QualityGateRunner +
-│                            #   WorkspacePublisher, PullRequestSink,
-│                            #   PullRequestRepository
+│                            #   WorkspacePublisher, WorkspaceRevisionInspector,
+│                            #   PullRequestSink, PullRequestRepository
 ├── orchestration/
 │   ├── lifecycle.py         # transition table (single source of truth)
 │   ├── machine.py           # TaskStateMachine, InvalidTransitionError
@@ -173,7 +173,8 @@ The seven concepts from the specification, and where they are defined:
 | `FactoryTask` | `domain/models.py` | `source: TaskSource` gives structured identity; `external_ref` is derived for display only. |
 | `TaskSource` | `domain/models.py` | Frozen identity triple `(provider, repository_slug, issue_number)`. |
 | `TaskTransition` | `domain/models.py` | Frozen audit record of one `from_status → to_status` change. |
-| `AgentRun` | `domain/models.py` | One attempt; carries `adapter: AgentKind`, its `Workspace` and `QualityGate[]`. |
+| `AgentRun` | `domain/models.py` | One attempt; carries `adapter: AgentKind`, its `Workspace`, `QualityGate[]` and the bound `validated_revision`. |
+| `WorkspaceRevisionInspector` | `domain/ports.py` | Binds/verifies an opaque identity of a workspace's publishable state; concrete Git implementation in `integrations/workspace/revision.py`. |
 | `Repository` | `domain/models.py` | `slug` + `RepositoryRole` (`CONTROL_PLANE` / `TARGET`). |
 | `Workspace` | `domain/models.py` | Ephemeral, per-run, must have a branch. |
 | `PullRequest` | `domain/models.py` | Records the proposal; merge is external and human. |
@@ -692,8 +693,52 @@ Two guards make reconciliation safe and deterministic:
   evaluated once and its gates persisted (the one recovery case). With no gate
   specs configured the factory invents nothing and only reconciles.
 
+A `SUCCEEDED` run with persisted, green gates but **no** bound revision (a crash
+between running the gates and persisting the revision, in a build that predates
+revision binding) is left unbound. Reconciliation never invents a revision from
+stale gate results: the run is simply not publishable until it is re-validated.
+
 `CLAIMED → RUNNING` happens only *after* the run is durable, so a task is never
 `RUNNING` without a run behind it.
+
+### The validated workspace revision
+
+A green gate result is necessary but not sufficient to publish. The run must also
+carry the identity of the exact workspace revision that passed the gates, and
+publication must re-verify it, because a completed coding agent (or a concurrent
+writer) can change the workspace — or its Git configuration — after validation.
+
+`RunTrackingService` inspects the workspace through the optional
+`WorkspaceRevisionInspector` port immediately **before** and **after** the gates
+run, and binds the identity only when the two match:
+
+- required gate failed → no revision bound;
+- workspace changed while the gates ran → a required, factory-controlled
+  `workspace_integrity` gate is recorded as failed (detail
+  `workspace changed during validation`) and no revision is bound. The configured
+  gates are **never silently re-run**;
+- no inspector injected → no revision is bound. The factory never guesses.
+
+The concrete `GitWorkspaceRevisionInspector` computes a **Git tree object id**
+over a private temporary index (`read-tree HEAD` → `add -A` → `write-tree`). That
+is exactly the publishable state a later `git add -A && git commit` would produce
+— including deletions, modes and symlinks, excluding ignored files — without
+touching the real index or creating a commit. The identity is durable: it is
+persisted on `AgentRun.validated_revision` and survives a restart.
+
+Publication verifies it twice:
+
+- `PublicationService` refuses a new publication when the run has no bound
+  revision (`ValidatedRevisionMissingError`). This is deliberately checked only on
+  the *create* path, so reconciling an already-published run (crash windows C–F)
+  is never blocked;
+- `GitWorkspacePublisher` re-inspects the workspace and refuses on a mismatch
+  (`ValidatedRevisionMismatchError`) **before** any commit or credential exposure,
+  and again checks the resulting commit's tree before the push.
+
+The fingerprint is opaque to `domain` and `orchestration`; materialising it needs
+the filesystem and a VCS, so the port lives in `domain` and the Git implementation
+in `integrations/workspace`.
 
 ### Collection security boundary
 

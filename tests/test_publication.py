@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskStatus
-from factory.domain.errors import PublicationError, TaskNotPublishableError
+from factory.domain.errors import (
+    PublicationError,
+    TaskNotPublishableError,
+    ValidatedRevisionMissingError,
+)
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
@@ -79,6 +83,7 @@ def _validated_run(
     run_id: str = "run-1",
     gate_status: QualityGateStatus = QualityGateStatus.PASSED,
     status: RunStatus = RunStatus.SUCCEEDED,
+    validated_revision: str | None = "tree-validated-1",
 ) -> AgentRun:
     workspace = Workspace(
         repository_slug=task.target_repository,
@@ -93,6 +98,7 @@ def _validated_run(
         status=status,
         workspace=workspace,
         gates=(QualityGate(name="tests", status=gate_status, required=True),),
+        validated_revision=validated_revision,
     )
     runs.save_run(run)
     return run
@@ -447,3 +453,51 @@ def test_run_for_another_task_is_refused(db_path: str, tmp_path: Path) -> None:
 
     with pytest.raises(TaskNotPublishableError):
         _service(db_path).publish(other.task_id, run.run_id)
+
+
+# -- guard: validated revision ---------------------------------------------
+
+
+def test_missing_validated_revision_blocks_publication(db_path: str, tmp_path: Path) -> None:
+    # SUCCEEDED with green gate objects but no bound revision: not publishable.
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path, validated_revision=None)
+    publisher = FakeWorkspacePublisher()
+    sink = FakePullRequestSink()
+
+    with pytest.raises(ValidatedRevisionMissingError):
+        _service(db_path, publisher=publisher, sink=sink).publish(task.task_id, run.run_id)
+
+    assert publisher.calls == 0
+    assert sink.find_calls == 0
+    assert sink.create_calls == 0
+    assert _prs(db_path).get_for_run(run.run_id) is None
+    assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_missing_validated_revision_does_not_affect_recovery(db_path: str, tmp_path: Path) -> None:
+    # A persisted PR short-circuits the guard: a previous publication already
+    # happened, so reconciliation proceeds even without a bound revision.
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    run = _validated_run(_runs(db_path), task, tmp_path, validated_revision=None)
+    workspace = run.workspace
+    assert workspace is not None
+    _prs(db_path).save(
+        PullRequest(
+            repository_slug=workspace.repository_slug,
+            head_branch=workspace.branch,
+            base_branch="main",
+            title="persisted",
+            number=11,
+            run_id=run.run_id,
+        )
+    )
+    publisher = FakeWorkspacePublisher()
+
+    result = _service(db_path, publisher=publisher).publish(task.task_id, run.run_id)
+
+    assert result.pull_request.number == 11
+    assert publisher.calls == 0
+    assert tasks.get(task.task_id).status is TaskStatus.WAITING_HUMAN

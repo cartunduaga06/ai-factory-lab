@@ -273,6 +273,15 @@ class AgentRun:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     gates: tuple[QualityGate, ...] = ()
+    #: Durable identity of the workspace revision that passed validation.
+    #:
+    #: For a Git workspace this is the tree object id of the complete publishable
+    #: state (tracked changes, additions, deletions, untracked files that would be
+    #: committed, modes and symlinks). It is deliberately *not* a commit sha, a
+    #: workspace id or a provider run id. ``None`` means no revision has been
+    #: bound (never validated, or the gates failed, or the workspace changed while
+    #: the gates ran). Publication requires it to be present and to still match.
+    validated_revision: str | None = None
 
     @property
     def is_terminal(self) -> bool:

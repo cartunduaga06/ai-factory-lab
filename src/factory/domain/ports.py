@@ -249,6 +249,37 @@ class QualityGateRunner(ABC):
         """
 
 
+class WorkspaceRevisionInspector(ABC):
+    """Produces a durable identity of a workspace's publishable state.
+
+    Validation binds a revision, and publication verifies it before committing or
+    pushing, so only the exact revision that passed the quality gates can be
+    published. The orchestration layer binds and compares *opaque* strings and
+    never inspects the workspace itself: materialising the identity (for Git, a
+    tree object id) requires the filesystem and a version-control tool, so it
+    belongs outside ``domain`` and ``orchestration``.
+
+    Implementations must be **side-effect free** with respect to the workspace:
+    computing a fingerprint never stages, commits, checks out, pushes or mutates
+    the working tree or its real index. They own every safety requirement — argv
+    only, no shell, a bounded timeout, and a sanitized error that never carries
+    raw process output, a command line or a credential.
+    """
+
+    @abstractmethod
+    def fingerprint(self, workspace: Workspace) -> str:
+        """Return an opaque, deterministic identity of the workspace state.
+
+        The identity must represent the complete publishable state and be stable
+        for identical content. It must not include ignored files that publication
+        would not commit.
+
+        Raises:
+            WorkspaceRevisionError: if the workspace cannot be inspected. The
+                error is sanitized.
+        """
+
+
 class WorkspacePublisher(ABC):
     """Publishes a validated run's workspace revision to an isolated branch.
 
@@ -349,4 +380,5 @@ __all__ = [
     "TaskRepository",
     "WorkspaceProvisioner",
     "WorkspacePublisher",
+    "WorkspaceRevisionInspector",
 ]

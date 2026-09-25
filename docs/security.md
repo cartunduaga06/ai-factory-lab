@@ -164,6 +164,17 @@ the easiest thing to get wrong. Every one of these is enforced in code:
   run is the task's latest, `SUCCEEDED`, and `READY_FOR_NEXT_PHASE` with an
   isolated workspace. A red or incomplete validation never produces a commit, a
   push or a PR, and a superseded run never publishes.
+- **Only the validated revision is published.** A green gate result alone is not
+  enough: validation binds the exact workspace revision that passed the gates (for
+  Git, the tree object id of the complete publishable state), and publication
+  re-verifies it. `RunTrackingService` fingerprints the workspace immediately
+  before and after the gates; if it changed, a required `workspace_integrity` gate
+  is recorded as failed and no revision is bound (the configured gates are never
+  re-run). `PublicationService` refuses a run with no bound revision, and
+  `GitWorkspacePublisher` refuses a workspace (or a commit tree) that no longer
+  matches, **before** any commit or credential exposure. A completed agent that
+  edits the workspace — or its Git configuration — after validation cannot get the
+  altered state pushed or published.
 - **Only the isolated branch is committed and pushed.** The commit happens inside
   `Workspace.path` only — never in the source checkout, never on `main`. The
   destination ref is validated explicitly, `main`/`master`/`HEAD`/`+`-refs and

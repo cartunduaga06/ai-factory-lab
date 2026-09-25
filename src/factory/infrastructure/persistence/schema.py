@@ -35,7 +35,7 @@ Design notes:
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS {AGENT_RUNS_TABLE} (
     started_at    TEXT,
     finished_at   TEXT,
     gates         TEXT NOT NULL DEFAULT '[]',
+    validated_revision TEXT,
     created_at    TEXT NOT NULL,
     CONSTRAINT fk_agent_runs_task
         FOREIGN KEY (task_id) REFERENCES {TASKS_TABLE} (task_id) ON DELETE CASCADE,
@@ -106,6 +107,15 @@ CREATE TABLE IF NOT EXISTS {AGENT_RUNS_TABLE} (
         FOREIGN KEY (workspace_id) REFERENCES {WORKSPACES_TABLE} (workspace_id)
 );
 """
+
+#: Idempotent migration for a database created before revision binding existed.
+#: ``ALTER TABLE ... ADD COLUMN`` fills existing rows with ``NULL`` (the correct
+#: "no validated revision" value) and touches no other data. A fresh database
+#: already has the column, so the statement is tolerant of the duplicate-column
+#: error rather than version-gated.
+MIGRATE_AGENT_RUNS_VALIDATED_REVISION = (
+    f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN validated_revision TEXT;"
+)
 
 CREATE_TASKS_STATUS_INDEX = (
     f"CREATE INDEX IF NOT EXISTS ix_{TASKS_TABLE}_status ON {TASKS_TABLE} (status);"
@@ -175,6 +185,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_{PULL_REQUESTS_TABLE}_repository_branch
     ON {PULL_REQUESTS_TABLE} (repository_slug, head_branch);
 """
 
+#: Idempotent statements that bring an existing database up to date with the
+#: current schema. Applied tolerantly (a duplicate column is ignored), so an old
+#: Phase 4/5 database gains ``agent_runs.validated_revision`` without losing data,
+#: and a fresh database (which already has it) is unaffected.
+MIGRATION_STATEMENTS: tuple[str, ...] = (MIGRATE_AGENT_RUNS_VALIDATED_REVISION,)
+
 #: Statements applied, in order, by :func:`initialize_schema`.
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS,
@@ -200,6 +216,7 @@ __all__ = [
     "CREATE_TASKS",
     "CREATE_TRANSITIONS",
     "CREATE_WORKSPACES",
+    "MIGRATION_STATEMENTS",
     "PULL_REQUESTS_TABLE",
     "SCHEMA_STATEMENTS",
     "SCHEMA_VERSION",

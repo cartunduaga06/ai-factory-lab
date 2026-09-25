@@ -19,12 +19,16 @@ from factory.domain.errors import (
     PublicationError,
     RevisionNotPublishableError,
     UnsafeRemoteError,
+    ValidatedRevisionMismatchError,
+    ValidatedRevisionMissingError,
+    WorkspaceRevisionError,
 )
-from factory.domain.models import AgentRun, FactoryTask, TaskSource, Workspace
+from factory.domain.models import AgentRun, FactoryTask, PublishedRevision, TaskSource, Workspace
 from factory.integrations.workspace.git_publish import (
     GitWorkspacePublisher,
     commit_message_for,
 )
+from factory.integrations.workspace.revision import GitWorkspaceRevisionInspector
 
 SECRET = "MY_PRIVATE_PUSH_PASSWORD_93726"
 
@@ -117,6 +121,31 @@ def _publisher(**kwargs: object) -> GitWorkspacePublisher:
     return GitWorkspacePublisher(**kwargs)  # type: ignore[arg-type]
 
 
+def _bind_revision(run: AgentRun) -> None:
+    """Bind the run's validated revision to the current workspace state.
+
+    Mirrors the real flow: validation binds the revision that passed the gates,
+    and the publisher verifies it. Tests that need a stale or missing revision
+    set ``run.validated_revision`` themselves.
+    """
+    workspace = run.workspace
+    assert workspace is not None
+    try:
+        run.validated_revision = GitWorkspaceRevisionInspector().fingerprint(workspace)
+    except WorkspaceRevisionError:
+        # A workspace that cannot be inspected has no bindable revision; the
+        # publisher is expected to refuse it for a different, earlier reason.
+        run.validated_revision = None
+
+
+def _publish(
+    publisher: GitWorkspacePublisher, task: FactoryTask, run: AgentRun
+) -> PublishedRevision:
+    """Bind the current workspace revision, then publish through ``publisher``."""
+    _bind_revision(run)
+    return publisher.publish(task, run)
+
+
 # -- happy path ------------------------------------------------------------
 
 
@@ -126,7 +155,7 @@ def test_commit_is_created_only_inside_the_isolated_branch(tmp_path: Path) -> No
     (worktree / "feature.py").write_text("print('x')\n", encoding="utf-8")
 
     before_main = _rev(source, "main")
-    revision = _publisher().publish(_task(), run)
+    revision = _publish(_publisher(), _task(), run)
 
     assert revision.branch == workspace.branch
     assert len(revision.commit_sha) == 40
@@ -143,7 +172,7 @@ def test_source_checkout_and_default_branch_are_unchanged(tmp_path: Path) -> Non
     (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
     source_head_before = _rev(source, "HEAD")
 
-    _publisher().publish(_task(), run)
+    _publish(_publisher(), _task(), run)
 
     assert _rev(source, "HEAD") == source_head_before
     assert _rev(source, "main") == source_head_before
@@ -153,7 +182,7 @@ def test_push_creates_only_the_workspace_branch_on_the_remote(tmp_path: Path) ->
     source, remote, workspace, run = _setup(tmp_path)
     (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
 
-    revision = _publisher().publish(_task(), run)
+    revision = _publish(_publisher(), _task(), run)
 
     branches = _git(remote, "branch", "--list", "--format=%(refname:short)").stdout.decode()
     assert branches.strip() == workspace.branch
@@ -174,7 +203,7 @@ def test_commit_message_is_deterministic_and_uses_no_task_body(tmp_path: Path) -
     task = _task()
     task.body = "UNTRUSTED BODY TEXT THAT MUST NOT BE A COMMIT MESSAGE"
 
-    _publisher().publish(task, run)
+    _publish(_publisher(), task, run)
 
     message = _git(Path(workspace.path), "log", "-1", "--format=%s").stdout.decode().strip()
     assert message == commit_message_for(task)
@@ -191,8 +220,8 @@ def test_retry_reuses_the_same_commit_and_push(tmp_path: Path) -> None:
     publisher = _publisher()
     task = _task()
 
-    first = publisher.publish(task, run)
-    second = publisher.publish(task, run)
+    first = _publish(publisher, task, run)
+    second = _publish(publisher, task, run)
 
     assert second.commit_sha == first.commit_sha
     assert second.branch == first.branch
@@ -205,9 +234,9 @@ def test_push_retry_is_idempotent(tmp_path: Path) -> None:
     (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
     publisher = _publisher()
     task = _task()
-    first = publisher.publish(task, run)
+    first = _publish(publisher, task, run)
     # Re-publishing (nothing changed) must succeed and leave the remote identical.
-    second = publisher.publish(task, run)
+    second = _publish(publisher, task, run)
     assert second == first
 
 
@@ -215,7 +244,7 @@ def test_no_changes_and_no_factory_commit_is_refused(tmp_path: Path) -> None:
     source, remote, workspace, run = _setup(tmp_path)
 
     with pytest.raises(RevisionNotPublishableError):
-        _publisher().publish(_task(), run)
+        _publish(_publisher(), _task(), run)
 
 
 # -- rejections ------------------------------------------------------------
@@ -234,7 +263,7 @@ def test_workspace_on_the_wrong_branch_is_rejected(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PublicationError):
-        _publisher().publish(_task(), _run(workspace))
+        _publish(_publisher(), _task(), _run(workspace))
 
 
 def test_protected_branch_is_rejected(tmp_path: Path) -> None:
@@ -244,7 +273,7 @@ def test_protected_branch_is_rejected(tmp_path: Path) -> None:
     workspace = Workspace(repository_slug="example/target", branch="main", path=str(source))
 
     with pytest.raises(PublicationError):
-        _publisher().publish(_task(), _run(workspace))
+        _publish(_publisher(), _task(), _run(workspace))
 
 
 def test_workspace_for_another_repository_is_rejected(tmp_path: Path) -> None:
@@ -252,7 +281,7 @@ def test_workspace_for_another_repository_is_rejected(tmp_path: Path) -> None:
     (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
 
     with pytest.raises(PublicationError):
-        _publisher().publish(_task(), run)
+        _publish(_publisher(), _task(), run)
 
 
 def test_missing_workspace_directory_is_rejected(tmp_path: Path) -> None:
@@ -263,7 +292,7 @@ def test_missing_workspace_directory_is_rejected(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PublicationError):
-        _publisher().publish(_task(), _run(workspace))
+        _publish(_publisher(), _task(), _run(workspace))
 
 
 def test_credential_bearing_remote_url_is_rejected(tmp_path: Path) -> None:
@@ -275,7 +304,7 @@ def test_credential_bearing_remote_url_is_rejected(tmp_path: Path) -> None:
     )
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher().publish(_task(), run)
+        _publish(_publisher(), _task(), run)
 
     error = caught.value
     formatted = "".join(traceback.format_exception(error))
@@ -292,7 +321,7 @@ def test_https_push_without_a_write_credential_is_refused(tmp_path: Path) -> Non
     _git(source, "remote", "set-url", "origin", "https://github.com/example/target.git")
 
     with pytest.raises(PublicationError):
-        _publisher().publish(_task(), run)
+        _publish(_publisher(), _task(), run)
 
 
 def test_git_failure_is_sanitized(tmp_path: Path) -> None:
@@ -302,7 +331,7 @@ def test_git_failure_is_sanitized(tmp_path: Path) -> None:
     _git(source, "remote", "set-url", "origin", str(tmp_path / "missing-remote.git"))
 
     with pytest.raises(PublicationError) as caught:
-        _publisher().publish(_task(), run)
+        _publish(_publisher(), _task(), run)
 
     error = caught.value
     formatted = "".join(traceback.format_exception(error))
@@ -329,7 +358,7 @@ def test_hooks_do_not_receive_the_write_credential(tmp_path: Path) -> None:
     )
     pre_commit.chmod(0o755)
 
-    _publisher(write_token=SECRET, remote="origin").publish(_task(), run)
+    _publish(_publisher(write_token=SECRET, remote="origin"), _task(), run)
 
     # The hook was disabled for the factory commit, so it never ran with secrets.
     assert not marker.exists()
@@ -349,7 +378,7 @@ def test_force_push_is_never_used(tmp_path: Path) -> None:
 
     # A non-fast-forward push must fail rather than overwrite the remote history.
     with pytest.raises(PublicationError):
-        _publisher().publish(_task(), run)
+        _publish(_publisher(), _task(), run)
     assert _rev(remote, workspace.branch) == _rev(other, "HEAD")
 
 
@@ -401,7 +430,7 @@ def test_plain_http_remote_is_refused_before_any_push(
     spy.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     error = caught.value
     formatted = "".join(traceback.format_exception(error))
@@ -426,7 +455,7 @@ def test_http_remote_with_userinfo_secret_is_refused(
     spy.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     error = caught.value
     formatted = "".join(traceback.format_exception(error))
@@ -451,7 +480,7 @@ def test_https_remote_reaches_the_authenticated_push_path(
     spy = _PushSpy()
     spy.install(monkeypatch)
 
-    _publisher(write_token=SECRET).publish(_task(), run)
+    _publish(_publisher(write_token=SECRET), _task(), run)
 
     refspec = f"refs/heads/{workspace.branch}:refs/heads/{workspace.branch}"
     assert spy.token_pushes == [refspec]
@@ -551,7 +580,7 @@ def test_malicious_pushurl_is_detected_and_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert not recorder.pushed()
     assert recorder.authenticated == []
@@ -570,7 +599,7 @@ def test_multiple_network_push_destinations_are_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, _SAFE_GITHUB_URL)
@@ -586,7 +615,7 @@ def test_wrong_repository_effective_url_is_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "another-repo", wrong_repo)
@@ -602,7 +631,7 @@ def test_wrong_owner_effective_url_is_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "attacker", wrong_owner)
@@ -617,7 +646,7 @@ def test_wrong_host_https_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyP
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "evil.example", evil_host)
@@ -633,7 +662,7 @@ def test_additional_path_components_are_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "evilpath", nested)
@@ -649,7 +678,7 @@ def test_query_string_on_effective_url_is_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, with_query, "x=1")
@@ -673,7 +702,7 @@ def test_insteadof_rewrite_is_detected_and_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "evil.example")
@@ -689,7 +718,7 @@ def test_pushinsteadof_rewrite_is_detected_and_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "evil.example")
@@ -705,7 +734,7 @@ def test_scp_style_network_remote_is_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     # No child process may receive ambient SSH credentials or the write token.
     assert not recorder.pushed()
@@ -725,7 +754,7 @@ def test_ssh_url_network_remote_is_refused(tmp_path: Path, monkeypatch: pytest.M
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     for env in recorder.child_envs():
@@ -745,7 +774,7 @@ def test_git_protocol_network_remote_is_refused(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "git://", git_url)
@@ -759,7 +788,7 @@ def test_https_remote_with_port_is_refused(tmp_path: Path, monkeypatch: pytest.M
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "8443", with_port)
@@ -776,7 +805,7 @@ def test_safe_https_push_uses_remote_name_and_isolated_refspec(
     recorder = _PushRecorder()
     recorder.install(monkeypatch)
 
-    _publisher(write_token=SECRET).publish(_task(), run)
+    _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert len(recorder.authenticated) == 1
     args, env = recorder.authenticated[0]
@@ -813,7 +842,7 @@ def test_local_bare_remote_still_works_without_a_token(
     recorder = _PushRecorder()
     recorder.install(monkeypatch)
 
-    revision = _publisher().publish(_task(), run)
+    revision = _publish(_publisher(), _task(), run)
 
     # A local destination needs no credential and is pushed normally.
     assert recorder.authenticated == []
@@ -843,7 +872,7 @@ def test_push_follows_the_validated_local_destination_under_a_rewrite(tmp_path: 
     _git(source, "remote", "set-url", "origin", str(literal))
     _git(source, "config", f"url.{redirected.as_posix()}.insteadOf", str(literal))
 
-    revision = _publisher().publish(_task(), run)
+    revision = _publish(_publisher(), _task(), run)
 
     redirected_branches = _git(redirected, "branch", "--list", "--format=%(refname:short)")
     assert redirected_branches.stdout.decode().strip() == workspace.branch
@@ -865,7 +894,163 @@ def test_malformed_network_url_is_refused_not_raised(
     recorder.install(monkeypatch)
 
     with pytest.raises(UnsafeRemoteError) as caught:
-        _publisher(write_token=SECRET).publish(_task(), run)
+        _publish(_publisher(write_token=SECRET), _task(), run)
 
     assert recorder.authenticated == []
     _assert_refusal_clean(caught.value, SECRET, "::1", malformed)
+
+
+# -- validated revision binding --------------------------------------------
+#
+# Publication must verify that the workspace still matches the exact revision
+# that passed the quality gates, before any commit, credential exposure or push.
+
+
+def revision_identity(workspace: Workspace) -> str:
+    return GitWorkspaceRevisionInspector().fingerprint(workspace)
+
+
+def test_fingerprint_ignores_ignored_files(tmp_path: Path) -> None:
+    source, _, workspace, _ = _setup(tmp_path)
+    worktree = Path(workspace.path)
+    (worktree / "feature.py").write_text("x\n", encoding="utf-8")
+    _git(source, "config", "core.excludesFile", str(tmp_path / "excludes"))
+    (tmp_path / "excludes").write_text("*.log\n", encoding="utf-8")
+    inspector = GitWorkspaceRevisionInspector()
+
+    before = inspector.fingerprint(workspace)
+    (worktree / "noise.log").write_text("ignored\n", encoding="utf-8")
+    after = inspector.fingerprint(workspace)
+
+    # An ignored file must not become publishable merely because it appears.
+    assert after == before
+
+
+def test_fingerprint_tracks_content_deletion_and_addition(tmp_path: Path) -> None:
+    _, _, workspace, _ = _setup(tmp_path)
+    worktree = Path(workspace.path)
+    (worktree / "feature.py").write_text("x\n", encoding="utf-8")
+    inspector = GitWorkspaceRevisionInspector()
+    base = inspector.fingerprint(workspace)
+
+    a = inspector.fingerprint(workspace)
+    (worktree / "feature.py").write_text("y\n", encoding="utf-8")
+    b = inspector.fingerprint(workspace)
+    (worktree / "added.py").write_text("z\n", encoding="utf-8")
+    c = inspector.fingerprint(workspace)
+    (worktree / "added.py").unlink()
+    d = inspector.fingerprint(workspace)
+
+    assert base == a  # Idempotent for unchanged content.
+    assert len({base, b, c}) == 3
+    assert d == b  # Deleting the added file restores the prior content identity.
+
+
+def test_fingerprint_does_not_mutate_the_real_index(tmp_path: Path) -> None:
+    source, _, workspace, _ = _setup(tmp_path)
+    worktree = Path(workspace.path)
+    (worktree / "feature.py").write_text("x\n", encoding="utf-8")
+
+    GitWorkspaceRevisionInspector().fingerprint(workspace)
+
+    # Nothing was staged: the real index is untouched and no commit exists.
+    staged = _git(worktree, "diff", "--cached", "--name-only").stdout.decode()
+    assert staged == ""
+    assert _rev(worktree, "HEAD") == _rev(source, "HEAD")
+
+
+def test_commit_tree_matches_the_validated_revision(tmp_path: Path) -> None:
+    _, _, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    run.validated_revision = GitWorkspaceRevisionInspector().fingerprint(workspace)
+
+    _publish(_publisher(), _task(), run)
+
+    tree = _git(Path(workspace.path), "rev-parse", "HEAD^{tree}").stdout.decode().strip()
+    assert tree == run.validated_revision == revision_identity(workspace)
+
+
+def test_missing_validated_revision_is_refused(tmp_path: Path) -> None:
+    _, _, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    run.validated_revision = None  # Never bound.
+
+    with pytest.raises(ValidatedRevisionMissingError):
+        _publisher().publish(_task(), run)
+
+
+def test_post_validation_mutation_is_refused_before_the_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The core regression: gates passed against revision R, then the workspace
+    # changed. The publisher must refuse before committing, exposing the token or
+    # pushing.
+    _, _, workspace, run = _setup(tmp_path)
+    worktree = Path(workspace.path)
+    (worktree / "feature.py").write_text("validated\n", encoding="utf-8")
+    _bind_revision(run)
+    validated = run.validated_revision
+    (worktree / "feature.py").write_text("tampered\n", encoding="utf-8")
+    (worktree / "extra.py").write_text("sneaky\n", encoding="utf-8")
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+    head_before = _rev(worktree, "HEAD")
+
+    with pytest.raises(ValidatedRevisionMismatchError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    # No commit, no push, no credential.
+    assert _rev(worktree, "HEAD") == head_before
+    assert recorder.authenticated == []
+    assert not recorder.pushed()
+    assert run.validated_revision == validated
+    _assert_refusal_clean(caught.value, SECRET, "tampered", "feature.py", validated or "")
+
+
+def test_commit_tree_mismatch_is_refused_before_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Defense in depth: even if the pre-check passed, a commit whose tree does not
+    # equal the validated revision must stop publication before the push.
+    _, _, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    # A revision that matches neither the current workspace nor any commit tree.
+    run.validated_revision = "0" * 40
+
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    with pytest.raises(ValidatedRevisionMismatchError):
+        _publisher(write_token=SECRET).publish(_task(), run)
+    assert recorder.authenticated == []
+
+
+def test_retry_reuses_the_validated_commit_without_a_second_commit(tmp_path: Path) -> None:
+    _, _, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("x\n", encoding="utf-8")
+    run.validated_revision = GitWorkspaceRevisionInspector().fingerprint(workspace)
+    publisher = _publisher()
+    task = _task()
+
+    first = publisher.publish(task, run)
+    head_after_first = _rev(Path(workspace.path), "HEAD")
+    # Simulate a crash before push: the commit exists, the workspace is clean.
+    second = publisher.publish(task, run)
+
+    assert second.commit_sha == first.commit_sha
+    assert _rev(Path(workspace.path), "HEAD") == head_after_first
+    tree = _git(Path(workspace.path), "rev-parse", "HEAD^{tree}").stdout.decode().strip()
+    assert tree == run.validated_revision
+
+
+def test_mismatch_error_carries_no_secret_or_url(tmp_path: Path) -> None:
+    _, _, workspace, run = _setup(tmp_path)
+    (Path(workspace.path) / "feature.py").write_text("validated\n", encoding="utf-8")
+    _bind_revision(run)
+    (Path(workspace.path) / "feature.py").write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(ValidatedRevisionMismatchError) as caught:
+        _publisher(write_token=SECRET).publish(_task(), run)
+
+    _assert_refusal_clean(caught.value, SECRET, "tampered", "feature.py", "example/target")

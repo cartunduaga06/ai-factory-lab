@@ -72,9 +72,12 @@ from factory.domain.errors import (
     PublicationError,
     RevisionNotPublishableError,
     UnsafeRemoteError,
+    ValidatedRevisionMismatchError,
+    ValidatedRevisionMissingError,
 )
 from factory.domain.models import AgentRun, FactoryTask, PublishedRevision, Workspace
-from factory.domain.ports import WorkspacePublisher
+from factory.domain.ports import WorkspacePublisher, WorkspaceRevisionInspector
+from factory.integrations.workspace.revision import GitWorkspaceRevisionInspector
 
 #: Default per-command timeout. Publishing is a local commit plus a remote push.
 DEFAULT_TIMEOUT_SECONDS = 120.0
@@ -124,11 +127,15 @@ class GitWorkspacePublisher(WorkspacePublisher):
         write_token: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         allowed_git_host: str = DEFAULT_GIT_HOST,
+        revision_inspector: WorkspaceRevisionInspector | None = None,
     ) -> None:
         self._remote = remote
         self._write_token = write_token
         self._timeout = timeout
         self._allowed_git_host = allowed_git_host.strip().lower().rstrip(".")
+        self._revision_inspector = revision_inspector or GitWorkspaceRevisionInspector(
+            timeout=timeout
+        )
 
     def __repr__(self) -> str:
         # The write token is never rendered.
@@ -139,7 +146,15 @@ class GitWorkspacePublisher(WorkspacePublisher):
     def publish(self, task: FactoryTask, run: AgentRun) -> PublishedRevision:
         """Commit the run's workspace changes (if any) and push its branch.
 
+        The workspace is checked against the run's bound revision *before* any
+        real ``git add``, commit, credential exposure or push, and the resulting
+        commit's tree is checked against it again before the push — defense in
+        depth that only the revision which passed the quality gates is published.
+
         Raises:
+            ValidatedRevisionMissingError: if the run carries no bound revision.
+            ValidatedRevisionMismatchError: if the workspace (or the commit's
+                tree) does not match that revision.
             PublicationError: if the workspace is missing, is not the expected
                 isolated worktree, has nothing to publish, or cannot be pushed.
                 All failures are sanitized.
@@ -149,9 +164,36 @@ class GitWorkspacePublisher(WorkspacePublisher):
             raise PublicationError(f"run {run.run_id} has no workspace to publish")
         self._require_isolated_workspace(task, workspace)
 
+        validated = _validated_revision(run)
+        if not validated:
+            raise ValidatedRevisionMissingError(task.task_id, run.run_id)
+        if self._current_revision(workspace) != validated:
+            raise ValidatedRevisionMismatchError(workspace.workspace_id)
+
         commit_sha = self._commit_if_needed(task, workspace)
+        if self._tree_of(commit_sha, workspace) != validated:
+            # The commit does not contain exactly the tree that passed validation.
+            raise ValidatedRevisionMismatchError(workspace.workspace_id)
         self._push(task, workspace)
         return PublishedRevision(commit_sha=commit_sha, branch=workspace.branch)
+
+    # -- revision identity -------------------------------------------------
+
+    def _current_revision(self, workspace: Workspace) -> str | None:
+        """Return the workspace's current publishable revision, or ``None``.
+
+        Never raises: an inspection failure is a refusal, not a crash, and the
+        sanitized inspector error is discarded rather than chained.
+        """
+        try:
+            return self._revision_inspector.fingerprint(workspace)
+        except Exception:  # noqa: BLE001 - a defective inspector must not leak
+            return None
+
+    def _tree_of(self, commit_sha: str, workspace: Workspace) -> str | None:
+        """Return the tree object id of ``commit_sha``, or ``None``."""
+        tree = self._capture(["rev-parse", f"{commit_sha}^{{tree}}"], workspace)
+        return tree.strip() if tree else None
 
     # -- validation --------------------------------------------------------
 
@@ -424,6 +466,12 @@ class GitWorkspacePublisher(WorkspacePublisher):
         if extra is not None:
             env.update(extra)
         return env
+
+
+def _validated_revision(run: AgentRun) -> str:
+    """The run's bound validated revision, or an empty string if it has none."""
+    revision = run.validated_revision
+    return revision.strip() if revision else ""
 
 
 def _splittable(url: str) -> bool:

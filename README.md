@@ -211,6 +211,17 @@ branch. A red or incomplete gate result therefore can never become a commit, a
 push or a PR — Phase 5 consumes the durable Phase 4 validation result rather than
 re-running gates.
 
+The guard is not just "the gates were green": the run must also carry the
+identity of the exact workspace revision that passed them. Validation fingerprints
+the workspace immediately before and after the gates and binds that identity on
+`AgentRun.validated_revision` (a Git tree object id, computed over a private
+temporary index so the real index is never touched and no commit is created). If
+the workspace changed while the gates ran, a required `workspace_integrity` gate
+fails and nothing is bound. `GitWorkspacePublisher` re-verifies the revision
+before committing and again on the resulting commit's tree before pushing, so a
+completed agent that edits the workspace after validation cannot publish the
+altered state.
+
 `GitWorkspacePublisher` commits only inside the run's workspace and pushes only
 `Workspace.branch`, to the same branch name, with no force option ever used:
 `main`/`master`/`HEAD` are refused and history is never rewritten. The commit

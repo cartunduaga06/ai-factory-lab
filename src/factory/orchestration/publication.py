@@ -43,6 +43,7 @@ from factory.domain.errors import (
     DuplicatePullRequestError,
     TaskNotPublishableError,
     TaskStateChangedError,
+    ValidatedRevisionMissingError,
 )
 from factory.domain.models import AgentRun, FactoryTask, PullRequest, Repository
 from factory.domain.ports import (
@@ -136,6 +137,14 @@ class PublicationService:
             raise TaskNotPublishableError(
                 task.task_id, run.run_id, f"task is {task.status.value}, not VALIDATING"
             )
+        if not _validated_revision(run):
+            # A green outcome is not enough: the exact workspace revision that
+            # passed the gates must have been bound durably at validation time.
+            # A run that looks successful but carries no revision identity can
+            # never create a new publication. Checked here rather than in the
+            # guard so that reconciling an already-published run (crash windows
+            # C-F) is never blocked by it.
+            raise ValidatedRevisionMissingError(task.task_id, run.run_id)
 
         revision = self._publisher.publish(task, run)
         pull_request = self._resolve_pull_request(task, run, revision.branch)
@@ -305,6 +314,16 @@ def build_pull_request_body(task: FactoryTask, run: AgentRun) -> str:
     else:
         lines.append("Quality gates: none configured.")
     return "\n".join(lines)
+
+
+def _validated_revision(run: AgentRun) -> str:
+    """The run's bound validated revision, or an empty string if it has none.
+
+    A green validation must have bound the exact workspace revision that passed
+    the gates. Whitespace-only values are treated as absent.
+    """
+    revision = run.validated_revision
+    return revision.strip() if revision else ""
 
 
 def _bounded_title(title: str) -> str:

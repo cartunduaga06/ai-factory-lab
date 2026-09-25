@@ -214,6 +214,51 @@ class RevisionNotPublishableError(PublicationError):
         self.workspace_id = workspace_id
 
 
+class ValidatedRevisionMissingError(PublicationError):
+    """A run carries no durable revision identity, so it cannot be published.
+
+    Raised when publication is attempted for a run whose ``validated_revision``
+    is ``None``. A green validation *must* have bound a workspace revision before
+    it can be published; a run that merely looks successful (SUCCEEDED with green
+    gate objects) but carries no revision identity is not publishable. The message
+    names factory identifiers only.
+    """
+
+    def __init__(self, task_id: str, run_id: str) -> None:
+        super().__init__(f"run {run_id} for task {task_id} has no validated revision")
+        self.task_id = task_id
+        self.run_id = run_id
+
+
+class ValidatedRevisionMismatchError(PublicationError):
+    """The workspace no longer matches the revision that passed validation.
+
+    Raised when the current workspace fingerprint differs from the run's
+    ``validated_revision`` — the workspace changed after the gates ran — or when
+    the factory commit's tree does not equal it. Publication stops before the
+    credential is used or anything is pushed. The message names the workspace
+    only; the tree ids, changed paths and any git output are never included.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} does not match its validated revision")
+        self.workspace_id = workspace_id
+
+
+class WorkspaceRevisionError(FactoryError):
+    """The workspace revision could not be inspected.
+
+    Raised by a :class:`~factory.domain.ports.WorkspaceRevisionInspector` when the
+    workspace is unusable (missing, not a Git checkout, or git failed). Sanitized:
+    never carries raw git stdout/stderr, a command line or a credential, and never
+    chains the underlying process error.
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"workspace {workspace_id} revision could not be inspected")
+        self.workspace_id = workspace_id
+
+
 class UnsafeRemoteError(PublicationError):
     """A git remote URL is unsafe to authenticate through and was refused.
 
@@ -265,5 +310,8 @@ __all__ = [
     "TaskSourceError",
     "TaskStateChangedError",
     "UnsafeRemoteError",
+    "ValidatedRevisionMismatchError",
+    "ValidatedRevisionMissingError",
     "WorkspaceProvisioningError",
+    "WorkspaceRevisionError",
 ]

@@ -9,12 +9,18 @@ repositories.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Callable
 from pathlib import Path
 
 from factory.domain.enums import QualityGateStatus
-from factory.domain.errors import WorkspaceProvisioningError
+from factory.domain.errors import WorkspaceProvisioningError, WorkspaceRevisionError
 from factory.domain.models import FactoryTask, QualityGate, QualityGateSpec, Workspace
-from factory.domain.ports import QualityGateRunner, WorkspaceProvisioner
+from factory.domain.ports import (
+    QualityGateRunner,
+    WorkspaceProvisioner,
+    WorkspaceRevisionInspector,
+)
 
 
 class FakeWorkspaceProvisioner(WorkspaceProvisioner):
@@ -39,19 +45,33 @@ class FakeWorkspaceProvisioner(WorkspaceProvisioner):
         return workspace
 
 
+def specs(*names: str) -> tuple[QualityGateSpec, ...]:
+    """Build required gate specs named ``names`` with a trivial argv."""
+    return tuple(QualityGateSpec(name=name, argv=("true",)) for name in names)
+
+
 class FakeQualityGateRunner(QualityGateRunner):
     """Returns scripted gate statuses, keyed by gate name.
 
     Records the workspaces each gate ran in, so a test can assert gates ran
-    inside the run's own workspace.
+    inside the run's own workspace. ``on_run`` lets a test mutate the workspace
+    while a gate executes, to drive the revision-mutation path.
     """
 
-    def __init__(self, statuses: dict[str, QualityGateStatus] | None = None) -> None:
+    def __init__(
+        self,
+        statuses: dict[str, QualityGateStatus] | None = None,
+        *,
+        on_run: Callable[[str, Workspace], None] | None = None,
+    ) -> None:
         self._statuses = statuses or {}
+        self._on_run = on_run
         self.calls: list[tuple[str, str]] = []
 
     def run(self, spec: QualityGateSpec, workspace: Workspace) -> QualityGate:
         self.calls.append((spec.name, workspace.path))
+        if self._on_run is not None:
+            self._on_run(spec.name, workspace)
         status = self._statuses.get(spec.name, QualityGateStatus.PASSED)
         return QualityGate(
             name=spec.name,
@@ -61,12 +81,45 @@ class FakeQualityGateRunner(QualityGateRunner):
         )
 
 
-def specs(*names: str) -> tuple[QualityGateSpec, ...]:
-    """Build required gate specs named ``names`` with a trivial argv."""
-    return tuple(QualityGateSpec(name=name, argv=("true",)) for name in names)
+class FakeRevisionInspector(WorkspaceRevisionInspector):
+    """A real (non-mock) revision inspector over a directory's contents.
+
+    It fingerprints a workspace by hashing the sorted (relative path, content)
+    pairs of the files under ``Workspace.path`` — enough to prove the binding
+    logic deterministically without a real Git repository. Tests that need a
+    fixed identity can supply explicit ``revisions`` or a ``revision_factory``.
+    """
+
+    def __init__(
+        self,
+        *,
+        revisions: dict[str, str] | None = None,
+        revision_factory: Callable[[Workspace], str] | None = None,
+    ) -> None:
+        self._revisions = revisions or {}
+        self._revision_factory = revision_factory
+        self.calls: list[str] = []
+
+    def fingerprint(self, workspace: Workspace) -> str:
+        self.calls.append(workspace.workspace_id)
+        if workspace.workspace_id in self._revisions:
+            return self._revisions[workspace.workspace_id]
+        if self._revision_factory is not None:
+            return self._revision_factory(workspace)
+        root = Path(workspace.path)
+        if not root.is_dir():
+            raise WorkspaceRevisionError(workspace.workspace_id)
+        digest = hashlib.sha256()
+        for path in sorted(p for p in root.rglob("*") if p.is_file()):
+            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
 
 
 def optional_spec(name: str) -> QualityGateSpec:
+    """Build an optional gate spec named ``name``."""
     return QualityGateSpec(name=name, argv=("true",), required=False)
 
 
@@ -76,6 +129,7 @@ def statuses(**kwargs: QualityGateStatus) -> dict[str, QualityGateStatus]:
 
 __all__ = [
     "FakeQualityGateRunner",
+    "FakeRevisionInspector",
     "FakeWorkspaceProvisioner",
     "optional_spec",
     "specs",
