@@ -98,6 +98,40 @@ Running it again over the same issues reports `Created: 0` and creates no
 duplicates. See [section 4](#4-current-development-status) for what is and is not
 implemented.
 
+## 1a. One-shot end-to-end runtime (MVP 0.1)
+
+The complete existing pipeline is exposed as one bounded command:
+
+```bash
+python -m factory run
+```
+
+It intakes issues, selects at most one task, resumes or dispatches its durable
+run, polls OpenHands, evaluates the configured quality gates, and publishes one
+isolated branch and Pull Request. It stops at `WAITING_HUMAN`; it never merges,
+enables auto-merge, deploys, or pushes `main`/`master`. Repeating the command
+reconciles the same task/run/branch/PR after a crash instead of creating another.
+
+The required runtime settings are `GITHUB_TOKEN` (read-only intake),
+`GITHUB_WRITE_TOKEN` (push/PR, never a fallback), `FACTORY_GITHUB_REPO`,
+`FACTORY_TARGET_REPO`, `FACTORY_SOURCE_CHECKOUT`, `OPENHANDS_BASE_URL`, and
+`OPENHANDS_AGENT_PROFILE_ID`. Configure `FACTORY_QUALITY_GATES` before an
+acceptance run.
+
+The host and container workspace roots are separate settings. For ai-server:
+
+```bash
+FACTORY_WORKSPACE_ROOT=/srv/ai-factory/workspaces
+OPENHANDS_WORKSPACE_ROOT=/projects
+```
+
+The adapter sends the deterministic `/projects/<workspace>` equivalent to
+OpenHands while persistence and git publication retain the host path.
+
+Acceptance: apply `factory-ready` to Issue #8, confirm the command creates one
+isolated branch and PR, verify the final task state is `WAITING_HUMAN`, then
+stop for human review. Do not merge or deploy as part of acceptance.
+
 ## 1b. Run lifecycle and dispatch (Phase 2B)
 
 The second capability claims a ready task and records the run it produces:

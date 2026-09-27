@@ -46,6 +46,7 @@ from factory.integrations.openhands.execution import (
     OpenHandsExecution,
     build_creation_payload,
 )
+from factory.integrations.openhands.paths import WorkspacePathMapper
 from factory.integrations.openhands.status import is_terminal, map_status
 
 logger = logging.getLogger(__name__)
@@ -62,9 +63,12 @@ class OpenHandsAdapter(AgentAdapterBase):
         self,
         client: OpenHandsClient,
         execution: OpenHandsExecution,
+        *,
+        workspace_paths: WorkspacePathMapper | None = None,
     ) -> None:
         self._client = client
         self._execution = execution
+        self._workspace_paths = workspace_paths
 
     def __repr__(self) -> str:
         # The client's repr is already credential-free, and ``execution`` holds
@@ -89,7 +93,12 @@ class OpenHandsAdapter(AgentAdapterBase):
             OpenHandsError: a sanitized integration error if the conversation
                 could not be created.
         """
-        payload = build_creation_payload(task, workspace.path, self._execution).as_dict()
+        agent_path = (
+            self._workspace_paths.to_container(workspace.path)
+            if self._workspace_paths is not None
+            else workspace.path
+        )
+        payload = build_creation_payload(task, agent_path, self._execution).as_dict()
         descriptor = self._client.create_conversation(payload)
         conversation_id = self._conversation_id(descriptor)
         status = map_status(descriptor.get(_EXECUTION_STATUS_KEY))

@@ -21,8 +21,11 @@ from factory.domain.models import QualityGateSpec
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 DEFAULT_GITHUB_GIT_HOST = "github.com"
 DEFAULT_WORKSPACE_ROOT = "./.workspaces"
+DEFAULT_OPENHANDS_WORKSPACE_ROOT = "./.workspaces"
 DEFAULT_DATABASE_PATH = "./factory.db"
 DEFAULT_TARGET_BRANCH = "main"
+DEFAULT_RUN_POLL_INTERVAL = 5.0
+DEFAULT_RUN_TIMEOUT = 1800.0
 
 
 class DatabaseScheme(StrEnum):
@@ -81,6 +84,17 @@ def _clean(value: str | None) -> str | None:
     if not stripped or (stripped.startswith("<") and stripped.endswith(">")):
         return None
     return stripped
+
+
+def _duration(value: str | None, default: float) -> float:
+    cleaned = _clean(value)
+    if cleaned is None:
+        return default
+    try:
+        parsed = float(cleaned)
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else default
 
 
 @dataclass(slots=True, frozen=True)
@@ -205,6 +219,7 @@ class FactoryConfig:
     codex: AgentConfig
     database_url: str | None
     workspace_root: str
+    openhands_workspace_root: str
     logging: LoggingConfig
     # Local checkout the workspace provisioner branches from. Injected, never
     # hard-coded: the factory has no business assuming a machine-specific path.
@@ -223,6 +238,8 @@ class FactoryConfig:
     # Git host an authenticated HTTPS push may target. Injectable so a GitHub
     # Enterprise deployment does not need code changes. Not a secret.
     github_git_host: str = DEFAULT_GITHUB_GIT_HOST
+    run_poll_interval: float = DEFAULT_RUN_POLL_INTERVAL
+    run_timeout: float = DEFAULT_RUN_TIMEOUT
 
     @property
     def database(self) -> DatabaseConfig:
@@ -253,6 +270,9 @@ class FactoryConfig:
             codex=AgentConfig(api_key=_clean(source.get("CODEX_API_KEY"))),
             database_url=_clean(source.get("DATABASE_URL")),
             workspace_root=_clean(source.get("FACTORY_WORKSPACE_ROOT")) or DEFAULT_WORKSPACE_ROOT,
+            openhands_workspace_root=(
+                _clean(source.get("OPENHANDS_WORKSPACE_ROOT")) or DEFAULT_OPENHANDS_WORKSPACE_ROOT
+            ),
             logging=LoggingConfig.from_env(source),
             source_checkout=_clean(source.get("FACTORY_SOURCE_CHECKOUT")),
             workspace_base_ref=_clean(source.get("FACTORY_WORKSPACE_BASE_REF")),
@@ -264,6 +284,10 @@ class FactoryConfig:
             github_git_host=(
                 _clean(source.get("FACTORY_GITHUB_GIT_HOST")) or DEFAULT_GITHUB_GIT_HOST
             ),
+            run_poll_interval=_duration(
+                source.get("FACTORY_RUN_POLL_INTERVAL"), DEFAULT_RUN_POLL_INTERVAL
+            ),
+            run_timeout=_duration(source.get("FACTORY_RUN_TIMEOUT"), DEFAULT_RUN_TIMEOUT),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -288,6 +312,7 @@ class FactoryConfig:
             "codex": {"api_key": "***" if self.codex.api_key else None},
             "database_url": _redact_url(self.database_url),
             "workspace_root": self.workspace_root,
+            "openhands_workspace_root": self.openhands_workspace_root,
             "source_checkout": self.source_checkout,
             "workspace_base_ref": self.workspace_base_ref,
             "quality_gates": [
@@ -296,6 +321,8 @@ class FactoryConfig:
             "github_write_token": "***" if self.github_write_token else None,
             "target_default_branch": self.target_default_branch,
             "github_git_host": self.github_git_host,
+            "run_poll_interval": self.run_poll_interval,
+            "run_timeout": self.run_timeout,
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
 
@@ -344,7 +371,10 @@ __all__ = [
     "DEFAULT_GITHUB_API_URL",
     "DEFAULT_GITHUB_GIT_HOST",
     "DEFAULT_TARGET_BRANCH",
+    "DEFAULT_RUN_POLL_INTERVAL",
+    "DEFAULT_RUN_TIMEOUT",
     "DEFAULT_WORKSPACE_ROOT",
+    "DEFAULT_OPENHANDS_WORKSPACE_ROOT",
     "AgentConfig",
     "DatabaseConfig",
     "DatabaseScheme",

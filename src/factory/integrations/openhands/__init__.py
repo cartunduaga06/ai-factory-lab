@@ -25,6 +25,7 @@ from factory.integrations.openhands.execution import (
     OpenHandsExecution,
     build_instruction,
 )
+from factory.integrations.openhands.paths import WorkspacePathError, WorkspacePathMapper
 from factory.integrations.openhands.status import (
     OpenHandsExecutionStatus,
     map_status,
@@ -42,6 +43,8 @@ __all__ = [
     "OpenHandsRequestError",
     "OpenHandsResponseError",
     "OpenHandsStatusError",
+    "WorkspacePathError",
+    "WorkspacePathMapper",
     "ServerResponse",
     "Transport",
     "UrllibTransport",
