@@ -6,8 +6,21 @@ from pathlib import Path
 
 import pytest
 
-from factory.domain.enums import AgentKind, RepositoryRole, RunStatus, TaskStatus
-from factory.domain.models import FactoryTask, Repository, TaskSource
+from factory.domain.enums import (
+    AgentKind,
+    QualityGateStatus,
+    RepositoryRole,
+    RunStatus,
+    TaskStatus,
+)
+from factory.domain.models import (
+    AgentRun,
+    FactoryTask,
+    QualityGate,
+    Repository,
+    TaskSource,
+    Workspace,
+)
 from factory.infrastructure.persistence import (
     SqlitePullRequestRepository,
     SqliteRunRepository,
@@ -58,6 +71,7 @@ def runtime_parts(tmp_path: Path):
     adapter = FakeAgentAdapter(kind=AgentKind.OTHER, status=RunStatus.SUCCEEDED)
     publisher = FakeWorkspacePublisher()
     sink = FakePullRequestSink()
+    gate_runner = FakeQualityGateRunner()
     runtime = FactoryRuntime(
         intake=intake,
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
@@ -67,7 +81,7 @@ def runtime_parts(tmp_path: Path):
         provisioner=FakeWorkspaceProvisioner(),
         workspace_root=str(tmp_path / "host-workspaces"),
         gate_specs=specs("tests"),
-        gate_runner=FakeQualityGateRunner(),
+        gate_runner=gate_runner,
         revision_inspector=FakeRevisionInspector(),
         publisher=publisher,
         pull_request_sink=sink,
@@ -76,11 +90,11 @@ def runtime_parts(tmp_path: Path):
         poll_interval=0,
         timeout=1,
     )
-    return runtime, tasks, runs, adapter, publisher, sink
+    return runtime, tasks, runs, adapter, publisher, sink, gate_runner
 
 
 def test_run_happy_path_reaches_waiting_human(runtime_parts) -> None:
-    runtime, tasks, runs, adapter, publisher, sink = runtime_parts
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
 
     result = runtime.run_once()
 
@@ -94,7 +108,7 @@ def test_run_happy_path_reaches_waiting_human(runtime_parts) -> None:
 
 
 def test_retry_is_waiting_human_noop_and_does_not_duplicate_run_or_pr(runtime_parts) -> None:
-    runtime, _, _, adapter, publisher, sink = runtime_parts
+    runtime, _, _, adapter, publisher, sink, _ = runtime_parts
 
     first = runtime.run_once()
     second = runtime.run_once()
@@ -107,7 +121,7 @@ def test_retry_is_waiting_human_noop_and_does_not_duplicate_run_or_pr(runtime_pa
 
 
 def test_timeout_leaves_active_run_resumable(runtime_parts) -> None:
-    runtime, tasks, runs, adapter, _, _ = runtime_parts
+    runtime, tasks, runs, adapter, _, _, _ = runtime_parts
     adapter._status = RunStatus.PENDING  # type: ignore[attr-defined]
     adapter._collect_status = RunStatus.RUNNING  # type: ignore[attr-defined]
 
@@ -116,6 +130,69 @@ def test_timeout_leaves_active_run_resumable(runtime_parts) -> None:
     assert result.outcome == "TIMEOUT_RESUMABLE"
     assert tasks.list(TaskStatus.RUNNING)
     assert runs.find_active_run(result.task_id) is not None  # type: ignore[arg-type]
+
+
+def test_active_run_resume_collects_same_run_without_dispatch(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    adapter._status = RunStatus.PENDING  # type: ignore[attr-defined]
+    adapter._collect_status = RunStatus.RUNNING  # type: ignore[attr-defined]
+    runtime._timeout = 0  # type: ignore[attr-defined]
+
+    first = runtime.run_once()
+    adapter._collect_status = RunStatus.SUCCEEDED  # type: ignore[attr-defined]
+    second = runtime.run_once()
+
+    assert first.outcome == "TIMEOUT_RESUMABLE"
+    assert second.outcome == "WAITING_HUMAN"
+    assert second.run_id == first.run_id
+    assert len(adapter.dispatched) == 1
+    assert len(runs.list_runs(first.task_id)) == 1  # type: ignore[arg-type]
+    assert tasks.get(first.task_id).status is TaskStatus.WAITING_HUMAN  # type: ignore[arg-type]
+    assert publisher.calls == 1
+    assert sink.create_calls == 1
+
+
+def test_validated_run_resume_skips_agent_and_continues_to_publication(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)  # type: ignore[attr-defined]
+    task = tasks.list(TaskStatus.DISCOVERED)[0]
+    for target in (TaskStatus.READY, TaskStatus.CLAIMED, TaskStatus.RUNNING, TaskStatus.VALIDATING):
+        runtime._dispatch.lifecycle.transition(task.task_id, target)  # type: ignore[attr-defined]
+    workspace = Workspace(
+        repository_slug=task.target_repository,
+        branch=f"factory/{task.task_id}/validated",
+        path=str(Path(runtime._dispatch._workspace_root) / "validated"),  # type: ignore[attr-defined]
+    )
+    Path(workspace.path).mkdir(parents=True, exist_ok=True)
+    run = AgentRun(
+        task_id=task.task_id,
+        adapter=AgentKind.OTHER,
+        status=RunStatus.SUCCEEDED,
+        workspace=workspace,
+        gates=(QualityGate("tests", QualityGateStatus.PASSED, required=True),),
+        validated_revision="tree-validated",
+    )
+    runs.save_run(run)
+
+    result = runtime.run_once()
+
+    assert result.outcome == "WAITING_HUMAN"
+    assert result.run_id == run.run_id
+    assert adapter.dispatched == []
+    assert publisher.calls == 1
+    assert sink.create_calls == 1
+
+
+def test_failed_required_gate_does_not_publish(runtime_parts) -> None:
+    runtime, tasks, _, _, publisher, sink, gate_runner = runtime_parts
+    gate_runner._statuses["tests"] = QualityGateStatus.FAILED  # type: ignore[attr-defined]
+
+    result = runtime.run_once()
+
+    assert result.outcome == "QUALITY_GATES_FAILED"
+    assert result.task_status is TaskStatus.VALIDATING
+    assert publisher.calls == 0
+    assert sink.create_calls == 0
 
 
 def test_host_path_mapping_is_explicit_and_rejects_escape(tmp_path: Path) -> None:
