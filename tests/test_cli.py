@@ -206,3 +206,63 @@ def test_success_never_prints_the_token(
 def test_summary_dataclass_defaults_are_zero() -> None:
     summary = IntakeSummary()
     assert (summary.discovered, summary.created, summary.existing, summary.errors) == (0, 0, 0, 0)
+
+
+def _runtime_env(tmp_path: Path, *, write_token: str | None = "write-secret") -> dict[str, str]:
+    values = {
+        "GITHUB_TOKEN": TOKEN,
+        "FACTORY_GITHUB_REPO": "cartunduaga06/ai-factory-lab",
+        "FACTORY_TARGET_REPO": "cartunduaga06/finanza-ia",
+        "FACTORY_SOURCE_CHECKOUT": str(tmp_path),
+        "OPENHANDS_BASE_URL": "http://openhands.invalid",
+        "OPENHANDS_AGENT_PROFILE_ID": "profile-1",
+        "FACTORY_WORKSPACE_ROOT": str(tmp_path / "host-workspaces"),
+        "OPENHANDS_WORKSPACE_ROOT": "/projects",
+        "DATABASE_URL": f"sqlite:///{tmp_path / 'factory.db'}",
+    }
+    if write_token is not None:
+        values["GITHUB_WRITE_TOKEN"] = write_token
+    return values
+
+
+def test_run_without_write_token_fails_closed_before_provider_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for key, value in _runtime_env(tmp_path, write_token=None).items():
+        monkeypatch.setenv(key, value)
+
+    code = cli.main(["run"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_CONFIG_ERROR
+    assert "GITHUB_WRITE_TOKEN is required" in captured.out
+    assert TOKEN not in captured.out
+    assert TOKEN not in captured.err
+
+
+def test_runtime_cli_does_not_echo_provider_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    provider_secret = "provider-secret-must-not-escape"
+
+    class ExplodingRuntime:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def run_once(self) -> object:
+            raise RuntimeError(provider_secret)
+
+    monkeypatch.setattr(cli, "FactoryRuntime", ExplodingRuntime)
+    for key, value in _runtime_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+
+    code = cli.main(["run"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_INTAKE_ERROR
+    assert provider_secret not in captured.out
+    assert provider_secret not in captured.err
