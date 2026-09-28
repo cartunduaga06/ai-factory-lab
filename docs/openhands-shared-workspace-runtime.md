@@ -88,18 +88,25 @@ This section describes how an operator installs the artifacts that the Factory
 runtime is configured out of band. **A change to any of these requires container
 recreation, not a restart.** Nothing here is applied by the Factory itself.
 
-1. **Install the normalizer into the OpenHands container.** The hook command must
-   be runnable inside the container as UID 10001. Two supported shapes:
+1. **Install the normalizer into the OpenHands container from the exact reviewed
+   revision.** The hook command must be runnable inside the container as UID
+   10001. AI Factory Lab is not assumed to be published on PyPI, so do **not**
+   rely on `pip install ai-factory-lab` by package name.
 
-   - install the package (`pip install ai-factory-lab`) so the console script
-     `factory-hook` (or `python -m factory.integrations.workspace.shared_policy`)
-     is on `PATH`, or
-   - package the reviewed module as a standalone script at a fixed path (the
-     audit's illustrative `/opt/ai-factory/repair_shared_workspace.py`) that
-     imports the same reviewed policy module.
+   Preferred deployment shape:
 
-   Prefer installing the versioned package so the container runs the exact
-   reviewed revision rather than a hand-copied file.
+   - check out the exact Git commit that was reviewed and merged;
+   - build a wheel from that revision (for example, `python -m build --wheel`);
+   - copy that immutable wheel into the OpenHands image/build context; and
+   - install that wheel in the recreated image/container so `factory-hook` (or
+     `python -m factory.integrations.workspace.shared_policy`) is on `PATH`.
+
+   A standalone reviewed script at a fixed path is acceptable only when it is
+   generated from the same reviewed revision and imports the same policy module;
+   do not maintain a hand-edited second implementation.
+
+   Record the installed Git SHA/wheel artifact in the operator change record so
+   the running helper can be traced back to the reviewed source.
 
 2. **Expose the run's Git metadata read-only.** The ignored-path classification
    uses `git ls-files`, and a worktree records its Git metadata outside the
@@ -171,9 +178,9 @@ avoid a gate that would require group write to an owner-only cache.
 This Issue was implemented by the Factory *before* the permanent owner-side hook
 existed. As a one-time safeguard, the implementing run normalized every
 repository path it created or replaced, owner-side, before reporting completion
-(`0660` files, `0770` executables, `2770` directories, `0600`/`0700` for
-ignored/private), without world-readable fallbacks and without changing
-ownership. With the permanent hook above installed, future runs no longer need
+(`0660` shared files, `0770` shared executables, `2770` shared directories,
+`0600` ignored/private regular files, and `0700` ignored/private executables and
+directories), without world-readable fallbacks and without changing ownership. With the permanent hook above installed, future runs no longer need
 task-specific instructions.
 
 ## Verification
