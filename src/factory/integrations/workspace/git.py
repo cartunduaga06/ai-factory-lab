@@ -20,8 +20,9 @@ Safety properties, all enforced below:
 * the source checkout is left on its existing branch (only ``worktree add`` runs);
 * no ``fetch``, ``push``, ``reset``, ``checkout`` of a branch in the source tree,
   or any history rewrite — the command surface is deliberately tiny;
-* a workspace is retry-safe: preparing an existing, matching workspace is a
-  no-op, and a mismatching pre-existing checkout is refused, never reused;
+* a workspace is retry-safe: preparing an existing, matching workspace is an
+  identity-preserving permission repair, and a mismatching pre-existing checkout
+  is refused, never reused;
 * two different workspaces get two different branches and paths;
 * failures are normalized to :class:`~factory.domain.errors.WorkspaceProvisioningError`
   and the raw git output — which can contain a remote URL with an embedded
@@ -31,6 +32,7 @@ Safety properties, all enforced below:
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -77,18 +79,76 @@ class GitWorktreeWorkspaceProvisioner(WorkspaceProvisioner):
         self._require_source_checkout(workspace.workspace_id)
 
         target = Path(workspace.path).expanduser()
+        if target.is_symlink():
+            raise WorkspaceProvisioningError(workspace.workspace_id)
         if target.exists():
             self._confirm_existing(target, workspace)
+            self._normalize_permissions(target, workspace.workspace_id)
             return workspace
 
-        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.parent.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.chmod(0o2770)
         self._create_worktree(target, workspace)
         # Confirm the result rather than trusting that ``worktree add`` succeeded
         # in the shape we asked for: the branch must be exactly the workspace's.
         self._confirm_existing(target, workspace)
+        self._normalize_permissions(target, workspace.workspace_id)
         return workspace
 
     # -- internals ---------------------------------------------------------
+
+    def _normalize_permissions(self, target: Path, workspace_id: str) -> None:
+        """Share the checkout with its group without following links or sharing secrets.
+
+        Ignored files can hold local credentials: restrict them to their owner.
+        Worktree Git metadata outside this directory is never traversed.
+        """
+        ignored_output = self._run_capture(
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+            cwd=target,
+            workspace_id=workspace_id,
+        )
+        if ignored_output is None:
+            raise WorkspaceProvisioningError(workspace_id)
+        ignored = set(ignored_output.split("\0"))
+
+        def fail_walk(error: OSError) -> None:
+            raise error
+
+        try:
+            for directory, _, files, directory_fd in os.fwalk(
+                target, follow_symlinks=False, onerror=fail_walk
+            ):
+                os.fchmod(directory_fd, 0o2770)
+                for name in files:
+                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if stat.S_ISLNK(info.st_mode):
+                        continue
+                    fd = os.open(
+                        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd
+                    )
+                    try:
+                        info = os.fstat(fd)
+                        # Refuse hardlinks and special files: chmod must never
+                        # affect a file outside the isolated checkout.
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                            raise WorkspaceProvisioningError(workspace_id)
+                        relative = (Path(directory) / name).relative_to(target).as_posix()
+                        executable = bool(info.st_mode & stat.S_IXUSR)
+                        mode = (
+                            (0o700 if executable else 0o600)
+                            if relative in ignored
+                            else (0o770 if executable else 0o660)
+                        )
+                        os.fchmod(fd, mode)
+                    finally:
+                        os.close(fd)
+        except OSError:
+            pass
+        else:
+            return
+        raise WorkspaceProvisioningError(workspace_id)
 
     def _require_source_checkout(self, workspace_id: str) -> None:
         """The injected source checkout must exist and be a Git repository.
@@ -213,7 +273,7 @@ class GitWorktreeWorkspaceProvisioner(WorkspaceProvisioner):
             raise WorkspaceProvisioningError(workspace_id) from None
         if completed.returncode != 0:
             return None
-        return completed.stdout.decode("utf-8", errors="replace")
+        return os.fsdecode(completed.stdout)
 
     @staticmethod
     def _env() -> dict[str, str]:

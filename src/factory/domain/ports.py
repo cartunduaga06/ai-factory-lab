@@ -215,10 +215,10 @@ class WorkspaceProvisioner(ABC):
     implementation detail that belongs outside the domain and orchestration.
 
     Implementations must be **retry-safe**: preparing a workspace that already
-    exists and already points at the expected branch is a no-op that returns the
-    same workspace. Preparing a *different* workspace must yield a different
-    branch and path. An existing checkout that does not match the requested
-    workspace must be rejected rather than silently reused.
+    exists and already points at the expected branch returns the same workspace
+    after restoring its access policy if needed. Preparing a *different* workspace
+    must yield a different branch and path. An existing checkout that does not
+    match the requested workspace must be rejected rather than silently reused.
     """
 
     @abstractmethod

@@ -21,9 +21,9 @@ The sequence is deliberate:
    and its returned run is persisted, together with the workspace, in one
    transaction.
 6. **Advance to RUNNING.** After the run is durable, ``CLAIMED -> RUNNING``
-   records that work has actually begun. A dispatch that fails before this point
-   leaves the task ``CLAIMED`` and creates no active run, so a retry is possible
-   once the blocker is removed.
+   records that work has actually begun. An adapter dispatch failure instead
+   records a terminal failed run and moves the task to ``BLOCKED``. Recovery
+   requires an explicit retry after the blocker is removed.
 
 There is no engine-specific branch anywhere in this module: only
 :attr:`AgentAdapter.kind` is read, and only to record which engine ran.
@@ -105,13 +105,17 @@ class DispatchService:
             WorkspaceProvisioningError: if the physical workspace could not be
                 prepared. The adapter is not called and no run is recorded.
             AgentDispatchError: if the adapter failed to start the run. The
-                failed attempt is persisted as a terminal ``FAILED`` run. The
-                adapter's own exception is discarded rather than chained, so no
-                engine message can leak through this error's cause or traceback.
+                failed attempt is persisted as a terminal ``FAILED`` run and the
+                task moves to ``BLOCKED``. The adapter's own exception is discarded
+                rather than chained, so no engine message can leak through this
+                error's cause or traceback.
         """
         task = self._require_task(task_id)
         if task.status is not TaskStatus.READY:
             raise TaskNotReadyError(task_id, task.status)
+
+        if self._runs.find_active_run(task_id) is not None:
+            raise DispatchConflictError(task_id)
 
         claimed = self._claim(task)
         workspace = self._prepare_workspace(claimed)
@@ -175,6 +179,9 @@ class DispatchService:
 
         if produced is None:
             failed = self._record_failure(task, workspace, adapter.kind, started_at)
+            self._lifecycle.transition(
+                task.task_id, TaskStatus.BLOCKED, expected_from=TaskStatus.CLAIMED
+            )
             raise AgentDispatchError(task.task_id, run_id=failed.run_id)
 
         run = AgentRun(

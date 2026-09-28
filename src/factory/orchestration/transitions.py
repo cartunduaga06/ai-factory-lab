@@ -12,6 +12,7 @@ status plus its history row. Neither responsibility leaks into the other.
 from __future__ import annotations
 
 from factory.domain.enums import TaskStatus
+from factory.domain.errors import TaskStateChangedError
 from factory.domain.models import FactoryTask, TaskTransition
 from factory.domain.ports import TaskRepository
 from factory.orchestration.machine import InvalidTransitionError, TaskStateMachine
@@ -28,23 +29,29 @@ class TaskLifecycleService:
         self._repository = repository
         self._state_machine = state_machine or TaskStateMachine()
 
-    def transition(self, task_id: str, target: TaskStatus) -> FactoryTask:
+    def transition(
+        self, task_id: str, target: TaskStatus, *, expected_from: TaskStatus | None = None
+    ) -> FactoryTask:
         """Move ``task_id`` to ``target``, validating and recording the change.
 
         Validation happens against the stored status *before* any write. An
         invalid transition raises
         :class:`~factory.orchestration.machine.InvalidTransitionError` and leaves
-        both the stored status and the history untouched.
+        both the stored status and the history untouched. ``expected_from`` can
+        additionally require a specific source state before validation.
 
         Raises:
             KeyError: if the task is unknown.
             InvalidTransitionError: if the transition is not permitted.
+            TaskStateChangedError: if the expected source no longer matches.
         """
         task = self._repository.get(task_id)
         if task is None:
             raise KeyError(task_id)
 
         current = task.status
+        if expected_from is not None and current is not expected_from:
+            raise TaskStateChangedError(task_id, expected_from, current)
         if not self._state_machine.can_apply(task, target):
             raise InvalidTransitionError(current, target)
 

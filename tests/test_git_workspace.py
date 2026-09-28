@@ -8,6 +8,7 @@ configuration.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import traceback
 from pathlib import Path
@@ -236,3 +237,82 @@ def test_git_failure_does_not_leak_stderr_or_secrets(tmp_path: Path) -> None:
         assert text not in formatted
     assert error.__cause__ is None
     assert error.__context__ is None
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_permissions_are_independent_of_umask(tmp_path: Path, reuse: bool) -> None:
+    source = _source_repo(tmp_path)
+    (source / "bin").mkdir()
+    script = source / "bin" / "check"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    (source / ".gitignore").write_text(".env\n", encoding="utf-8")
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "executable and ignore policy")
+    root = tmp_path / "workspaces"
+    root.mkdir(mode=0o2770)
+    root.chmod(0o2770)
+    task = _task()
+    workspace = new_workspace(task, str(root))
+    target = Path(workspace.path)
+    provisioner = _provisioner(source)
+    if reuse:
+        provisioner.prepare(task, workspace)
+        for path in [target, target / "bin"]:
+            path.chmod(0o2700)
+        (target / "README.md").chmod(0o600)
+        (target / "bin" / "check").chmod(0o700)
+        (target / ".env").write_text("PRIVATE=test-only\n", encoding="utf-8")
+        (target / ".env").chmod(0o600)
+        (target / "link").symlink_to(source / "README.md")
+        (target / "linked-directory").symlink_to(source, target_is_directory=True)
+    source_mode = (source / "README.md").stat().st_mode
+    old_umask = os.umask(0o077)
+    try:
+        provisioner.prepare(task, workspace)
+    finally:
+        os.umask(old_umask)
+    for path in [target, target / "bin"]:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o2770
+        assert path.stat().st_gid == root.stat().st_gid
+    assert stat.S_IMODE((target / "README.md").stat().st_mode) == 0o660
+    assert stat.S_IMODE((target / ".git").stat().st_mode) == 0o660
+    assert stat.S_IMODE((target / "bin" / "check").stat().st_mode) == 0o770
+    assert (source / "README.md").stat().st_mode == source_mode
+    if reuse:
+        assert stat.S_IMODE((target / ".env").stat().st_mode) == 0o600
+        assert (target / "link").is_symlink()
+        assert (target / "linked-directory").is_symlink()
+    for directory, _, files in os.walk(target):
+        assert Path(directory).stat().st_mode & 0o007 == 0
+        for name in files:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                assert path.stat().st_mode & 0o007 == 0
+
+
+def test_permission_repair_refuses_external_hardlinks(tmp_path: Path) -> None:
+    source = _source_repo(tmp_path)
+    task = _task()
+    workspace = new_workspace(task, str(tmp_path / "workspaces"))
+    provisioner = _provisioner(source)
+    provisioner.prepare(task, workspace)
+    external = tmp_path / "private"
+    external.write_text("test-only", encoding="utf-8")
+    external.chmod(0o600)
+    os.link(external, Path(workspace.path) / "external")
+    with pytest.raises(WorkspaceProvisioningError) as caught:
+        provisioner.prepare(task, workspace)
+    assert stat.S_IMODE(external.stat().st_mode) == 0o600
+    assert caught.value.__context__ is None
+
+
+def test_permission_repair_refuses_symlink_workspace(tmp_path: Path) -> None:
+    source = _source_repo(tmp_path)
+    task = _task()
+    workspace = new_workspace(task, str(tmp_path / "workspaces"))
+    target = Path(workspace.path)
+    target.parent.mkdir()
+    target.symlink_to(source, target_is_directory=True)
+    with pytest.raises(WorkspaceProvisioningError):
+        _provisioner(source).prepare(task, workspace)

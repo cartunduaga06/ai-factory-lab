@@ -139,3 +139,21 @@ it.
   architecture changed.
 - No secret, no product code from `finanza-ia`, and no host-infrastructure change
   is included.
+
+## Explicit retry after failed dispatch
+
+After resolving the underlying blocker, a human can run:
+
+```bash
+python -m factory retry --task-id <uuid>
+```
+
+This command requires only local database configuration. It accepts `BLOCKED`
+tasks without an active run and records `BLOCKED → READY`. It performs no intake,
+agent invocation, workspace reuse or historical run updates. A repeated request
+or any other status fails clearly. A subsequent manual runtime invocation can
+create a fresh attempt; retry itself starts no work.
+
+This change does not migrate previously stranded `CLAIMED` tasks. Their existing
+history remains intact and the retry command refuses them until they have been
+moved through a separately authorized lifecycle recovery to `BLOCKED`.

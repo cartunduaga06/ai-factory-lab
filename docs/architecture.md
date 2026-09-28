@@ -530,16 +530,25 @@ loser's guarded update matches zero rows and is refused. The loser surfaces a
 ### Idempotency
 
 The rule is: **a task that already has an active run has already been
-dispatched.** Because dispatch does not advance the task past `CLAIMED`, such a
-task fails the `READY` requirement on a retry and the original run is preserved.
-The rule is enforced twice:
+dispatched.** Dispatch requires `READY` and checks for an active run before
+claiming or creating a workspace. The original run is preserved.
+The guards are:
 
-1. `DispatchService` requires `READY` before claiming.
+1. `DispatchService` requires `READY` and no active run before claiming.
 2. `agent_runs` carries a partial unique index, `uq_agent_runs_active_task`,
    allowing at most one non-terminal (`PENDING`, `RUNNING`) run per task.
 
-Terminal runs fall outside the partial index, so a retry after a finished run
-remains possible.
+Terminal runs fall outside the partial index. If `adapter.dispatch` raises,
+dispatch persists the workspace and a terminal `FAILED` run, then records
+`CLAIMED → BLOCKED` through `TaskLifecycleService` before raising a sanitized
+`AgentDispatchError`.
+
+`python -m factory retry --task-id <uuid>` explicitly records `BLOCKED → READY`
+for that task only, provided it has no active run. Other states and repeated
+requests are refused clearly. The compare-and-swap guards concurrent retries.
+Retry performs no intake or dispatch and never alters historical runs or
+workspaces. The next dispatch creates a new workspace, branch and run identity;
+there is no automatic retry loop.
 
 ### Adapter boundary
 
@@ -670,14 +679,23 @@ run that never had one.
   and the factory branch is never checked out there;
 - no `fetch`, `push`, `reset`, checkout of a branch in the source tree, or any
   history rewrite; the command surface is deliberately tiny;
-- preparation is **retry-safe**: an existing, matching workspace is a no-op; a
-  pre-existing directory or a worktree on the wrong branch is **refused**, never
+- preparation is **retry-safe**: an existing, matching workspace keeps its identity
+  and has its permissions repaired; a pre-existing directory or a worktree on the wrong branch is **refused**, never
   silently reused;
 - failures are normalized to a sanitized `WorkspaceProvisioningError`; git's
   stderr — which can echo a remote URL with an embedded token — is discarded
   rather than chained into the error;
 - the source checkout location is **injected** (`FACTORY_SOURCE_CHECKOUT`), never
   a hard-coded machine path.
+
+Workspace permissions are independent of the parent process umask: directories
+are `2770` (setgid, owner/group rwx, no others), regular checkout files are `0660`,
+and owner-executable files are `0770`. The configured workspace root must already
+allow shared-group traversal and carry the shared group; a newly created root is
+set to `2770`. No group ownership or infrastructure is changed. Symlinks are not
+followed, hardlinks/special files are refused, and external Git metadata is never
+traversed. Ignored files retain owner-only access (`0600`/`0700`) because they can
+contain local secrets. No process-global umask change is needed.
 
 ### Quality gate semantics
 

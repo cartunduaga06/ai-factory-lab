@@ -19,12 +19,15 @@ from factory.domain.enums import AgentKind, RunStatus, TaskStatus
 from factory.domain.errors import (
     AgentDispatchError,
     DispatchConflictError,
+    RetryNotAllowedError,
     TaskNotReadyError,
+    TaskStateChangedError,
     WorkspaceProvisioningError,
 )
 from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, TaskSource
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
 from factory.orchestration import DispatchService
+from factory.orchestration.retry import RetryService
 from tests.fake_adapter import FakeAgentAdapter
 from tests.fake_workspace import FakeWorkspaceProvisioner
 
@@ -255,15 +258,15 @@ def test_adapter_failure_is_typed_and_leaves_no_active_run(db_path: str, tmp_pat
     with pytest.raises(AgentDispatchError) as caught:
         _service(db_path, tmp_path).dispatch(task.task_id, FakeAgentAdapter(fail_with=boom))
 
-    # The failed attempt is durable and terminal; the claim is not rolled back
-    # and the task never reached RUNNING.
+    # The failed attempt is durable and terminal; recovery is recorded through
+    # BLOCKED without rolling back the claim or reaching RUNNING.
     runs = _runs(db_path)
     recorded = runs.list_runs(task.task_id)
     assert len(recorded) == 1
     assert recorded[0].status is RunStatus.FAILED
     assert recorded[0].finished_at is not None
     assert runs.find_active_run(task.task_id) is None
-    assert tasks.get(task.task_id).status is TaskStatus.CLAIMED
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED
 
     error = caught.value
     assert "ghp_secret" not in str(error)
@@ -377,3 +380,123 @@ def test_two_runs_for_one_task_get_different_workspaces(db_path: str, tmp_path: 
     stored_runs = {r.run_id: r for r in _runs(db_path).list_runs(task.task_id)}
     assert stored_runs[first.run_id].workspace == first.workspace
     assert stored_runs[second.run_id].workspace == second.workspace
+
+
+def test_explicit_retry_preserves_failed_attempt_and_creates_new_workspace(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = _ready_task(tasks)
+    service = _service(db_path, tmp_path)
+    with pytest.raises(AgentDispatchError) as caught:
+        service.dispatch(task.task_id, FakeAgentAdapter(fail_with=RuntimeError("boom")))
+    failed = runs.get_run(caught.value.run_id)
+    assert failed is not None and failed.workspace is not None
+    assert failed.status is RunStatus.FAILED
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED
+    assert [edge.to_status for edge in tasks.history(task.task_id)] == [
+        TaskStatus.READY,
+        TaskStatus.CLAIMED,
+        TaskStatus.BLOCKED,
+    ]
+    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+    assert runs.list_runs(task.task_id) == [failed]
+    assert runs.find_active_run(task.task_id) is None
+    with pytest.raises(RetryNotAllowedError, match="not BLOCKED"):
+        RetryService(tasks, runs).retry(task.task_id)
+    next_run = service.dispatch(task.task_id, FakeAgentAdapter())
+    assert next_run.workspace is not None
+    assert next_run.run_id != failed.run_id
+    assert next_run.workspace.workspace_id != failed.workspace.workspace_id
+    assert next_run.workspace.path != failed.workspace.path
+    assert next_run.workspace.branch != failed.workspace.branch
+    assert Path(failed.workspace.path).is_dir()
+    assert runs.get_run(failed.run_id) == failed
+    assert runs.get_workspace(failed.workspace.workspace_id) == failed.workspace
+    assert len(runs.list_runs(task.task_id)) == 2
+    assert runs.find_active_run(task.task_id) == next_run
+    with pytest.raises(TaskNotReadyError):
+        service.dispatch(task.task_id, FakeAgentAdapter())
+    assert len(runs.list_runs(task.task_id)) == 2
+
+
+@pytest.mark.parametrize("status", list(TaskStatus))
+def test_retry_only_accepts_blocked_tasks(db_path: str, status: TaskStatus) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = tasks.save(FactoryTask(title="retry", target_repository="example/target", status=status))
+    if status is TaskStatus.BLOCKED:
+        assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+    else:
+        with pytest.raises(RetryNotAllowedError, match="not BLOCKED"):
+            RetryService(tasks, runs).retry(task.task_id)
+        assert tasks.get(task.task_id).status is status
+        assert tasks.history(task.task_id) == []
+    assert runs.list_runs(task.task_id) == []
+
+
+def test_retry_refuses_active_run(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = tasks.save(
+        FactoryTask(title="blocked", target_repository="example/target", status=TaskStatus.BLOCKED)
+    )
+    active = runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER))
+    with pytest.raises(RetryNotAllowedError, match="active run"):
+        RetryService(tasks, runs).retry(task.task_id)
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED
+    assert runs.get_run(active.run_id) == active
+    assert tasks.history(task.task_id) == []
+
+
+def test_dispatch_refuses_active_run_before_creating_workspace(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = _ready_task(tasks)
+    active = runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER))
+    provisioner = FakeWorkspaceProvisioner()
+    with pytest.raises(DispatchConflictError):
+        _service(db_path, tmp_path, provisioner=provisioner).dispatch(
+            task.task_id, FakeAgentAdapter()
+        )
+    assert provisioner.prepared == []
+    assert tasks.get(task.task_id).status is TaskStatus.READY
+    assert runs.list_runs(task.task_id) == [active]
+
+
+def test_concurrent_retry_records_one_transition(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(
+        FactoryTask(title="blocked", target_repository="example/target", status=TaskStatus.BLOCKED)
+    )
+    _runs(db_path)
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = []
+
+    def contend() -> None:
+        service = RetryService(_tasks(db_path), _runs(db_path))
+        barrier.wait()
+        try:
+            outcomes.append(service.retry(task.task_id))
+        except Exception as exc:  # noqa: BLE001 - classify concurrent refusal below
+            outcomes.append(exc)
+
+    threads = [threading.Thread(target=contend) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(isinstance(outcome, FactoryTask) for outcome in outcomes) == 1
+    assert (
+        sum(
+            isinstance(outcome, (RetryNotAllowedError, TaskStateChangedError))
+            for outcome in outcomes
+        )
+        == 1
+    )
+    assert len(tasks.history(task.task_id)) == 1
+    assert tasks.get(task.task_id).status is TaskStatus.READY
+    assert _runs(db_path).list_runs(task.task_id) == []
