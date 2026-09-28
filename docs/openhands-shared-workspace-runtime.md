@@ -109,7 +109,11 @@ recreation, not a restart.** Nothing here is applied by the Factory itself.
    the running helper can be traced back to the reviewed source.
 
 2. **Expose the run's Git metadata read-only.** The ignored-path classification
-   uses `git ls-files`, and a worktree records its Git metadata outside the
+   uses `git ls-files`. Because the Factory-created worktree is owned by host UID
+   1000 while the hook runs as OpenHands UID 10001, each classification command
+   trusts only its already-validated absolute workspace path via
+   `git -c safe.directory=<working-dir> ...`; never configure a global
+   `safe.directory=*`. A worktree records its Git metadata outside the
    workspace (`.git` is a pointer file). The container mounts currently expose
    only `/projects` and state, so the metadata directory (for example
    `/srv/ai-factory/control-plane/.git/worktrees/...` and the shared object

@@ -229,7 +229,7 @@ def _normalize_tree(
 def _git_ls_files(root: Path, args: tuple[str, ...], *, timeout: float) -> str:
     try:
         completed = subprocess.run(  # noqa: S603 - argv form, shell is never used
-            ["git", "ls-files", *args],
+            ["git", "-c", f"safe.directory={root}", "ls-files", *args],
             cwd=str(root),
             env=_env(),
             stdin=subprocess.DEVNULL,
