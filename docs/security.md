@@ -138,7 +138,8 @@ in code:
   with exact-state guards. It does not contact providers or rewrite history.
 - **Checkout access is limited to owner and shared group.** Preparation and reuse
   enforce `2770` directories and `0660`/`0770` checkout files independent of
-  umask. Ignored files are owner-only; symlinks are not followed and hardlinks
+  umask. Compliant nodes skip chmod, including foreign-owned nodes; ignored
+  files and directories are owner-only (`0600`/`0700`); symlinks are not followed and hardlinks
   and special files are refused. The source checkout and external Git metadata
   are never chmodded. The same policy is applied after agent success, before
   fingerprints or gates, through an existing-checkout-only repair operation.

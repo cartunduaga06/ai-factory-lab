@@ -693,6 +693,12 @@ run that never had one.
 - the source checkout location is **injected** (`FACTORY_SOURCE_CHECKOUT`), never
   a hard-coded machine path.
 
+Permission normalization skips chmod when the current mode already matches;
+compliant foreign-owned files therefore require no ownership privileges.
+Ignored directories are owner-only (`0700`). See the read-only
+[OpenHands audit](openhands-shared-workspace-audit.md) for why umask alone cannot
+fix the editor's new-file `0600` atomic writes.
+
 Workspace permissions are independent of the parent process umask: directories
 are `2770` (setgid, owner/group rwx, no others), regular checkout files are `0660`,
 and owner-executable files are `0770`. The configured workspace root must already
