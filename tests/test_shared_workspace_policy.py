@@ -115,6 +115,28 @@ def test_documented_mode_values_are_the_cross_uid_policy() -> None:
     assert PRIVATE_DIRECTORY_MODE == 0o700
 
 
+def test_git_classifier_trusts_only_the_exact_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    seen: list[list[str]] = []
+
+    def recording_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        del kwargs
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(
+        "factory.integrations.workspace.shared_policy.subprocess.run",
+        recording_run,
+    )
+    classify_ignored_paths(root)
+    assert len(seen) == 2
+    for argv in seen:
+        assert argv[:4] == ["git", "-c", f"safe.directory={root}", "ls-files"]
+        assert "safe.directory=*" not in argv
+
+
 def test_two_phase_api_classifies_then_normalizes(tmp_path: Path) -> None:
     # The provisioner and the hook use the same two phases; this proves the
     # classification and the normalization agree without re-reading git.
