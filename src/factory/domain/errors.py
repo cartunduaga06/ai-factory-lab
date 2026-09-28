@@ -312,6 +312,10 @@ class DuplicatePullRequestError(FactoryError):
         self.head_branch = head_branch
 
 
+class RetryNotAllowedError(FactoryError):
+    """Explicit retry requires a recoverable task without an active run."""
+
+
 __all__ = [
     "AgentCollectError",
     "AgentDispatchError",
@@ -323,6 +327,7 @@ __all__ = [
     "FactoryError",
     "PersistenceError",
     "PublicationError",
+    "RetryNotAllowedError",
     "RevisionNotPublishableError",
     "TaskNotPublishableError",
     "TaskNotReadyError",

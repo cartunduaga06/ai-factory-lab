@@ -19,12 +19,15 @@ from factory.domain.enums import AgentKind, RunStatus, TaskStatus
 from factory.domain.errors import (
     AgentDispatchError,
     DispatchConflictError,
+    RetryNotAllowedError,
     TaskNotReadyError,
+    TaskStateChangedError,
     WorkspaceProvisioningError,
 )
-from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, TaskSource
+from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, TaskSource, new_workspace
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
 from factory.orchestration import DispatchService
+from factory.orchestration.retry import RetryService
 from tests.fake_adapter import FakeAgentAdapter
 from tests.fake_workspace import FakeWorkspaceProvisioner
 
@@ -255,15 +258,15 @@ def test_adapter_failure_is_typed_and_leaves_no_active_run(db_path: str, tmp_pat
     with pytest.raises(AgentDispatchError) as caught:
         _service(db_path, tmp_path).dispatch(task.task_id, FakeAgentAdapter(fail_with=boom))
 
-    # The failed attempt is durable and terminal; the claim is not rolled back
-    # and the task never reached RUNNING.
+    # The failed attempt is durable and terminal; recovery is recorded through
+    # BLOCKED without rolling back the claim or reaching RUNNING.
     runs = _runs(db_path)
     recorded = runs.list_runs(task.task_id)
     assert len(recorded) == 1
     assert recorded[0].status is RunStatus.FAILED
     assert recorded[0].finished_at is not None
     assert runs.find_active_run(task.task_id) is None
-    assert tasks.get(task.task_id).status is TaskStatus.CLAIMED
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED
 
     error = caught.value
     assert "ghp_secret" not in str(error)
@@ -377,3 +380,257 @@ def test_two_runs_for_one_task_get_different_workspaces(db_path: str, tmp_path: 
     stored_runs = {r.run_id: r for r in _runs(db_path).list_runs(task.task_id)}
     assert stored_runs[first.run_id].workspace == first.workspace
     assert stored_runs[second.run_id].workspace == second.workspace
+
+
+def test_explicit_retry_preserves_failed_attempt_and_creates_new_workspace(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = _ready_task(tasks)
+    service = _service(db_path, tmp_path)
+    with pytest.raises(AgentDispatchError) as caught:
+        service.dispatch(task.task_id, FakeAgentAdapter(fail_with=RuntimeError("boom")))
+    failed = runs.get_run(caught.value.run_id)
+    assert failed is not None and failed.workspace is not None
+    assert failed.status is RunStatus.FAILED
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED
+    assert [edge.to_status for edge in tasks.history(task.task_id)] == [
+        TaskStatus.READY,
+        TaskStatus.CLAIMED,
+        TaskStatus.BLOCKED,
+    ]
+    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+    assert runs.list_runs(task.task_id) == [failed]
+    assert runs.find_active_run(task.task_id) is None
+    with pytest.raises(RetryNotAllowedError, match="not BLOCKED"):
+        RetryService(tasks, runs).retry(task.task_id)
+    next_run = service.dispatch(task.task_id, FakeAgentAdapter())
+    assert next_run.workspace is not None
+    assert next_run.run_id != failed.run_id
+    assert next_run.workspace.workspace_id != failed.workspace.workspace_id
+    assert next_run.workspace.path != failed.workspace.path
+    assert next_run.workspace.branch != failed.workspace.branch
+    assert Path(failed.workspace.path).is_dir()
+    assert runs.get_run(failed.run_id) == failed
+    assert runs.get_workspace(failed.workspace.workspace_id) == failed.workspace
+    assert len(runs.list_runs(task.task_id)) == 2
+    assert runs.find_active_run(task.task_id) == next_run
+    with pytest.raises(TaskNotReadyError):
+        service.dispatch(task.task_id, FakeAgentAdapter())
+    assert len(runs.list_runs(task.task_id)) == 2
+
+
+@pytest.mark.parametrize("status", list(TaskStatus))
+def test_retry_rejects_other_states_and_claims_without_history(
+    db_path: str, status: TaskStatus
+) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = tasks.save(FactoryTask(title="retry", target_repository="example/target", status=status))
+    if status is TaskStatus.BLOCKED:
+        assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+    else:
+        message = "latest run FAILED" if status is TaskStatus.CLAIMED else "not BLOCKED"
+        with pytest.raises(RetryNotAllowedError, match=message):
+            RetryService(tasks, runs).retry(task.task_id)
+        assert tasks.get(task.task_id).status is status
+        assert tasks.history(task.task_id) == []
+    assert runs.list_runs(task.task_id) == []
+
+
+def test_retry_refuses_active_run(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = tasks.save(
+        FactoryTask(title="blocked", target_repository="example/target", status=TaskStatus.BLOCKED)
+    )
+    active = runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER))
+    with pytest.raises(RetryNotAllowedError, match="active run"):
+        RetryService(tasks, runs).retry(task.task_id)
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED
+    assert runs.get_run(active.run_id) == active
+    assert tasks.history(task.task_id) == []
+
+
+def test_dispatch_refuses_active_run_before_creating_workspace(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = _ready_task(tasks)
+    active = runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER))
+    provisioner = FakeWorkspaceProvisioner()
+    with pytest.raises(DispatchConflictError):
+        _service(db_path, tmp_path, provisioner=provisioner).dispatch(
+            task.task_id, FakeAgentAdapter()
+        )
+    assert provisioner.prepared == []
+    assert tasks.get(task.task_id).status is TaskStatus.READY
+    assert runs.list_runs(task.task_id) == [active]
+
+
+@pytest.mark.parametrize("legacy_claim", [False, True])
+def test_concurrent_retry_records_one_recovery(db_path: str, legacy_claim: bool) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(
+        FactoryTask(
+            title="blocked",
+            target_repository="example/target",
+            status=TaskStatus.CLAIMED if legacy_claim else TaskStatus.BLOCKED,
+        )
+    )
+    runs = _runs(db_path)
+    if legacy_claim:
+        runs.save_run(
+            AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, status=RunStatus.FAILED)
+        )
+    before = runs.list_runs(task.task_id)
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = []
+
+    def contend() -> None:
+        service = RetryService(_tasks(db_path), _runs(db_path))
+        barrier.wait()
+        try:
+            outcomes.append(service.retry(task.task_id))
+        except Exception as exc:  # noqa: BLE001 - classify concurrent refusal below
+            outcomes.append(exc)
+
+    threads = [threading.Thread(target=contend) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(isinstance(outcome, FactoryTask) for outcome in outcomes) == 1
+    assert (
+        sum(
+            isinstance(outcome, (RetryNotAllowedError, TaskStateChangedError))
+            for outcome in outcomes
+        )
+        == 1
+    )
+    expected = [(TaskStatus.BLOCKED, TaskStatus.READY)]
+    if legacy_claim:
+        expected.insert(0, (TaskStatus.CLAIMED, TaskStatus.BLOCKED))
+    assert [(edge.from_status, edge.to_status) for edge in tasks.history(task.task_id)] == expected
+    assert tasks.get(task.task_id).status is TaskStatus.READY
+    assert runs.list_runs(task.task_id) == before
+
+
+def test_legacy_claim_retry_preserves_attempt_and_next_dispatch_is_isolated(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = _ready_task(tasks)
+    service = _service(db_path, tmp_path)
+    claimed = service.lifecycle.transition(task.task_id, TaskStatus.CLAIMED)
+    workspace = new_workspace(claimed, str(tmp_path / "workspaces"))
+    FakeWorkspaceProvisioner().prepare(claimed, workspace)
+    marker = Path(workspace.path) / "previous-attempt.txt"
+    marker.write_text("failed attempt content", encoding="utf-8")
+    failed = runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.FAILED,
+            workspace=workspace,
+        )
+    )
+    original_history = list(tasks.history(task.task_id))
+
+    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+    history = list(tasks.history(task.task_id))
+    assert history[: len(original_history)] == original_history
+    assert [(edge.from_status, edge.to_status) for edge in history[len(original_history) :]] == [
+        (TaskStatus.CLAIMED, TaskStatus.BLOCKED),
+        (TaskStatus.BLOCKED, TaskStatus.READY),
+    ]
+    assert runs.list_runs(task.task_id) == [failed]
+    assert runs.find_active_run(task.task_id) is None
+    assert runs.get_workspace(workspace.workspace_id) == workspace
+    assert marker.read_text(encoding="utf-8") == "failed attempt content"
+
+    next_run = service.dispatch(task.task_id, FakeAgentAdapter())
+    assert next_run.workspace is not None
+    assert next_run.run_id != failed.run_id
+    assert next_run.workspace.workspace_id != workspace.workspace_id
+    assert next_run.workspace.branch != workspace.branch
+    assert next_run.workspace.path != workspace.path
+    assert runs.get_run(failed.run_id) == failed
+    assert runs.get_workspace(workspace.workspace_id) == workspace
+    assert marker.read_text(encoding="utf-8") == "failed attempt content"
+    assert runs.find_active_run(task.task_id) == next_run
+    with pytest.raises(TaskNotReadyError):
+        service.dispatch(task.task_id, FakeAgentAdapter())
+    assert len(runs.list_runs(task.task_id)) == 2
+
+
+@pytest.mark.parametrize(
+    "latest_status",
+    [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.SUCCEEDED, RunStatus.CANCELLED],
+)
+def test_legacy_claim_refuses_latest_non_failed_run(db_path: str, latest_status: RunStatus) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = tasks.save(
+        FactoryTask(title="legacy", target_repository="example/target", status=TaskStatus.CLAIMED)
+    )
+    runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, status=RunStatus.FAILED))
+    runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, status=latest_status))
+    before = runs.list_runs(task.task_id)
+    message = (
+        "active run"
+        if latest_status in {RunStatus.PENDING, RunStatus.RUNNING}
+        else ("latest run FAILED")
+    )
+    with pytest.raises(RetryNotAllowedError, match=message):
+        RetryService(tasks, runs).retry(task.task_id)
+    assert tasks.get(task.task_id).status is TaskStatus.CLAIMED
+    assert tasks.history(task.task_id) == []
+    assert runs.list_runs(task.task_id) == before
+
+
+def test_legacy_claim_refuses_active_run_even_when_latest_is_failed(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = tasks.save(
+        FactoryTask(title="legacy", target_repository="example/target", status=TaskStatus.CLAIMED)
+    )
+    active = runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER))
+    runs.save_run(AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, status=RunStatus.FAILED))
+    before = runs.list_runs(task.task_id)
+    with pytest.raises(RetryNotAllowedError, match="active run"):
+        RetryService(tasks, runs).retry(task.task_id)
+    assert tasks.get(task.task_id).status is TaskStatus.CLAIMED
+    assert tasks.history(task.task_id) == []
+    assert runs.list_runs(task.task_id) == before
+    assert runs.find_active_run(task.task_id) == active
+
+
+def test_legacy_claim_rechecks_exact_status_before_transition(db_path: str) -> None:
+    class ChangedClaimRepository(SqliteTaskRepository):
+        """Reproduce a concurrent cancellation after retry reads the original claim."""
+
+        def get(self, task_id: str) -> FactoryTask | None:
+            task = super().get(task_id)
+            if task is not None and task.status is TaskStatus.CLAIMED:
+                self.apply_transition(task_id, TaskStatus.CLAIMED, TaskStatus.CANCELLED)
+            return task
+
+    tasks = _tasks(db_path)
+    runs = _runs(db_path)
+    task = tasks.save(
+        FactoryTask(title="legacy", target_repository="example/target", status=TaskStatus.CLAIMED)
+    )
+    failed = runs.save_run(
+        AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, status=RunStatus.FAILED)
+    )
+    with pytest.raises(TaskStateChangedError):
+        RetryService(ChangedClaimRepository(db_path), runs).retry(task.task_id)
+    assert tasks.get(task.task_id).status is TaskStatus.CANCELLED
+    assert [(edge.from_status, edge.to_status) for edge in tasks.history(task.task_id)] == [
+        (TaskStatus.CLAIMED, TaskStatus.CANCELLED)
+    ]
+    assert runs.list_runs(task.task_id) == [failed]

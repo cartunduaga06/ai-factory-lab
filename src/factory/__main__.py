@@ -1,9 +1,10 @@
 """Command-line entry point for AI Factory Lab.
 
-Two commands exist:
+Available commands:
 
 * ``--show-config`` / ``--version`` — Phase 1 configuration sanity check.
 * ``intake`` — one read-only issue intake pass.
+* ``retry --task-id`` — explicitly recover one task without dispatch.
 * ``run`` — one bounded, resumable task through the existing Phases 2A–5.
 
 There is deliberately no daemon, scheduler or polling loop: intake runs once,
@@ -15,9 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Sequence
+from uuid import UUID
 
 from factory import __version__
 from factory.domain.enums import RepositoryRole
+from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
 from factory.domain.models import Repository
 from factory.infrastructure.config import FactoryConfig, UnsupportedDatabaseError
 from factory.infrastructure.logging import configure_logging
@@ -45,6 +48,7 @@ from factory.integrations.workspace import (
     GitWorktreeWorkspaceProvisioner,
 )
 from factory.orchestration.intake import IssueIntakeService
+from factory.orchestration.retry import RetryService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 
 EXIT_OK = 0
@@ -73,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="Run at most one factory-ready task through WAITING_HUMAN.",
     )
+    retry = subparsers.add_parser(
+        "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
+    )
+    retry.add_argument("--task-id", required=True, type=UUID, help="UUID of the task to recover.")
     return parser
 
 
@@ -87,6 +95,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "intake":
         return _run_intake(FactoryConfig.from_env())
+    if args.command == "retry":
+        return _run_retry(FactoryConfig.from_env(), str(args.task_id))
     if args.command == "run":
         return _run_runtime(FactoryConfig.from_env())
 
@@ -137,6 +147,32 @@ def _run_intake(config: FactoryConfig) -> int:
     print(f"Existing: {summary.existing}")
     print(f"Errors: {summary.errors}")
     return EXIT_OK if summary.errors == 0 else EXIT_INTAKE_ERROR
+
+
+def _run_retry(config: FactoryConfig, task_id: str) -> int:
+    """Recover only the requested task using local repositories; never run intake."""
+    try:
+        database = config.database
+        tasks = SqliteTaskRepository(database.path)
+        runs = SqliteRunRepository(database.path)
+        tasks.initialize()
+        runs.initialize()
+        task = RetryService(tasks, runs).retry(task_id)
+    except UnsupportedDatabaseError as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except KeyError:
+        print(f"retry refused: task {task_id} not found")
+        return EXIT_INTAKE_ERROR
+    except (RetryNotAllowedError, TaskStateChangedError) as exc:
+        print(f"retry refused: {exc}")
+        return EXIT_INTAKE_ERROR
+    except Exception as exc:  # noqa: BLE001 - never print storage errors or paths
+        print(f"retry failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    print(f"Task: {task.task_id}")
+    print(f"Task status: {task.status.value}")
+    return EXIT_OK
 
 
 def _run_runtime(config: FactoryConfig) -> int:
