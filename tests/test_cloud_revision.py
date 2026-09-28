@@ -20,6 +20,7 @@ import pytest
 
 from factory.domain.enums import AgentBackend
 from factory.domain.models import FactoryTask, RemoteRevision, TaskSource, Workspace, new_workspace
+from factory.integrations.workspace.cloud_provisioner import CloudWorkspaceProvisioner
 from factory.integrations.workspace.cloud_revision import (
     CloudRevisionError,
     GitCloudRevisionProvider,
@@ -261,3 +262,79 @@ def test_backend_enum_has_local_and_cloud() -> None:
     assert AgentBackend.CLOUD.value == "cloud"
     assert AgentBackend("local") is AgentBackend.LOCAL
     assert AgentBackend("cloud") is AgentBackend.CLOUD
+
+
+def test_cloud_provisioner_does_not_mutate_source_origin(tmp_path: Path) -> None:
+    remote = _bare_remote(tmp_path)
+    _seed_remote(tmp_path, remote)
+    source = _source_checkout(tmp_path, remote)
+    original = _git(source, "remote", "get-url", "origin")
+    task = _task()
+    workspace = new_workspace(task, str(tmp_path / "workspaces"))
+
+    CloudWorkspaceProvisioner(str(source), base_ref="main").prepare(task, workspace)
+
+    assert _git(source, "remote", "get-url", "origin") == original
+    assert _git(Path(workspace.path), "remote", "get-url", "origin") == original
+
+
+def test_materialize_refuses_a_network_remote_for_another_repository(tmp_path: Path) -> None:
+    remote = _bare_remote(tmp_path)
+    _seed_remote(tmp_path, remote)
+    source = _source_checkout(tmp_path, remote)
+    _git(source, "remote", "set-url", "origin", "https://github.com/someone/else.git")
+    workspace = new_workspace(_task(), str(tmp_path / "workspaces"))
+    provider = GitCloudRevisionProvider(str(source))
+
+    with pytest.raises(CloudRevisionError):
+        provider.materialize(
+            workspace,
+            RemoteRevision("a" * 40, workspace.branch, workspace.repository_slug),
+        )
+
+
+def test_authenticated_fetch_uses_askpass_without_token_in_argv(tmp_path: Path) -> None:
+    token = "private-read-token-must-not-leak"
+    revision = RemoteRevision(
+        "a" * 40,
+        "factory/task/ws",
+        "cartunduaga06/ai-factory-lab",
+    )
+
+    class RecordingProvider(GitCloudRevisionProvider):
+        def __init__(self) -> None:
+            super().__init__(str(tmp_path), read_token=token)
+            self.fetch_argv: list[str] = []
+            self.fetch_env: dict[str, str] = {}
+            self.askpass_contents = ""
+
+        def _run(
+            self,
+            args: list[str],
+            *,
+            cwd: Path,
+            workspace_id: str,
+            allow_failure: bool = False,
+            env: dict[str, str] | None = None,
+        ) -> int:
+            del cwd, workspace_id, allow_failure
+            self.fetch_argv = list(args)
+            self.fetch_env = dict(env or {})
+            askpass = self.fetch_env.get("GIT_ASKPASS")
+            if askpass:
+                self.askpass_contents = Path(askpass).read_text()
+            return 0
+
+        def _capture(self, args: list[str], *, cwd: Path, workspace_id: str) -> str | None:
+            del args, cwd, workspace_id
+            return revision.commit_sha
+
+    provider = RecordingProvider()
+    provider._fetch("ws", revision)
+
+    assert token not in " ".join(provider.fetch_argv)
+    assert token not in provider.askpass_contents
+    assert provider.fetch_env["AI_FACTORY_GIT_TOKEN"] == token
+    askpass = provider.fetch_env["GIT_ASKPASS"]
+    assert askpass
+    assert not Path(askpass).exists()

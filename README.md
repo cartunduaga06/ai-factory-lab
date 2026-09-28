@@ -231,14 +231,20 @@ normalizer command; see
 ### 1c-bis. OpenHands Cloud backend (optional)
 
 Execution can also target **OpenHands Cloud** instead of the self-hosted Agent
-Server by setting `OPENHANDS_BACKEND=cloud` plus `OPENHANDS_CLOUD_API_KEY` and
-`OPENHANDS_CLOUD_REPOSITORY`. Cloud is never the default; it is never selected
-implicitly, and there is no local↔cloud fallback. A Cloud run cannot bypass the
-revision-binding, quality-gate and publication path: the factory reads the head
-commit from the sandbox, re-fetches that exact revision into a fresh local
-worktree, runs the gates locally and still stops at `WAITING_HUMAN`. If the exact
-revision cannot be retrieved, the run fails closed and no PR is opened. See
-[the Cloud backend runbook](docs/openhands-cloud-backend.md).
+Server by setting `OPENHANDS_BACKEND=cloud`, a Cloud API key, the exact target
+repository, and an explicit **Agent Profile UUID**. The Cloud repository must
+match `FACTORY_TARGET_REPO`; direct `OPENHANDS_CLOUD_MODEL` selection is
+rejected because this Agent Server path cannot guarantee it. Cloud is never the
+default; it is never selected implicitly, and there is no local↔cloud fallback.
+
+The sandbox receives only a sandbox-scoped `LookupSecret` for GitHub auth and
+bootstraps the repository/isolated branch with credential-safe `GIT_ASKPASS`.
+A Cloud run cannot bypass the revision-binding, quality-gate and publication
+path: the factory reads the head commit from the sandbox, securely re-fetches
+that exact revision (including private repositories) into its local validation
+workspace, runs the gates locally and still stops at `WAITING_HUMAN`. If the
+exact revision cannot be retrieved, the run fails closed and no PR is opened.
+See [the Cloud backend runbook](docs/openhands-cloud-backend.md).
 
 No secrets are required for this phase's tests or smoke run: they use disposable
 local repositories.

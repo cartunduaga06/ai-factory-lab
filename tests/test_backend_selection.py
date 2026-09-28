@@ -26,6 +26,7 @@ from factory.integrations.workspace import (
 )
 
 CLOUD_KEY = "cloud-key-must-not-leak"
+PROFILE_ID = "d6934b00-ab23-4aed-bf84-14463e77f6e8"
 REPOSITORY = "cartunduaga06/ai-factory-lab"
 
 
@@ -59,7 +60,9 @@ def test_cloud_config_is_disabled_without_a_credential_or_repository() -> None:
     only_repo = OpenHandsCloudConfig(repository=REPOSITORY)
     assert only_repo.enabled is False
     both = OpenHandsCloudConfig(api_key=CLOUD_KEY, repository=REPOSITORY)
-    assert both.enabled is True
+    assert both.enabled is False
+    complete = OpenHandsCloudConfig(api_key=CLOUD_KEY, repository=REPOSITORY, profile=PROFILE_ID)
+    assert complete.enabled is True
 
 
 def test_cloud_defaults_are_safe_and_do_not_break_local_mode() -> None:
@@ -78,7 +81,7 @@ def test_cloud_configuration_loads_from_the_environment() -> None:
             "OPENHANDS_CLOUD_API_KEY": CLOUD_KEY,
             "OPENHANDS_CLOUD_REPOSITORY": REPOSITORY,
             "OPENHANDS_CLOUD_WORKING_DIR": "/srv/project",
-            "OPENHANDS_CLOUD_PROFILE": "profile-9",
+            "OPENHANDS_CLOUD_PROFILE": PROFILE_ID,
             "OPENHANDS_CLOUD_MODEL": "some-model",
         }
     )
@@ -86,7 +89,7 @@ def test_cloud_configuration_loads_from_the_environment() -> None:
     assert config.openhands_cloud.api_key == CLOUD_KEY
     assert config.openhands_cloud.repository == REPOSITORY
     assert config.openhands_cloud.working_dir == "/srv/project"
-    assert config.openhands_cloud.profile == "profile-9"
+    assert config.openhands_cloud.profile == PROFILE_ID
     assert config.openhands_cloud.model == "some-model"
 
 
@@ -102,6 +105,8 @@ def test_redacted_masks_the_cloud_credential_and_backend() -> None:
             "OPENHANDS_BACKEND": "cloud",
             "OPENHANDS_CLOUD_API_KEY": CLOUD_KEY,
             "OPENHANDS_CLOUD_REPOSITORY": REPOSITORY,
+            "OPENHANDS_CLOUD_PROFILE": PROFILE_ID,
+            "FACTORY_TARGET_REPO": REPOSITORY,
         }
     )
     redacted = config.redacted()
@@ -125,6 +130,7 @@ def _config(**overrides: object) -> FactoryConfig:
     base: dict[str, object] = {
         "FACTORY_SOURCE_CHECKOUT": "/srv/checkout",
         "OPENHANDS_WORKSPACE_ROOT": "/srv/workspaces",
+        "FACTORY_TARGET_REPO": REPOSITORY,
     }
     base.update(overrides)
     return FactoryConfig.from_env(base)
@@ -145,6 +151,7 @@ def test_build_cloud_backend_uses_the_cloud_adapter_and_repo_provisioner() -> No
         OPENHANDS_BACKEND="cloud",
         OPENHANDS_CLOUD_API_KEY=CLOUD_KEY,
         OPENHANDS_CLOUD_REPOSITORY=REPOSITORY,
+        OPENHANDS_CLOUD_PROFILE=PROFILE_ID,
     )
     backend = build_backend(config)
     assert isinstance(backend.adapter, OpenHandsCloudAdapter)
@@ -202,3 +209,37 @@ def test_cloud_remote_is_built_from_the_repository_slug() -> None:
 def test_cloud_remote_refuses_a_malformed_repository(repository: str) -> None:
     with pytest.raises(BackendConfigurationError):
         cloud_remote(OpenHandsCloudConfig(repository=repository))
+
+
+def test_cloud_backend_refuses_repository_mismatch() -> None:
+    config = _config(
+        OPENHANDS_BACKEND="cloud",
+        OPENHANDS_CLOUD_API_KEY=CLOUD_KEY,
+        OPENHANDS_CLOUD_REPOSITORY="someone/else",
+        OPENHANDS_CLOUD_PROFILE=PROFILE_ID,
+    )
+    with pytest.raises(BackendConfigurationError, match="exactly match"):
+        build_backend(config)
+
+
+def test_cloud_backend_requires_agent_profile_uuid() -> None:
+    config = _config(
+        OPENHANDS_BACKEND="cloud",
+        OPENHANDS_CLOUD_API_KEY=CLOUD_KEY,
+        OPENHANDS_CLOUD_REPOSITORY=REPOSITORY,
+        OPENHANDS_CLOUD_PROFILE="deepseek-v4.1-flash",
+    )
+    with pytest.raises(BackendConfigurationError, match="Agent Profile UUID"):
+        build_backend(config)
+
+
+def test_cloud_backend_rejects_unsupported_direct_model_selector() -> None:
+    config = _config(
+        OPENHANDS_BACKEND="cloud",
+        OPENHANDS_CLOUD_API_KEY=CLOUD_KEY,
+        OPENHANDS_CLOUD_REPOSITORY=REPOSITORY,
+        OPENHANDS_CLOUD_PROFILE=PROFILE_ID,
+        OPENHANDS_CLOUD_MODEL="openhands/deepseek-v4.1-flash",
+    )
+    with pytest.raises(BackendConfigurationError, match="not a supported Agent Server selector"):
+        build_backend(config)

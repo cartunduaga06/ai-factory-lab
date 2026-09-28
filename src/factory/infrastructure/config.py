@@ -193,10 +193,10 @@ class OpenHandsCloudConfig:
     Cloud configuration never affects local mode: it only makes a ``cloud``
     backend selection fail closed with a clear message.
 
-    ``profile`` / ``model`` choose the LLM configuration Cloud uses. They are
-    configuration, never a hard-coded "free model" dependency: an unavailable
-    profile or model surfaces as a sanitized provider failure rather than a silent
-    fallback to a paid model.
+    ``profile`` is the exact Agent Profile UUID Cloud must use. The model is
+    selected inside that explicit profile; the adapter does not silently choose a
+    default profile or model. ``model`` is retained only to fail closed if an old
+    configuration tries to use the unsupported direct-model selector.
     """
 
     api_url: str = DEFAULT_OPENHANDS_CLOUD_API_URL
@@ -215,7 +215,7 @@ class OpenHandsCloudConfig:
         credential, unavailable model); the factory then fails closed rather than
         falling back to the local backend.
         """
-        return self.api_key is not None and self.repository is not None
+        return self.api_key is not None and self.repository is not None and self.profile is not None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> OpenHandsCloudConfig:

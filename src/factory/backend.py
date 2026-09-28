@@ -1,22 +1,9 @@
-"""Application-layer backend selection.
-
-The factory has two execution backends behind the single
-:class:`~factory.domain.models.AgentAdapter` contract:
-
-* ``local`` — the existing self-hosted Agent Server plus a local Git worktree.
-* ``cloud`` — OpenHands Cloud, whose run is materialised back into a local Git
-  worktree at the exact revision before validation.
-
-This module is the *only* place that knows both concrete backends. It sits in the
-application layer, next to the CLI, so neither the domain nor the orchestration
-layer ever learns which backend is configured. Selection is explicit and comes
-from ``OPENHANDS_BACKEND``; there is no implicit or automatic fallback between
-backends.
-"""
+"""Application-layer backend selection."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from factory.domain.enums import AgentBackend
 from factory.domain.models import AgentAdapter
@@ -40,11 +27,7 @@ from factory.integrations.workspace import (
 
 
 class BackendConfigurationError(Exception):
-    """The selected backend is not usable with the current configuration.
-
-    Raised at startup, before any task is claimed, so a misconfigured backend
-    fails closed with a clear operator message instead of failing mid-run.
-    """
+    """The selected backend is not usable with the current configuration."""
 
 
 @dataclass(slots=True)
@@ -56,16 +39,9 @@ class Backend:
 
 
 def build_backend(config: FactoryConfig) -> Backend:
-    """Resolve the configured backend into an adapter and a provisioner.
-
-    The default is :attr:`~factory.domain.enums.AgentBackend.LOCAL`. Cloud is only
-    ever built when explicitly selected *and* fully configured; otherwise this
-    raises :class:`BackendConfigurationError` and nothing runs. There is no
-    fallback in either direction.
-    """
+    """Resolve the configured backend into an adapter and a provisioner."""
     if config.source_checkout is None:
         raise BackendConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
-
     if config.backend is AgentBackend.CLOUD:
         return _build_cloud(config)
     return _build_local(config)
@@ -101,42 +77,73 @@ def _build_cloud(config: FactoryConfig) -> Backend:
     cloud = config.openhands_cloud
     if not cloud.enabled:
         raise BackendConfigurationError(
-            "the cloud backend requires OPENHANDS_CLOUD_API_KEY and OPENHANDS_CLOUD_REPOSITORY"
+            "the cloud backend requires OPENHANDS_CLOUD_API_KEY, "
+            "OPENHANDS_CLOUD_REPOSITORY and OPENHANDS_CLOUD_PROFILE"
         )
+    if config.github.target_repo is None:
+        raise BackendConfigurationError("FACTORY_TARGET_REPO is required for the cloud backend")
+
     assert config.source_checkout is not None
     assert cloud.api_key is not None
     assert cloud.repository is not None
+    assert cloud.profile is not None
+
+    cloud_slug = _cloud_slug(cloud)
+    if cloud_slug != config.github.target_repo:
+        raise BackendConfigurationError(
+            "OPENHANDS_CLOUD_REPOSITORY must exactly match FACTORY_TARGET_REPO"
+        )
+    try:
+        UUID(cloud.profile)
+    except ValueError:
+        raise BackendConfigurationError(
+            "OPENHANDS_CLOUD_PROFILE must be an exact Agent Profile UUID"
+        ) from None
+    if cloud.model is not None:
+        raise BackendConfigurationError(
+            "OPENHANDS_CLOUD_MODEL is not a supported Agent Server selector; "
+            "select the desired model in the explicit OPENHANDS_CLOUD_PROFILE instead"
+        )
+
+    base_ref = cloud.base_ref or config.workspace_base_ref or config.target_default_branch
     try:
         control = CloudControlClient(cloud.api_url, api_key=cloud.api_key)
         adapter = OpenHandsCloudAdapter(
             control,
             CloudExecution(
                 working_dir=cloud.working_dir,
-                repository=cloud.repository,
+                repository=cloud_slug,
                 profile=cloud.profile,
-                model=cloud.model,
+                base_ref=base_ref,
             ),
-            GitCloudRevisionProvider(config.source_checkout),
+            GitCloudRevisionProvider(
+                config.source_checkout,
+                read_token=config.github.token,
+            ),
         )
     except OpenHandsCloudConfigurationError as exc:
         raise BackendConfigurationError(str(exc)) from None
+
     provisioner = CloudWorkspaceProvisioner(
         config.source_checkout,
-        remote=cloud_remote(cloud),
-        base_ref=config.workspace_base_ref,
+        base_ref=base_ref,
     )
     return Backend(adapter=adapter, provisioner=provisioner)
 
 
-def cloud_remote(cloud: OpenHandsCloudConfig) -> str:
-    """Render a repository slug as the HTTPS remote a Cloud run is cloned from."""
+def _cloud_slug(cloud: OpenHandsCloudConfig) -> str:
     assert cloud.repository is not None
     slug = cloud.repository.strip().removesuffix(".git")
     if slug.count("/") != 1 or any(part in {"", ".", ".."} for part in slug.split("/")):
         raise BackendConfigurationError(
             "OPENHANDS_CLOUD_REPOSITORY must be an owner/name repository slug"
         )
-    return f"https://github.com/{slug}"
+    return slug
+
+
+def cloud_remote(cloud: OpenHandsCloudConfig) -> str:
+    """Render the validated Cloud repository slug as a credential-free HTTPS URL."""
+    return f"https://github.com/{_cloud_slug(cloud)}"
 
 
 __all__ = [

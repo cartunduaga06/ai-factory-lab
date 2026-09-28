@@ -1,71 +1,35 @@
-"""Materialise an OpenHands Cloud revision into a local validation workspace.
-
-A Cloud run works inside an OpenHands Cloud sandbox, outside the factory's own
-filesystem. Before the factory may publish anything it needs a deterministic,
-immutable revision identity that it can *independently* validate. This module is
-the seam that turns a revision a Cloud run claims it produced into a fresh local
-Git worktree checked out at exactly that commit, so the existing quality gates and
-revision binding can run against it.
-
-```
-Cloud sandbox (cloud repository checkout on a factory branch)
-        ↓  the run reports its head commit sha
-RemoteRevision(commit_sha, branch, repository_slug)   (a pointer, not a validation)
-        ↓  GitCloudRevisionProvider.materialize
-local source checkout ── git fetch <remote> <branch> ──► verify fetched sha == commit_sha
-        ↓  git worktree add <path> <branch>  (fresh checkout at the exact commit)
-local validation workspace  ← the existing gates + GitWorkspaceRevisionInspector run here
-```
-
-Safety properties, all enforced below:
-
-* **Fail closed.** A missing/short/malformed sha, a branch that does not match the
-  workspace, a fetch that resolves to a different commit (the branch moved, or was
-  never pushed), or a missing local branch all raise
-  :class:`CloudRevisionError` — nothing is materialised and the run is not
-  publishable. The factory never invents a weaker validation path.
-* **argv only, no shell.** Commands are lists; ``shell=False`` is never overridden.
-* **Bounded.** Every command has a timeout; exceeding it is a sanitized failure.
-* **Credential isolation.** Only a small environment allowlist is forwarded, global
-  and system Git config are disabled, and prompting is off. Raw git output — which
-  can carry a remote URL with an embedded token — is discarded rather than chained.
-* **Isolated branch.** The worktree is created on the workspace's own factory
-  branch; ``main``/``master``/``HEAD`` and option-like branches are refused.
-"""
+"""Materialise an OpenHands Cloud revision into a local validation workspace."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
+from urllib.parse import urlparse
 
 from factory.domain.models import RemoteRevision, Workspace
 
-#: Default per-command timeout. Fetching plus a worktree add is bounded.
 DEFAULT_TIMEOUT_SECONDS = 120.0
-
-#: Remote name a materialisation fetches from by default.
 DEFAULT_REMOTE = "origin"
-
-#: Branches the factory never materialises onto.
 PROTECTED_BRANCHES = frozenset({"main", "master", "HEAD"})
-
-#: Environment variables git legitimately needs. Everything else — including any
-#: credential the factory process happens to hold — is not forwarded.
 _ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SYSTEMROOT")
-
-#: A commit sha is hex only, so it can never reach git argv as an option.
 _SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_TOKEN_ENV = "AI_FACTORY_GIT_TOKEN"
+_USER_ENV = "AI_FACTORY_GIT_USERNAME"
+_ASKPASS_SCRIPT = """#!/bin/sh
+case "$1" in
+  *[Uu]sername*) printf '%s\n' "${AI_FACTORY_GIT_USERNAME:-x-access-token}" ;;
+  *) printf '%s\n' "$AI_FACTORY_GIT_TOKEN" ;;
+esac
+"""
 
 
 class CloudRevisionError(RuntimeError):
-    """A Cloud revision could not be safely materialised.
-
-    Sanitized: never carries raw git stdout/stderr, a command line, a remote URL
-    or a credential. The message names the workspace only.
-    """
+    """A Cloud revision could not be safely materialised."""
 
     def __init__(self, workspace_id: str) -> None:
         super().__init__(f"workspace {workspace_id} cloud revision could not be materialised")
@@ -77,26 +41,37 @@ class CloudRevisionProvider(ABC):
 
     @abstractmethod
     def materialize(self, workspace: Workspace, revision: RemoteRevision) -> None:
-        """Create or confirm ``workspace`` checked out at exactly ``revision``.
+        """Create or confirm workspace checked out at exactly revision."""
 
-        Implementations must be **retry-safe**: materialising the same revision
-        into an already-correct workspace is an identity-preserving no-op; a
-        workspace or revision that does not match is refused rather than mutated.
 
-        Raises:
-            CloudRevisionError: if the revision cannot be retrieved, is unsafe, or
-                does not match the workspace. Sanitized.
-        """
+class _AskpassHelper:
+    """Temporary credential helper containing no credential value."""
+
+    def __init__(self) -> None:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            prefix="ai-factory-cloud-askpass-",
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            self.path = Path(handle.name)
+            handle.write(_ASKPASS_SCRIPT)
+        self.path.chmod(0o700)
+
+    def cleanup(self) -> None:
+        with contextlib.suppress(OSError):
+            self.path.unlink(missing_ok=True)
 
 
 class GitCloudRevisionProvider(CloudRevisionProvider):
-    """Fetches a Cloud revision from a Git remote into a local worktree."""
+    """Fetch a Cloud branch and materialise only its exact claimed commit."""
 
     def __init__(
         self,
         source_checkout: str,
         *,
         remote: str = DEFAULT_REMOTE,
+        read_token: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         if not source_checkout.strip():
@@ -105,6 +80,7 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
             raise ValueError("cloud revision remote must be a plain remote name")
         self._source = Path(source_checkout).expanduser()
         self._remote = remote
+        self._read_token = read_token
         self._timeout = timeout
 
     def __repr__(self) -> str:
@@ -124,6 +100,7 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
         if not _SHA_PATTERN.fullmatch(revision.commit_sha):
             raise CloudRevisionError(workspace_id)
 
+        self._require_expected_remote(workspace_id, revision.repository_slug)
         self._fetch(workspace_id, revision)
         target = Path(workspace.path).expanduser()
         if target.is_symlink():
@@ -136,28 +113,60 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
             self._add_worktree(target, revision, workspace_id)
         self._confirm(target, revision, workspace_id)
 
-    # -- internals ---------------------------------------------------------
-
     def _require_source(self, workspace_id: str) -> None:
         if not (self._source / ".git").exists():
             raise CloudRevisionError(workspace_id)
 
-    def _fetch(self, workspace_id: str, revision: RemoteRevision) -> None:
-        """Fetch exactly the factory branch and require it to be the claimed sha.
-
-        A branch that is not present on the remote, or that has moved on since the
-        run reported its head, is refused: the factory never materialises a
-        revision it cannot retrieve deterministically.
-        """
-        refspec = f"+refs/heads/{revision.branch}:refs/remotes/{self._remote}/{revision.branch}"
-        self._run(
-            ["fetch", "--no-tags", self._remote, refspec],
+    def _require_expected_remote(self, workspace_id: str, repository_slug: str) -> None:
+        remote_url = self._capture(
+            ["remote", "get-url", self._remote],
             cwd=self._source,
             workspace_id=workspace_id,
         )
+        if remote_url is None:
+            raise CloudRevisionError(workspace_id)
+        parsed = urlparse(remote_url)
+        if parsed.scheme in {"", "file"}:
+            # Disposable/local remotes are useful for deterministic tests and
+            # development and carry no credential or network destination.
+            return
+        if self._github_slug(remote_url) != repository_slug:
+            raise CloudRevisionError(workspace_id)
+
+    @staticmethod
+    def _github_slug(remote_url: str) -> str | None:
+        parsed = urlparse(remote_url)
+        if parsed.scheme != "https" or parsed.hostname != "github.com" or parsed.username:
+            return None
+        path = parsed.path.strip("/").removesuffix(".git")
+        if path.count("/") != 1:
+            return None
+        owner, name = path.split("/", 1)
+        if not owner or not name:
+            return None
+        return f"{owner}/{name}"
+
+    def _fetch(self, workspace_id: str, revision: RemoteRevision) -> None:
+        refspec = f"+refs/heads/{revision.branch}:refs/remotes/{self._remote}/{revision.branch}"
+        args = ["-c", "credential.helper=", "fetch", "--no-tags", self._remote, refspec]
+        askpass: _AskpassHelper | None = None
+        try:
+            env = self._env()
+            if self._read_token:
+                askpass = _AskpassHelper()
+                env["GIT_ASKPASS"] = str(askpass.path)
+                env[_USER_ENV] = "x-access-token"
+                env[_TOKEN_ENV] = self._read_token
+            self._run(args, cwd=self._source, workspace_id=workspace_id, env=env)
+        finally:
+            if askpass is not None:
+                askpass.cleanup()
+
         remote_ref = f"refs/remotes/{self._remote}/{revision.branch}"
         fetched = self._capture(
-            ["rev-parse", "--verify", remote_ref], cwd=self._source, workspace_id=workspace_id
+            ["rev-parse", "--verify", remote_ref],
+            cwd=self._source,
+            workspace_id=workspace_id,
         )
         if fetched is None or fetched != revision.commit_sha:
             raise CloudRevisionError(workspace_id)
@@ -171,8 +180,6 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
                 workspace_id=workspace_id,
             )
             if local != revision.commit_sha:
-                # A stale local branch points at a different commit: refuse rather
-                # than reuse code that was never validated.
                 raise CloudRevisionError(workspace_id)
             args = ["worktree", "add", target.as_posix(), branch]
         else:
@@ -180,20 +187,12 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
         self._run(args, cwd=self._source, workspace_id=workspace_id)
 
     def _reconcile(self, target: Path, revision: RemoteRevision, workspace_id: str) -> None:
-        """Advance the run's own worktree to the fetched commit, fast-forward only.
-
-        The dispatch-time provisioner creates the worktree at the branch base; the
-        cloud run then commits on the same branch and pushes it. Descending the
-        worktree to the fetched commit is a fast-forward on the *run's own isolated
-        branch* — never a rewrite of anything shared. A worktree that is already at
-        the commit is an identity-preserving no-op (retry-safe); a worktree that
-        does not match the workspace, or cannot fast-forward to the exact commit, is
-        refused rather than reset.
-        """
         if not (target / ".git").exists():
             raise CloudRevisionError(workspace_id)
         branch = self._capture(
-            ["rev-parse", "--abbrev-ref", "HEAD"], cwd=target, workspace_id=workspace_id
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=target,
+            workspace_id=workspace_id,
         )
         if branch != revision.branch:
             raise CloudRevisionError(workspace_id)
@@ -209,26 +208,27 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
         )
 
     def _local_branch_exists(self, branch: str, workspace_id: str) -> bool:
-        code = self._run(
-            ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-            cwd=self._source,
-            workspace_id=workspace_id,
-            allow_failure=True,
+        return (
+            self._run(
+                ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=self._source,
+                workspace_id=workspace_id,
+                allow_failure=True,
+            )
+            == 0
         )
-        return code == 0
 
     def _confirm(self, target: Path, revision: RemoteRevision, workspace_id: str) -> None:
-        """Verify an existing checkout is exactly the requested revision."""
         if not (target / ".git").exists():
             raise CloudRevisionError(workspace_id)
         actual_branch = self._capture(
-            ["rev-parse", "--abbrev-ref", "HEAD"], cwd=target, workspace_id=workspace_id
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=target,
+            workspace_id=workspace_id,
         )
         actual_sha = self._capture(["rev-parse", "HEAD"], cwd=target, workspace_id=workspace_id)
         if actual_branch != revision.branch or actual_sha != revision.commit_sha:
             raise CloudRevisionError(workspace_id)
-
-    # -- git plumbing ------------------------------------------------------
 
     def _run(
         self,
@@ -237,12 +237,13 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
         cwd: Path,
         workspace_id: str,
         allow_failure: bool = False,
+        env: dict[str, str] | None = None,
     ) -> int:
         try:
-            completed = subprocess.run(  # noqa: S603 - argv form, shell is never used
+            completed = subprocess.run(  # noqa: S603 - argv only
                 ["git", *args],
                 cwd=str(cwd),
-                env=self._env(),
+                env=env or self._env(),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=self._timeout,
@@ -256,7 +257,7 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
 
     def _capture(self, args: list[str], *, cwd: Path, workspace_id: str) -> str | None:
         try:
-            completed = subprocess.run(  # noqa: S603 - argv form, shell is never used
+            completed = subprocess.run(  # noqa: S603 - argv only
                 ["git", *args],
                 cwd=str(cwd),
                 env=self._env(),
@@ -272,12 +273,14 @@ class GitCloudRevisionProvider(CloudRevisionProvider):
         return os.fsdecode(completed.stdout).strip() or None
 
     @staticmethod
-    def _env() -> dict[str, str]:
+    def _env(extra: dict[str, str] | None = None) -> dict[str, str]:
         env = {key: os.environ[key] for key in _ENV_ALLOWLIST if key in os.environ}
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GIT_ASKPASS"] = ""
         env["GIT_CONFIG_GLOBAL"] = os.devnull
         env["GIT_CONFIG_SYSTEM"] = os.devnull
+        if extra:
+            env.update(extra)
         return env
 
 

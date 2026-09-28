@@ -38,27 +38,38 @@ until Cloud is selected, and none is logged or committed (see `.env.example`):
 |---|---|
 | `OPENHANDS_BACKEND` | `local` (default) or `cloud`. |
 | `OPENHANDS_CLOUD_API_KEY` | Cloud API bearer credential. Required for Cloud. |
-| `OPENHANDS_CLOUD_REPOSITORY` | `owner/name` repository Cloud works in. Required for Cloud. |
+| `OPENHANDS_CLOUD_REPOSITORY` | Exact `owner/name` repository Cloud works in. Required and must equal `FACTORY_TARGET_REPO`. |
 | `OPENHANDS_CLOUD_API_URL` | Cloud API base URL. Default `https://app.all-hands.dev`. |
-| `OPENHANDS_CLOUD_WORKING_DIR` | Sandbox directory the repository is checked out at. |
-| `OPENHANDS_CLOUD_BASE_REF` | Optional commit-ish the factory branch starts from. |
-| `OPENHANDS_CLOUD_PROFILE` / `OPENHANDS_CLOUD_MODEL` | LLM configuration Cloud uses. |
+| `OPENHANDS_CLOUD_WORKING_DIR` | Exact sandbox directory used for the repository checkout. |
+| `OPENHANDS_CLOUD_BASE_REF` | Optional commit-ish the isolated branch starts from; otherwise workspace/default branch config is used. |
+| `OPENHANDS_CLOUD_PROFILE` | Exact Agent Profile UUID. Required; choose the desired model inside this Cloud profile. |
+| `OPENHANDS_CLOUD_MODEL` | Direct model selector is unsupported on this Agent Server path; if set, startup fails closed. |
 
 Credentials come from the environment or a secret store. The factory never
 handles an LLM key when an agent profile is used: the sandbox resolves it.
 
-### Model / profile selection is configuration, never a free-model dependency
+### Profile selection is explicit; there is no silent paid-model fallback
 
-There is no hard-coded model and no automatic paid-model fallback. If the
-configured profile or model is unavailable, the run fails with a sanitized
-provider error. Pick a profile/model deliberately in your Cloud account and set
-it; do not rely on any particular model being free or unlimited.
+The Cloud backend requires an exact **Agent Profile UUID**. Configure the desired
+model in that profile in your OpenHands Cloud account, then set
+`OPENHANDS_CLOUD_PROFILE` to that UUID. The Factory does not infer a profile,
+does not silently choose a default model, and does not automatically fall back
+to another model.
+
+`OPENHANDS_CLOUD_MODEL` is retained only as a compatibility guard: if it is
+set, startup fails closed because direct model selection is not part of the
+Agent Server conversation contract used by this adapter. This prevents the
+operator from believing a specific/free model was enforced when it was not.
 
 ### Failing closed
 
-- `OPENHANDS_BACKEND=cloud` with a missing key or repository → the factory
-  refuses to start with a `BackendConfigurationError`. It does **not** run local
-  instead.
+- `OPENHANDS_BACKEND=cloud` with a missing API key, repository or Agent Profile
+  UUID → the factory refuses to start with a `BackendConfigurationError`. It does
+  **not** run local instead.
+- `OPENHANDS_CLOUD_REPOSITORY` differing from `FACTORY_TARGET_REPO` → startup
+  fails before a task is claimed.
+- A non-UUID profile or a direct `OPENHANDS_CLOUD_MODEL` selector → startup
+  fails closed rather than silently selecting something else.
 - A Cloud dispatch/collect failure → a sanitized error; the run follows the
   existing failure path. There is no local↔cloud fallback.
 - A terminal success whose revision cannot be retrieved or re-fetched → the run
@@ -72,6 +83,14 @@ python -m factory --show-config
 
 The Cloud API key must appear as `"***"` (or `null` when unset), and the bearer
 key must never appear in any log line, error message or URL.
+
+
+For private repositories, local revision retrieval uses the Factory's read-scoped
+`GITHUB_TOKEN` through a temporary `GIT_ASKPASS` helper. The token is passed
+only in the subprocess environment; it is never placed in the Git remote URL,
+argv, persisted Git config, error text or logs. The source checkout's `origin`
+is validated against the expected repository and is never rewritten by the Cloud
+workspace provisioner.
 
 ## Manual smoke test (no paid-model fallback)
 
@@ -102,13 +121,19 @@ switching the production/default factory to Cloud.
    # api_key must be "***"; the literal credential must not appear.
    ```
 
-4. **Dispatch one Cloud run only if your configured profile is one you accept
-   using.** Set `OPENHANDS_CLOUD_PROFILE` to a profile you have chosen (for
-   example, a free-tier profile), keep the quality gates configured, and dispatch
-   a single task against the target repository on an isolated factory branch.
+4. **Dispatch one Cloud run only if the exact Agent Profile UUID points to a
+   model you accept using.** Configure that profile in OpenHands Cloud first,
+   leave `OPENHANDS_CLOUD_MODEL` unset, set `OPENHANDS_CLOUD_PROFILE` to the
+   profile UUID, keep the quality gates configured, and dispatch a single task
+   against the matching target repository on an isolated factory branch.
 
-   - The factory creates one sandbox and one conversation; it never pushes to
-     `main`/`master`.
+   - The factory creates one sandbox and one conversation; a sandbox-scoped
+     `github_token` is exposed to the conversation through a `LookupSecret`.
+   - If the repository is not already present, the instruction bootstraps the
+     exact configured repository with a temporary `GIT_ASKPASS` helper and never
+     embeds a token in a remote URL or command argument.
+   - The run starts from the configured base ref and never pushes to
+     `main`/`master`; only its isolated factory branch may be pushed.
    - Watch `--show-config` and the logs: no credential may appear.
    - On success, confirm the run reaches `VALIDATING`, gates run **locally**, and
      the run stops at `WAITING_HUMAN` after a PR — or fails closed with `FAILED`

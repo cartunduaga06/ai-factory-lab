@@ -48,6 +48,7 @@ from factory.integrations.workspace.cloud_revision import (
 from tests.fake_openhands import FakeTransport
 
 API_KEY = "cloud-api-key-must-not-leak"
+PROFILE_ID = "d6934b00-ab23-4aed-bf84-14463e77f6e8"
 SANDBOX_ID = "sbx-0f8e"
 CONVERSATION_ID = "conv-7c21"
 AGENT_SERVER_URL = "https://sbx-0f8e.agent.all-hands.dev"
@@ -103,7 +104,12 @@ def _control(transport: FakeTransport) -> CloudControlClient:
 
 
 def _execution() -> CloudExecution:
-    return CloudExecution(working_dir=WORKING_DIR, repository=REPOSITORY, profile="profile-1")
+    return CloudExecution(
+        working_dir=WORKING_DIR,
+        repository=REPOSITORY,
+        profile=PROFILE_ID,
+        base_ref="main",
+    )
 
 
 def _adapter(
@@ -178,7 +184,7 @@ def test_dispatch_posts_the_factory_branch_and_working_dir() -> None:
 
     body = json.loads(conversation.last.body.decode())
     assert body["workspace"] == {"kind": "LocalWorkspace", "working_dir": WORKING_DIR}
-    assert body["agent_profile_id"] == "profile-1"
+    assert body["agent_profile_id"] == PROFILE_ID
     assert conversation.last.url == f"{AGENT_SERVER_URL}/api/conversations"
     text = body["initial_message"]["content"][0]["text"]
     assert "Add a health endpoint" in text
@@ -196,7 +202,16 @@ def test_dispatch_payload_uses_only_fields_the_conversation_contract_accepts() -
     """
     from factory.integrations.openhands.cloud import build_cloud_creation_payload
 
-    body = build_cloud_creation_payload(_task(), _execution(), _workspace()).as_dict()
+    body = build_cloud_creation_payload(
+        _task(),
+        _execution(),
+        _workspace(),
+        github_secret={
+            "kind": "LookupSecret",
+            "url": "https://example.invalid/secret",
+            "headers": {},
+        },
+    ).as_dict()
     allowed = {
         "workspace",
         "confirmation_policy",
@@ -207,6 +222,7 @@ def test_dispatch_payload_uses_only_fields_the_conversation_contract_accepts() -
         "agent_profile_id",
         "agent_settings",
         "secrets_encrypted",
+        "secrets",
     }
     assert set(body) <= allowed
 
@@ -296,6 +312,57 @@ def test_dispatch_fails_when_the_control_api_is_unreachable() -> None:
     control = FakeTransport(raise_on_send=True)
     with pytest.raises(OpenHandsConnectionError):
         _adapter(control, FakeTransport()).dispatch(_task(), _workspace())
+
+
+def test_dispatch_payload_injects_github_lookup_secret_without_raw_token() -> None:
+    control = FakeTransport(
+        [
+            ServerResponse(200, {"id": SANDBOX_ID, "session_api_key": "k"}),
+            ServerResponse(200, [_running_sandbox_entry()]),
+        ]
+    )
+    conversation = FakeTransport(
+        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
+    )
+    _adapter(control, conversation).dispatch(_task(), _workspace())
+    body = json.loads(conversation.last.body.decode())
+    secret = body["secrets"]["GITHUB_TOKEN"]
+    assert secret["kind"] == "LookupSecret"
+    assert secret["url"].endswith(f"/sandboxes/{SANDBOX_ID}/settings/secrets/github_token")
+    assert secret["headers"]["X-Session-API-Key"] == "sandbox-session-key"
+    assert API_KEY not in json.dumps(body)
+    instruction = body["initial_message"]["content"][0]["text"]
+    assert "GIT_ASKPASS" in instruction
+    assert "$GITHUB_TOKEN" in instruction
+    assert "https://github.com/cartunduaga06/ai-factory-lab.git" in instruction
+    assert "main" in instruction
+
+
+def test_cloud_execution_requires_an_agent_profile_uuid() -> None:
+    with pytest.raises(ValueError, match="Agent Profile UUID"):
+        CloudExecution(
+            working_dir=WORKING_DIR,
+            repository=REPOSITORY,
+            profile="deepseek-v4.1-flash",
+            base_ref="main",
+        )
+
+
+def test_await_ready_resumes_a_paused_sandbox() -> None:
+    control = FakeTransport(
+        [
+            ServerResponse(200, {"id": SANDBOX_ID, "session_api_key": "k"}),
+            ServerResponse(200, [_running_sandbox_entry("PAUSED")]),
+            ServerResponse(200, {}),
+            ServerResponse(200, [_running_sandbox_entry("RUNNING")]),
+        ]
+    )
+    conversation = FakeTransport(
+        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
+    )
+    run = _adapter(control, conversation).dispatch(_task(), _workspace())
+    assert run.run_id == CONVERSATION_ID
+    assert any("/resume" in request.url for request in control.requests)
 
 
 # -- collect ---------------------------------------------------------------
@@ -611,6 +678,8 @@ def test_control_request_error_carries_only_the_status() -> None:
 
 def test_execution_rejects_a_blank_working_directory_or_bad_repository() -> None:
     with pytest.raises(ValueError):
-        CloudExecution(working_dir="  ", repository=REPOSITORY)
+        CloudExecution(working_dir="  ", repository=REPOSITORY, profile=PROFILE_ID, base_ref="main")
     with pytest.raises(ValueError):
-        CloudExecution(working_dir=WORKING_DIR, repository="not-a-slug")
+        CloudExecution(
+            working_dir=WORKING_DIR, repository="not-a-slug", profile=PROFILE_ID, base_ref="main"
+        )

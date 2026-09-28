@@ -636,8 +636,10 @@ or automatic fallback between backends, and Cloud is never the default.
 
 Cloud configuration (`OPENHANDS_CLOUD_*`) is optional and secret-safe: absent
 configuration never affects local mode, and a `cloud` selection with missing
-credentials/repository fails closed with a `BackendConfigurationError` before any
-task is claimed. `--show-config` masks the Cloud API key.
+API key/repository/profile fails closed with a `BackendConfigurationError` before
+any task is claimed. The Cloud repository must exactly equal
+`FACTORY_TARGET_REPO`, and the profile must be an Agent Profile UUID.
+`--show-config` masks the Cloud API key.
 
 ### Cancel
 
@@ -934,15 +936,25 @@ The integration uses only supported, versioned contracts (OpenHands SDK 1.49.6,
   `exposed_urls` (the agent-server URL is the entry named `AGENT_SERVER`);
   `POST /api/v1/sandboxes/<id>/resume` resumes a paused runtime.
 * **Conversation / profile** — conversation creation reuses the same Agent Server
-  contract as local mode (`POST /api/conversations`), including
-  `agent_profile_id`. The payload carries only fields the conversation model
-  accepts (`extra="forbid"`); repository selection is owned by the Cloud
-  repository integration and the run's branch travels in the instruction text.
+  contract as local mode (`POST /api/conversations`) and requires an exact
+  Agent Profile UUID in `agent_profile_id`. Direct model selection is rejected
+  rather than falsely advertised as enforced.
+* **Repository bootstrap** — the sandbox receives a sandbox-scoped
+  `LookupSecret` for the SaaS `github_token`. The bounded instruction clones
+  the exact configured repository into the configured working directory when
+  needed, starts from the configured base ref, and uses a temporary
+  `GIT_ASKPASS` helper so the token never appears in a URL or argv. Only the
+  per-run factory branch may be pushed.
+* **Recovery** — a `PAUSED` sandbox is resumed through the supported resume
+  endpoint and polling continues until `RUNNING`.
 * **Revision retrieval** — the factory never trusts the runtime's word. On a
   terminal success it reads the head commit from the sandbox's own git contract
   (`GET /api/git/commits?limit=1`) and hands the resulting `RemoteRevision` to
   `GitCloudRevisionProvider`, which re-fetches that exact commit from the remote
-  into the run's local validation workspace.
+  into the run's local validation workspace. For private GitHub repositories the
+  read token is supplied only through a temporary `GIT_ASKPASS` environment;
+  the source checkout's `origin` is validated against the expected repository
+  and is never rewritten from a worktree.
 
 ### Fail-closed validation invariant
 

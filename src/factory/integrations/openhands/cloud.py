@@ -57,6 +57,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from uuid import UUID
 
 from factory.domain.enums import AgentKind, RunStatus
 from factory.domain.models import AgentRun, FactoryTask, RemoteRevision, Workspace
@@ -206,6 +207,20 @@ class CloudControlClient:
     def secret_values(self) -> tuple[str, ...]:
         return (self._api_key,)
 
+    def secret_lookup(self, sandbox: CloudSandbox, name: str) -> dict[str, object]:
+        """Return an Agent Server LookupSecret for a sandbox-scoped SaaS secret."""
+        if not sandbox.session_api_key:
+            raise OpenHandsCloudResponseError("sandbox returned no session api key")
+        if not name or "/" in name or ".." in name:
+            raise OpenHandsCloudConfigurationError("invalid Cloud secret name")
+        return {
+            "kind": "LookupSecret",
+            "url": (
+                f"{self._api_url}/api/v1/sandboxes/{sandbox.sandbox_id}/settings/secrets/{name}"
+            ),
+            "headers": {"X-Session-API-Key": sandbox.session_api_key},
+        }
+
     def create_sandbox(self, sandbox_spec_id: str | None = None) -> CloudSandbox:
         """Create a Cloud runtime and return its initial descriptor."""
         path = SANDBOXES_PATH
@@ -286,8 +301,8 @@ class CloudExecution:
 
     working_dir: str
     repository: str
-    profile: str | None = None
-    model: str | None = None
+    profile: str
+    base_ref: str
     sandbox_spec_id: str | None = None
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     stuck_detection: bool = True
@@ -298,6 +313,12 @@ class CloudExecution:
             raise ValueError("cloud working_dir must not be blank")
         if not self.repository.strip() or "/" not in self.repository:
             raise ValueError("cloud repository must be 'owner/name'")
+        try:
+            UUID(self.profile)
+        except ValueError:
+            raise ValueError("cloud profile must be an Agent Profile UUID") from None
+        if not self.base_ref.strip() or self.base_ref.startswith("-"):
+            raise ValueError("cloud base_ref must be a safe non-empty ref")
         if self.max_iterations < 1:
             raise ValueError("max_iterations must be positive")
 
@@ -316,6 +337,8 @@ def build_cloud_creation_payload(
     task: FactoryTask,
     execution: CloudExecution,
     workspace: Workspace,
+    *,
+    github_secret: Mapping[str, object],
 ) -> CloudConversationPayload:
     """Assemble the sandbox agent-server request for one factory task.
 
@@ -334,33 +357,40 @@ def build_cloud_creation_payload(
         "max_iterations": execution.max_iterations,
         "stuck_detection": execution.stuck_detection,
         "autotitle": execution.autotitle,
+        "secrets": {"GITHUB_TOKEN": dict(github_secret)},
         "initial_message": {
             "role": "user",
-            "content": [{"type": "text", "text": build_cloud_instruction(task, workspace)}],
+            "content": [
+                {"type": "text", "text": build_cloud_instruction(task, execution, workspace)}
+            ],
             "run": True,
         },
+        "agent_profile_id": execution.profile,
     }
-    if execution.profile is not None:
-        body["agent_profile_id"] = execution.profile
     return CloudConversationPayload(body=body)
 
 
-def build_cloud_instruction(task: FactoryTask, workspace: Workspace) -> str:
-    """The bounded instruction for a Cloud run, naming the isolated branch.
-
-    Extends the shared instruction with the Cloud-specific contract: work on the
-    factory's own branch and push exactly that branch, so the factory can fetch a
-    deterministic revision to validate locally. The branch is the factory-assigned
-    ``Workspace.branch`` — never a default branch.
-    """
+def build_cloud_instruction(
+    task: FactoryTask,
+    execution: CloudExecution,
+    workspace: Workspace,
+) -> str:
+    """Bounded Cloud instruction including credential-safe repository bootstrap."""
+    repo_url = f"https://github.com/{execution.repository}.git"
     return (
         f"{build_instruction(task)}\n\n"
-        "Cloud execution notes:\n"
-        f"- The repository is checked out at {workspace.repository_slug}.\n"
-        f"- Create and work on the branch `{workspace.branch}`.\n"
-        "- Commit your changes on that branch and push it to `origin` under the "
-        "same name, so the dispatcher can retrieve exactly that revision.\n"
-        "- Never push to `main` or `master`, and never push any other branch.\n"
+        "Cloud execution notes (mandatory):\n"
+        f"- Work only in `{execution.working_dir}` for repository `{execution.repository}`.\n"
+        f"- If `{execution.working_dir}/.git` is absent, clone `{repo_url}` into exactly "
+        f"`{execution.working_dir}` before editing anything. The registered `GITHUB_TOKEN` "
+        "secret is injected only when its name appears in a terminal command. Use a temporary "
+        "GIT_ASKPASS helper that reads `$GITHUB_TOKEN`; never put the token in a remote URL, "
+        "command argument, file content, output, commit, or log.\n"
+        f"- Fetch and start from `{execution.base_ref}`, then create/switch to the isolated "
+        f"branch `{workspace.branch}`. Never work on `main` or `master`.\n"
+        "- Commit all intended changes on that isolated branch and push exactly that branch "
+        "to `origin` using the same credential-safe GIT_ASKPASS pattern.\n"
+        "- Never push any other branch and never rewrite history.\n"
     )
 
 
@@ -420,7 +450,13 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
         try:
             ready = self._await_ready(sandbox)
             client = self._conversation_client(ready)
-            payload = build_cloud_creation_payload(task, self._execution, workspace).as_dict()
+            github_secret = self._control.secret_lookup(ready, "github_token")
+            payload = build_cloud_creation_payload(
+                task,
+                self._execution,
+                workspace,
+                github_secret=github_secret,
+            ).as_dict()
             descriptor = client.create_conversation(payload)
             conversation_id = _conversation_id(descriptor)
             status = map_status(descriptor.get("execution_status"))
@@ -513,6 +549,11 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
                 raise OpenHandsCloudError(f"OpenHands Cloud sandbox {current.sandbox_id} vanished")
             if fetched.status == "RUNNING" and fetched.agent_server_url:
                 return fetched
+            if fetched.status == "PAUSED":
+                self._control.resume_sandbox(fetched.sandbox_id)
+                current = fetched
+                self._sleep(self._poll_interval)
+                continue
             if fetched.status in {"ERROR", "MISSING"}:
                 raise OpenHandsCloudError(
                     f"OpenHands Cloud sandbox {current.sandbox_id} failed to start"
