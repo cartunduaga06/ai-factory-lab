@@ -52,8 +52,9 @@ integrations  ──┼──► orchestration ──► domain
   same Agent Server conversation contract); it is selected only through
   `OPENHANDS_BACKEND=cloud` and never becomes the default. `integrations/workspace/git.py`
   creates one Git worktree per run; `integrations/workspace/cloud_provisioner.py`
-  and `cloud_revision.py` materialise a Cloud result's exact revision into a fresh
-  local validation worktree and fail closed when it cannot; `integrations/workspace/git_publish.py`
+  and `cloud_bundle.py` transfer the exact Cloud revision through secretless Git
+  bundles into a local validation worktree and fail closed when they cannot;
+  `integrations/workspace/git_publish.py`
   commits and pushes exactly the isolated branch; `integrations/gates/local.py`
   runs argv-only, shell-free, bounded gate processes. `integrations/github/pull_requests.py` and
   `write_client.py` are the only Phase 5 write path, and expose no merge.

@@ -21,9 +21,9 @@ from factory.integrations.openhands import (
 from factory.integrations.openhands.cloud import OpenHandsCloudConfigurationError
 from factory.integrations.workspace import (
     CloudWorkspaceProvisioner,
-    GitCloudRevisionProvider,
     GitWorktreeWorkspaceProvisioner,
 )
+from factory.integrations.workspace.cloud_bundle import GitCloudBundleProvider
 
 
 class BackendConfigurationError(Exception):
@@ -116,12 +116,9 @@ def _build_cloud(config: FactoryConfig) -> Backend:
                 profile=cloud.profile,
                 base_ref=base_ref,
             ),
-            GitCloudRevisionProvider(
-                config.source_checkout,
-                read_token=config.github.token,
-            ),
+            GitCloudBundleProvider(config.source_checkout),
         )
-    except OpenHandsCloudConfigurationError as exc:
+    except (OpenHandsCloudConfigurationError, ValueError) as exc:
         raise BackendConfigurationError(str(exc)) from None
 
     provisioner = CloudWorkspaceProvisioner(

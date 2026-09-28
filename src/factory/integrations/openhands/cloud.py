@@ -8,35 +8,11 @@ through ``OPENHANDS_BACKEND=cloud`` and never becomes the default.
 Contract discovery
 ------------------
 
-The integration uses only supported, versioned contracts (OpenHands SDK 1.49.6,
-``openhands.workspace.cloud``):
-
-* **Authentication.** The Cloud control API authenticates with a bearer token
-  (``Authorization: Bearer <api_key>``). A sandbox's agent-server authenticates
-  with the per-sandbox ``X-Session-API-Key`` the Cloud API returns.
-* **Sandbox lifecycle.** ``POST /api/v1/sandboxes`` creates a runtime and
-  returns ``{id, session_api_key}``; ``GET /api/v1/sandboxes?id=<id>`` reports
-  ``status`` plus ``exposed_urls`` (the agent-server URL is the entry named
-  ``AGENT_SERVER``); ``POST /api/v1/sandboxes/<id>/resume`` resumes a paused
-  runtime.
-* **Conversation / profile / repository.** Conversation creation reuses the
-  existing Agent Server contract (``POST /api/conversations``) including
-  ``agent_profile_id`` / ``agent_settings`` and a workspace working directory.
-  Repository selection is delegated to the Cloud repository integration: the
-  factory's configuration names the repository and the in-sandbox working
-  directory, and the factory never automates a browser, copies cookies or uses an
-  undocumented browser-session token.
-* **Revision retrieval.** The factory never trusts the runtime's word for a
-  result. A terminal success is only accepted once a :class:`CloudRevisionProvider`
-  has resolved an immutable ``(commit_sha, branch, repository)`` revision and
-  materialised that exact revision into the run's *local* validation workspace
-  (see :mod:`factory.integrations.workspace.cloud_revision`). If the revision
-  cannot be retrieved, or is unsafe, the run is failed closed and nothing is
-  published.
-* **Usage / rate limits.** The factory assumes no free or unlimited model. It
-  issues only a bounded number of control-plane calls, polls the sandbox a bounded
-  number of times and surfaces any provider error as a sanitized failure — never
-  as a silent fallback to another model or to the local backend.
+The Cloud control API manages sandbox creation, lookup and resume. The supported
+Agent Server bash and binary file APIs transfer Git bundles before and after the
+conversation. The local worktree's base SHA is persisted with the provider handle
+and remains the authority; the sandbox receives no GitHub credential. Terminal
+success is accepted only after a locally verified bundle import.
 
 Safety
 ------
@@ -53,11 +29,15 @@ Safety
 
 from __future__ import annotations
 
+import contextlib
+import re
+import shlex
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from uuid import UUID
+from pathlib import PurePosixPath
+from uuid import UUID, uuid4
 
 from factory.domain.enums import AgentKind, RunStatus
 from factory.domain.models import AgentRun, FactoryTask, RemoteRevision, Workspace
@@ -74,15 +54,13 @@ from factory.integrations.openhands.client import (
     mask_url,
     redact,
 )
+from factory.integrations.openhands.cloud_files import AgentServerFiles, CloudFileClient
 from factory.integrations.openhands.execution import (
     DEFAULT_MAX_ITERATIONS,
     build_instruction,
 )
 from factory.integrations.openhands.status import is_terminal, map_status
-from factory.integrations.workspace.cloud_revision import (
-    CloudRevisionError,
-    CloudRevisionProvider,
-)
+from factory.integrations.workspace.cloud_bundle import CloudBundleProvider
 
 #: Cloud control API paths (versioned, as exposed by the Cloud platform).
 SANDBOXES_PATH = "/api/v1/sandboxes"
@@ -95,6 +73,7 @@ DEFAULT_SANDBOX_POLL_SECONDS = 5.0
 #: Separator between the sandbox id and the conversation id in ``provider_ref``.
 #: Both are opaque identifiers that cannot contain a colon.
 PROVIDER_REF_SEPARATOR = ":"
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 
 class OpenHandsCloudError(OpenHandsError):
@@ -158,10 +137,27 @@ def split_provider_ref(provider_ref: str | None, run_id: str) -> tuple[str, str]
     """
     if not provider_ref:
         raise OpenHandsCloudError(f"OpenHands Cloud run {run_id} has no provider handle")
-    sandbox_id, separator, conversation_id = provider_ref.partition(PROVIDER_REF_SEPARATOR)
-    if not separator or not sandbox_id or not conversation_id:
+    sandbox_id, separator, remainder = provider_ref.partition(PROVIDER_REF_SEPARATOR)
+    conversation_id = remainder.partition(PROVIDER_REF_SEPARATOR)[0]
+    if (
+        not separator
+        or not _IDENTIFIER.fullmatch(sandbox_id)
+        or not _IDENTIFIER.fullmatch(conversation_id)
+    ):
         raise OpenHandsCloudError(f"OpenHands Cloud run {run_id} has an invalid provider handle")
     return sandbox_id, conversation_id
+
+
+_SHA = re.compile(r"[0-9a-f]{40,64}\Z")
+_BRANCH = re.compile(r"factory/[A-Za-z0-9_./-]+\Z")
+
+
+def _split_revision_ref(provider_ref: str | None, run_id: str) -> tuple[str, str, str]:
+    sandbox, conversation = split_provider_ref(provider_ref, run_id)
+    parts = (provider_ref or "").split(":")
+    if len(parts) != 3 or not _SHA.fullmatch(parts[2]):
+        raise OpenHandsCloudError(f"OpenHands Cloud run {run_id} has no base revision")
+    return sandbox, conversation, parts[2]
 
 
 def _entry_url(exposed_urls: object, name: str) -> str | None:
@@ -207,20 +203,6 @@ class CloudControlClient:
     def secret_values(self) -> tuple[str, ...]:
         return (self._api_key,)
 
-    def secret_lookup(self, sandbox: CloudSandbox, name: str) -> dict[str, object]:
-        """Return an Agent Server LookupSecret for a sandbox-scoped SaaS secret."""
-        if not sandbox.session_api_key:
-            raise OpenHandsCloudResponseError("sandbox returned no session api key")
-        if not name or "/" in name or ".." in name:
-            raise OpenHandsCloudConfigurationError("invalid Cloud secret name")
-        return {
-            "kind": "LookupSecret",
-            "url": (
-                f"{self._api_url}/api/v1/sandboxes/{sandbox.sandbox_id}/settings/secrets/{name}"
-            ),
-            "headers": {"X-Session-API-Key": sandbox.session_api_key},
-        }
-
     def create_sandbox(self, sandbox_spec_id: str | None = None) -> CloudSandbox:
         """Create a Cloud runtime and return its initial descriptor."""
         path = SANDBOXES_PATH
@@ -228,7 +210,7 @@ class CloudControlClient:
             path = f"{path}?sandbox_spec_id={sandbox_spec_id}"
         body = self._request("POST", path)
         sandbox_id = body.get("id")
-        if not isinstance(sandbox_id, str) or not sandbox_id:
+        if not isinstance(sandbox_id, str) or not _IDENTIFIER.fullmatch(sandbox_id):
             raise OpenHandsCloudResponseError("sandbox creation returned no id")
         session_key = body.get("session_api_key")
         return CloudSandbox(
@@ -249,6 +231,8 @@ class CloudControlClient:
         entry = _as_mapping(response.body[0])
         if entry is None:
             raise OpenHandsCloudResponseError("sandbox lookup returned no object")
+        if entry.get("id") != sandbox_id:
+            raise OpenHandsCloudResponseError("sandbox lookup returned another sandbox")
         status = entry.get("status")
         session_key = entry.get("session_api_key")
         return CloudSandbox(
@@ -309,8 +293,16 @@ class CloudExecution:
     autotitle: bool = True
 
     def __post_init__(self) -> None:
-        if not self.working_dir.strip():
-            raise ValueError("cloud working_dir must not be blank")
+        path = PurePosixPath(self.working_dir)
+        if (
+            not self.working_dir.startswith("/workspace/")
+            or str(path) != self.working_dir
+            or ".." in path.parts
+            or "." in path.parts
+            or len(path.parts) != 3
+            or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", part) for part in path.parts[1:])
+        ):
+            raise ValueError("cloud working_dir must be a safe absolute sandbox path")
         if not self.repository.strip() or "/" not in self.repository:
             raise ValueError("cloud repository must be 'owner/name'")
         try:
@@ -337,27 +329,14 @@ def build_cloud_creation_payload(
     task: FactoryTask,
     execution: CloudExecution,
     workspace: Workspace,
-    *,
-    github_secret: Mapping[str, object],
 ) -> CloudConversationPayload:
-    """Assemble the sandbox agent-server request for one factory task.
-
-    Only fields the agent-server's ``StartConversationRequest`` contract actually
-    accepts are sent (its model forbids extras). Repository *selection* is owned
-    by the Cloud repository integration, which places the configured repository
-    at :attr:`CloudExecution.working_dir`; the factory does not invent a
-    conversation-level clone field. The run's per-task branch, commit and push
-    requirement travels in the instruction text, and the resulting revision is
-    never trusted — it is retrieved from the sandbox git contract and re-fetched
-    locally before validation (see the module docstring).
-    """
+    """Build only supported conversation fields, with no secrets or Git network workflow."""
     body: dict[str, object] = {
         "workspace": {"kind": "LocalWorkspace", "working_dir": execution.working_dir},
         "confirmation_policy": {"kind": "NeverConfirm"},
         "max_iterations": execution.max_iterations,
         "stuck_detection": execution.stuck_detection,
         "autotitle": execution.autotitle,
-        "secrets": {"GITHUB_TOKEN": dict(github_secret)},
         "initial_message": {
             "role": "user",
             "content": [
@@ -375,22 +354,13 @@ def build_cloud_instruction(
     execution: CloudExecution,
     workspace: Workspace,
 ) -> str:
-    """Bounded Cloud instruction including credential-safe repository bootstrap."""
-    repo_url = f"https://github.com/{execution.repository}.git"
+    """Describe the factory-prepared checkout without credentials."""
     return (
         f"{build_instruction(task)}\n\n"
-        "Cloud execution notes (mandatory):\n"
-        f"- Work only in `{execution.working_dir}` for repository `{execution.repository}`.\n"
-        f"- If `{execution.working_dir}/.git` is absent, clone `{repo_url}` into exactly "
-        f"`{execution.working_dir}` before editing anything. The registered `GITHUB_TOKEN` "
-        "secret is injected only when its name appears in a terminal command. Use a temporary "
-        "GIT_ASKPASS helper that reads `$GITHUB_TOKEN`; never put the token in a remote URL, "
-        "command argument, file content, output, commit, or log.\n"
-        f"- Fetch and start from `{execution.base_ref}`, then create/switch to the isolated "
-        f"branch `{workspace.branch}`. Never work on `main` or `master`.\n"
-        "- Commit all intended changes on that isolated branch and push exactly that branch "
-        "to `origin` using the same credential-safe GIT_ASKPASS pattern.\n"
-        "- Never push any other branch and never rewrite history.\n"
+        f"Work only in `{execution.working_dir}` on branch `{workspace.branch}`. "
+        "The factory prepared the repository. Commit intended changes on this "
+        "branch. Do not change branches or rewrite history. The factory "
+        "transfers and publishes the result.\n"
     )
 
 
@@ -413,9 +383,10 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
         self,
         control: CloudControlClient,
         execution: CloudExecution,
-        revision_provider: CloudRevisionProvider,
+        revision_provider: CloudBundleProvider,
         *,
         conversation_transport: Transport | None = None,
+        files_factory: Callable[[CloudSandbox], CloudFileClient] | None = None,
         poll_interval: float = DEFAULT_SANDBOX_POLL_SECONDS,
         ready_attempts: int = DEFAULT_SANDBOX_READY_ATTEMPTS,
         sleep: Callable[[float], None] = time.sleep,
@@ -424,6 +395,7 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
         self._execution = execution
         self._revision_provider = revision_provider
         self._conversation_transport = conversation_transport
+        self._files_factory = files_factory or self._default_files
         self._poll_interval = max(0.0, poll_interval)
         self._ready_attempts = max(1, ready_attempts)
         self._sleep = sleep
@@ -446,25 +418,34 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
                 conversation could not be created. The sandbox is best-effort
                 released before the error is raised.
         """
+        if (
+            task.target_repository != self._execution.repository
+            or workspace.repository_slug != self._execution.repository
+        ):
+            raise OpenHandsCloudConfigurationError("Cloud repository identity mismatch")
+        # TODO: sandbox creation precedes durable run persistence. Recovering a
+        # crash in this window needs a transactional lifecycle/outbox design.
         sandbox = self._control.create_sandbox(self._execution.sandbox_spec_id)
         try:
             ready = self._await_ready(sandbox)
             client = self._conversation_client(ready)
-            github_secret = self._control.secret_lookup(ready, "github_token")
+            bundle, base_sha = self._revision_provider.prepare_input(workspace)
+            self._prepare_remote(self._files_factory(ready), workspace, bundle, base_sha)
             payload = build_cloud_creation_payload(
                 task,
                 self._execution,
                 workspace,
-                github_secret=github_secret,
             ).as_dict()
             descriptor = client.create_conversation(payload)
             conversation_id = _conversation_id(descriptor)
             status = map_status(descriptor.get("execution_status"))
+            if is_terminal(status):
+                status = RunStatus.PENDING
         except Exception:
             # Best-effort cleanup; the original sanitized error is re-raised.
             self._release(sandbox.sandbox_id)
             raise
-        provider_ref = f"{ready.sandbox_id}{PROVIDER_REF_SEPARATOR}{conversation_id}"
+        provider_ref = f"{ready.sandbox_id}:{conversation_id}:{base_sha}"
         return AgentRun(
             task_id=task.task_id,
             adapter=self.kind,
@@ -491,9 +472,9 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
             OpenHandsCloudError: if the run cannot be located or queried, or its
                 provider handle is missing/malformed.
         """
-        sandbox_id, conversation_id = split_provider_ref(run.provider_ref, run.run_id)
-        sandbox = self._control.get_sandbox(sandbox_id)
-        if sandbox is None or sandbox.agent_server_url is None:
+        sandbox_id, conversation_id, base_sha = _split_revision_ref(run.provider_ref, run.run_id)
+        sandbox = self._await_ready(CloudSandbox(sandbox_id, None, "UNKNOWN", None))
+        if sandbox.agent_server_url is None:
             raise OpenHandsCloudError(
                 f"OpenHands Cloud sandbox for run {run.run_id} could not be located"
             )
@@ -507,7 +488,7 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
 
         status = map_status(descriptor.get("execution_status"))
         if status is RunStatus.SUCCEEDED:
-            status = self._materialize_or_fail(run, client)
+            status = self._materialize_or_fail(run, client, self._files_factory(sandbox), base_sha)
         run.status = status
         if is_terminal(status):
             run.finished_at = run.finished_at or datetime.now(UTC)
@@ -543,6 +524,7 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
     def _await_ready(self, sandbox: CloudSandbox) -> CloudSandbox:
         """Poll the sandbox until it is ``RUNNING`` with an agent-server URL."""
         current = sandbox
+        resume_requested = False
         for _ in range(self._ready_attempts):
             fetched = self._control.get_sandbox(current.sandbox_id)
             if fetched is None:
@@ -550,7 +532,9 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
             if fetched.status == "RUNNING" and fetched.agent_server_url:
                 return fetched
             if fetched.status == "PAUSED":
-                self._control.resume_sandbox(fetched.sandbox_id)
+                if not resume_requested:
+                    self._control.resume_sandbox(fetched.sandbox_id)
+                    resume_requested = True
                 current = fetched
                 self._sleep(self._poll_interval)
                 continue
@@ -564,31 +548,101 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
             f"OpenHands Cloud sandbox {current.sandbox_id} did not become ready"
         )
 
-    def _materialize_or_fail(self, run: AgentRun, client: OpenHandsClient) -> RunStatus:
-        """Resolve and materialise the cloud revision, or fail the run closed.
-
-        The commit sha is read from the sandbox's own supported git contract, not
-        trusted from the conversation text; the remote fetch then verifies it is
-        still exactly that commit before any local worktree is created.
-        """
+    def _materialize_or_fail(
+        self, run: AgentRun, client: OpenHandsClient, files: CloudFileClient, base_sha: str
+    ) -> RunStatus:
         workspace = run.workspace
         if workspace is None:
             return RunStatus.FAILED
         try:
+            self._verify_remote(files, workspace, base_sha)
             commit_sha = client.head_commit(self._execution.working_dir)
-            if commit_sha is None:
+            if commit_sha is None or not _SHA.fullmatch(commit_sha):
                 return RunStatus.FAILED
-            revision = RemoteRevision(
-                commit_sha=commit_sha,
-                branch=workspace.branch,
-                repository_slug=workspace.repository_slug,
+            directory = shlex.quote(self._execution.working_dir)
+            self._require_bash(
+                files,
+                f'test "$(git -C {directory} rev-parse HEAD)" = {shlex.quote(commit_sha)}',
             )
-            self._revision_provider.materialize(workspace, revision)
-        except CloudRevisionError:
-            return RunStatus.FAILED
-        except Exception:  # noqa: BLE001 - a defective provider must not leak
+            result_path = f"/tmp/factory-result-{uuid4().hex}.bundle"
+            try:
+                self._require_bash(
+                    files,
+                    f"git -C {shlex.quote(self._execution.working_dir)} bundle create "
+                    f"{shlex.quote(result_path)} {shlex.quote('refs/heads/' + workspace.branch)}",
+                )
+                bundle = files.download(result_path)
+            finally:
+                self._remove_temp(files, result_path)
+            revision = RemoteRevision(commit_sha, workspace.branch, workspace.repository_slug)
+            self._revision_provider.materialize_bundle(workspace, revision, bundle, base_sha)
+        except Exception:  # noqa: BLE001 - discard untrusted remote output
             return RunStatus.FAILED
         return RunStatus.SUCCEEDED
+
+    @staticmethod
+    def _default_files(sandbox: CloudSandbox) -> CloudFileClient:
+        if sandbox.agent_server_url is None:
+            raise OpenHandsCloudError("sandbox has no agent server URL")
+        return AgentServerFiles(sandbox.agent_server_url, sandbox.session_api_key)
+
+    @staticmethod
+    def _require_bash(files: CloudFileClient, command: str) -> str:
+        result = files.bash(command)
+        if result.exit_code != 0:
+            raise OpenHandsCloudError("sandbox Git verification failed")
+        return result.stdout.strip()
+
+    @staticmethod
+    def _remove_temp(files: CloudFileClient, path: str) -> None:
+        with contextlib.suppress(Exception):
+            files.bash(f"rm -f -- {shlex.quote(path)}")
+
+    def _prepare_remote(
+        self, files: CloudFileClient, workspace: Workspace, bundle: bytes, base_sha: str
+    ) -> None:
+        directory = self._execution.working_dir
+        if not _BRANCH.fullmatch(workspace.branch) or not _SHA.fullmatch(base_sha):
+            raise OpenHandsCloudError("unsafe Cloud branch or base revision")
+        input_path = f"/tmp/factory-input-{uuid4().hex}.bundle"
+        files.upload(input_path, bundle)
+        try:
+            quoted_dir = shlex.quote(directory)
+            quoted_branch = shlex.quote(workspace.branch)
+            quoted_bundle = shlex.quote(input_path)
+            parent = shlex.quote(str(PurePosixPath(directory).parent))
+            command = (
+                f"test ! -L {parent} && mkdir -p -- {parent} && "
+                f"rm -rf -- {quoted_dir} && "
+                f"git clone --no-checkout --branch {quoted_branch} {quoted_bundle} {quoted_dir} && "
+                f"git -C {quoted_dir} switch {quoted_branch} && "
+                f"git -C {quoted_dir} remote remove origin && "
+                f'test "$(git -C {quoted_dir} rev-parse HEAD)" = {shlex.quote(base_sha)} && '
+                f'test "$(git -C {quoted_dir} rev-parse --abbrev-ref HEAD)" = {quoted_branch}'
+            )
+            self._require_bash(files, command)
+        finally:
+            self._remove_temp(files, input_path)
+
+    def _verify_remote(self, files: CloudFileClient, workspace: Workspace, base_sha: str) -> None:
+        directory = shlex.quote(self._execution.working_dir)
+        branch = shlex.quote(workspace.branch)
+        sha = shlex.quote(base_sha)
+        self._require_bash(
+            files,
+            f'test "$(git -C {directory} rev-parse --abbrev-ref HEAD)" = {branch} && '
+            f"git -C {directory} merge-base --is-ancestor {sha} HEAD && "
+            f'test -z "$(git -C {directory} status --porcelain --untracked-files=all)"',
+        )
+
+    def release_terminal(self, run: AgentRun) -> None:
+        """Release after tracking has persisted and reconciled terminal state."""
+        if run.is_terminal and run.provider_ref:
+            try:
+                sandbox_id, _ = split_provider_ref(run.provider_ref, run.run_id)
+                self._release(sandbox_id)
+            except Exception:  # noqa: BLE001 - idempotent best effort cleanup
+                pass
 
     def _conversation_client(self, sandbox: CloudSandbox) -> OpenHandsClient:
         if sandbox.agent_server_url is None:
@@ -618,7 +672,7 @@ def _conversation_id(descriptor: object) -> str:
     if mapping is None:
         raise OpenHandsCloudResponseError("conversation creation returned no descriptor")
     value = mapping.get("id")
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise OpenHandsCloudResponseError("conversation creation returned no id")
     return value
 

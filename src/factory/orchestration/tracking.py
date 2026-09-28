@@ -23,6 +23,7 @@ also stays ``VALIDATING``. Phase 4 never dispatches a correction on its own.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -134,6 +135,7 @@ class RunTrackingService:
             raise KeyError(run_id)
         if run.is_terminal:
             self._reconcile_terminal(run)
+            self._release_terminal(adapter, run)
             return self._result(run)
 
         collection_failed = False
@@ -158,7 +160,26 @@ class RunTrackingService:
 
         self._runs.update_run(run)
         self._drive_task(run)
+        self._release_terminal(adapter, run)
         return self._result(run)
+
+    def _release_terminal(self, adapter: AgentAdapter, run: AgentRun) -> None:
+        """Best-effort engine cleanup only after durable terminal reconciliation."""
+        if not run.is_terminal:
+            return
+        stored = self._runs.get_run(run.run_id)
+        task = self._tasks.get(run.task_id)
+        if (
+            stored is None
+            or stored.status is not run.status
+            or task is None
+            or task.status is not _TERMINAL_TASK_TARGET[run.status]
+        ):
+            return
+        release = getattr(adapter, "release_terminal", None)
+        if callable(release):
+            with contextlib.suppress(Exception):
+                release(run)
 
     def _reconcile_terminal(self, run: AgentRun) -> None:
         """Drive the task from a run that was already terminal in storage.

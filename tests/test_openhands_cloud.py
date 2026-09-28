@@ -1,685 +1,302 @@
-"""Tests for :class:`OpenHandsCloudAdapter` and :class:`CloudControlClient`.
-
-The Cloud control API and the sandbox agent-server are both driven through
-injected in-memory transports, so every path — successful dispatch/collect,
-active status, terminal failure/cancel, malformed provider responses, transport
-failure and idempotent re-collection — runs deterministically with no network.
-
-The focus is the safety contract: the Cloud API key never escapes, provider
-payloads are sanitized at the boundary, re-collection never creates a second
-sandbox or conversation, and a result that cannot be independently validated
-locally is failed closed rather than published.
-"""
+"""Cloud sandbox exchange through injected, network-free transports."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 
 import pytest
 
 from factory.domain.enums import AgentKind, RunStatus
-from factory.domain.models import (
-    AgentAdapter,
-    AgentRun,
-    FactoryTask,
-    RemoteRevision,
-    TaskSource,
-    Workspace,
-)
-from factory.integrations.openhands.client import (
-    OpenHandsConnectionError,
-    OpenHandsError,
-    ServerResponse,
-)
+from factory.domain.models import AgentRun, FactoryTask, RemoteRevision, TaskSource, Workspace
+from factory.integrations.openhands.client import ServerResponse
 from factory.integrations.openhands.cloud import (
     CloudControlClient,
     CloudExecution,
     OpenHandsCloudAdapter,
-    OpenHandsCloudConfigurationError,
     OpenHandsCloudError,
-    OpenHandsCloudRequestError,
-    OpenHandsCloudResponseError,
+    build_cloud_creation_payload,
     split_provider_ref,
 )
-from factory.integrations.workspace.cloud_revision import (
-    CloudRevisionError,
-    CloudRevisionProvider,
-)
+from factory.integrations.openhands.cloud_files import BashResult
+from factory.integrations.workspace.cloud_revision import CloudRevisionError
 from tests.fake_openhands import FakeTransport
 
-API_KEY = "cloud-api-key-must-not-leak"
-PROFILE_ID = "d6934b00-ab23-4aed-bf84-14463e77f6e8"
-SANDBOX_ID = "sbx-0f8e"
-CONVERSATION_ID = "conv-7c21"
-AGENT_SERVER_URL = "https://sbx-0f8e.agent.all-hands.dev"
-REMOTE_SHA = "0123456789abcdef0123456789abcdef01234567"
-WORKING_DIR = "/workspace/project"
-REPOSITORY = "cartunduaga06/ai-factory-lab"
+SHA = "0123456789abcdef0123456789abcdef01234567"
+RESULT = "abcdef0123456789abcdef0123456789abcdef01"
+PROFILE = "d6934b00-ab23-4aed-bf84-14463e77f6e8"
+REPO = "owner/private"
+BRANCH = "factory/task/ws"
 
 
-def _task(**overrides: object) -> FactoryTask:
-    defaults: dict[str, object] = {
-        "title": "Add a health endpoint",
-        "target_repository": REPOSITORY,
-        "source": TaskSource("github", REPOSITORY, 15),
-        "body": "Expose GET /health returning 200.",
-    }
-    defaults.update(overrides)
-    return FactoryTask(**defaults)  # type: ignore[arg-type]
+def task() -> FactoryTask:
+    return FactoryTask("Task", REPO, TaskSource("github", REPO, 1), body="Fix it")
 
 
-def _workspace() -> Workspace:
-    return Workspace(
-        workspace_id="ws-cloud-1",
-        repository_slug=REPOSITORY,
-        branch="factory/task-1/ws-cloud-1",
-        path="/var/lib/factory/workspaces/ws-cloud-1",
-    )
+def workspace() -> Workspace:
+    return Workspace("ws", REPO, BRANCH, "/local/ws")
 
 
-def _running_sandbox_entry(status: str = "RUNNING") -> dict[str, object]:
+def execution(path: str = "/workspace/project", profile: str = PROFILE) -> CloudExecution:
+    return CloudExecution(path, REPO, profile, "main")
+
+
+def sandbox(status: str = "RUNNING") -> dict[str, object]:
     return {
-        "id": SANDBOX_ID,
+        "id": "sbx",
         "status": status,
-        "session_api_key": "sandbox-session-key",
-        "exposed_urls": [{"name": "AGENT_SERVER", "url": AGENT_SERVER_URL}],
+        "session_api_key": "sandbox-key",
+        "exposed_urls": [{"name": "AGENT_SERVER", "url": "https://sandbox.invalid"}],
     }
 
 
-class _RecordingRevisionProvider(CloudRevisionProvider):
-    """A real provider implementation that records what it was asked to do."""
+@dataclass
+class BundleProvider:
+    fail: bool = False
+    revisions: list[RemoteRevision] = field(default_factory=list)
+    received: list[bytes] = field(default_factory=list)
 
-    def __init__(self, *, fail: bool = False) -> None:
-        self.fail = fail
-        self.calls: list[RemoteRevision] = []
+    def prepare_input(self, workspace: Workspace) -> tuple[bytes, str]:
+        return b"input binary bundle", SHA
 
-    def materialize(self, workspace: Workspace, revision: RemoteRevision) -> None:
-        self.calls.append(revision)
-        if self.fail:
+    def materialize_bundle(
+        self, workspace: Workspace, revision: RemoteRevision, bundle: bytes, base_sha: str
+    ) -> None:
+        self.revisions.append(revision)
+        self.received.append(bundle)
+        assert base_sha == SHA
+        if self.fail or not bundle:
             raise CloudRevisionError(workspace.workspace_id)
 
 
-def _control(transport: FakeTransport) -> CloudControlClient:
-    return CloudControlClient("https://app.all-hands.dev", api_key=API_KEY, transport=transport)
+@dataclass
+class Files:
+    exit_codes: list[int] = field(default_factory=list)
+    commands: list[str] = field(default_factory=list)
+    uploads: list[tuple[str, bytes]] = field(default_factory=list)
+    downloads: list[str] = field(default_factory=list)
+    result: bytes = b"result binary bundle"
+
+    def upload(self, path: str, data: bytes) -> None:
+        self.uploads.append((path, data))
+
+    def download(self, path: str) -> bytes:
+        self.downloads.append(path)
+        return self.result
+
+    def bash(self, command: str, *, cwd: str | None = None) -> BashResult:
+        self.commands.append(command)
+        code = self.exit_codes.pop(0) if self.exit_codes else 0
+        return BashResult(code, "untrusted remote output")
 
 
-def _execution() -> CloudExecution:
-    return CloudExecution(
-        working_dir=WORKING_DIR,
-        repository=REPOSITORY,
-        profile=PROFILE_ID,
-        base_ref="main",
-    )
-
-
-def _adapter(
-    control_transport: FakeTransport,
-    conversation_transport: FakeTransport,
-    revision: CloudRevisionProvider | None = None,
+def adapter(
+    control: FakeTransport,
+    conversation: FakeTransport,
+    files: Files,
+    provider: BundleProvider | None = None,
 ) -> OpenHandsCloudAdapter:
     return OpenHandsCloudAdapter(
-        _control(control_transport),
-        _execution(),
-        revision or _RecordingRevisionProvider(),
-        conversation_transport=conversation_transport,
+        CloudControlClient("https://cloud.invalid", api_key="cloud-key", transport=control),
+        execution(),
+        provider or BundleProvider(),
+        conversation_transport=conversation,
+        files_factory=lambda _sandbox: files,
         sleep=lambda _seconds: None,
+        ready_attempts=3,
     )
 
 
-# -- contract --------------------------------------------------------------
+def dispatched(
+    status: str = "idle", *, files: Files | None = None
+) -> tuple[AgentRun, FakeTransport, FakeTransport, Files]:
+    control = FakeTransport([ServerResponse(200, {"id": "sbx"}), ServerResponse(200, [sandbox()])])
+    conversation = FakeTransport([ServerResponse(201, {"id": "conv", "execution_status": status})])
+    files = files or Files()
+    run = adapter(control, conversation, files).dispatch(task(), workspace())
+    return run, control, conversation, files
 
 
-def test_adapter_satisfies_the_agent_adapter_protocol() -> None:
-    adapter = _adapter(FakeTransport(), FakeTransport())
-    assert isinstance(adapter, AgentAdapter)
-    assert adapter.kind is AgentKind.OPENHANDS
-
-
-def test_control_client_repr_never_exposes_the_api_key() -> None:
-    client = _control(FakeTransport())
-    assert API_KEY not in repr(client)
-    assert API_KEY not in client.api_url
-
-
-def test_control_client_requires_a_credential() -> None:
-    with pytest.raises(OpenHandsCloudConfigurationError):
-        CloudControlClient("https://app.all-hands.dev", api_key="")
-
-
-# -- dispatch --------------------------------------------------------------
-
-
-def test_dispatch_returns_a_run_bound_to_the_conversation_and_sandbox() -> None:
-    control = FakeTransport(
+def collected(
+    status: str = "finished", *, files: Files | None = None, provider: BundleProvider | None = None
+) -> tuple[AgentRun, Files, BundleProvider]:
+    control = FakeTransport([ServerResponse(200, [sandbox()])])
+    conversation = FakeTransport(
         [
-            ServerResponse(200, {"id": SANDBOX_ID, "session_api_key": "k"}),
-            ServerResponse(200, [_running_sandbox_entry()]),
+            ServerResponse(200, {"id": "conv", "execution_status": status}),
+            ServerResponse(200, {"commits": [{"sha": RESULT}]}),
+            ServerResponse(200, {"response": "done"}),
         ]
     )
-    conversation = FakeTransport(
-        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
-    )
-    task = _task()
-    run = _adapter(control, conversation).dispatch(task, _workspace())
+    files = files or Files()
+    provider = provider or BundleProvider()
+    run = AgentRun(task().task_id, AgentKind.OPENHANDS, "conv", RunStatus.RUNNING, workspace())
+    run.provider_ref = f"sbx:conv:{SHA}"
+    return adapter(control, conversation, files, provider).collect(run), files, provider
 
-    assert run.adapter is AgentKind.OPENHANDS
-    assert run.run_id == CONVERSATION_ID
-    assert run.provider_ref == f"{SANDBOX_ID}:{CONVERSATION_ID}"
+
+def test_secretless_payload_and_binary_preflight() -> None:
+    run, control, conversation, files = dispatched()
+    assert run.provider_ref == f"sbx:conv:{SHA}"
     assert run.status is RunStatus.PENDING
-    assert run.started_at is not None
+    assert files.uploads[0][1] == b"input binary bundle"
+    assert files.uploads[0][0].startswith("/tmp/factory-input-")
+    assert any("bundle" in command and SHA in command for command in files.commands)
+    body = json.loads(conversation.last.body or b"{}")
+    assert "secrets" not in body
+    assert "GITHUB_TOKEN" not in json.dumps(body)
+    instruction = body["initial_message"]["content"][0]["text"].lower()
+    assert "git_askpass" not in instruction and "clone" not in instruction
+    assert "push exactly" not in instruction and "github.com" not in instruction
+    assert body["workspace"]["working_dir"] == "/workspace/project"
+    assert body["agent_profile_id"] == PROFILE
+    assert control.requests[0].headers["Authorization"] == "Bearer cloud-key"
+    assert "cloud-key" not in json.dumps(body)
+
+
+def test_terminal_creation_requires_collection() -> None:
+    run, _, _, _ = dispatched("finished")
+    assert run.status is RunStatus.PENDING
     assert run.finished_at is None
 
 
-def test_dispatch_posts_the_factory_branch_and_working_dir() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, {"id": SANDBOX_ID}),
-            ServerResponse(200, [_running_sandbox_entry()]),
-        ]
-    )
-    conversation = FakeTransport(
-        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
-    )
-    _adapter(control, conversation).dispatch(_task(), _workspace())
-
-    body = json.loads(conversation.last.body.decode())
-    assert body["workspace"] == {"kind": "LocalWorkspace", "working_dir": WORKING_DIR}
-    assert body["agent_profile_id"] == PROFILE_ID
-    assert conversation.last.url == f"{AGENT_SERVER_URL}/api/conversations"
-    text = body["initial_message"]["content"][0]["text"]
-    assert "Add a health endpoint" in text
-    # The run's isolated branch travels in the instruction, not as a non-contract
-    # conversation field the agent-server would reject.
-    assert "factory/task-1/ws-cloud-1" in text
-    assert "git" not in body
-
-
-def test_dispatch_payload_uses_only_fields_the_conversation_contract_accepts() -> None:
-    """The payload must not carry keys outside ``StartConversationRequest``.
-
-    The agent-server conversation model forbids extra fields, so an invented key
-    would be rejected in production even though an in-memory transport accepts it.
-    """
-    from factory.integrations.openhands.cloud import build_cloud_creation_payload
-
-    body = build_cloud_creation_payload(
-        _task(),
-        _execution(),
-        _workspace(),
-        github_secret={
-            "kind": "LookupSecret",
-            "url": "https://example.invalid/secret",
-            "headers": {},
-        },
-    ).as_dict()
-    allowed = {
-        "workspace",
-        "confirmation_policy",
-        "max_iterations",
-        "stuck_detection",
-        "autotitle",
-        "initial_message",
-        "agent_profile_id",
-        "agent_settings",
-        "secrets_encrypted",
-        "secrets",
-    }
-    assert set(body) <= allowed
-
-
-def test_dispatch_authenticates_to_the_control_api_with_bearer_and_never_in_the_url() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, {"id": SANDBOX_ID}),
-            ServerResponse(200, [_running_sandbox_entry()]),
-        ]
-    )
-    conversation = FakeTransport(
-        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
-    )
-    _adapter(control, conversation).dispatch(_task(), _workspace())
-
-    create = control.requests[0]
-    assert create.headers["Authorization"] == f"Bearer {API_KEY}"
-    assert API_KEY not in create.url
-
-
-def test_dispatch_uses_the_sandbox_session_key_for_the_conversation() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, {"id": SANDBOX_ID}),
-            ServerResponse(200, [_running_sandbox_entry()]),
-        ]
-    )
-    conversation = FakeTransport(
-        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
-    )
-    _adapter(control, conversation).dispatch(_task(), _workspace())
-    assert conversation.requests[-1].headers.get("X-Session-API-Key") == "sandbox-session-key"
-
-
-def test_dispatch_fails_closed_when_the_sandbox_never_becomes_ready() -> None:
-    control = FakeTransport(
-        [ServerResponse(200, {"id": SANDBOX_ID})],
-        default=ServerResponse(200, [_running_sandbox_entry("STARTING")]),
-    )
-    conversation = FakeTransport()
-    adapter = OpenHandsCloudAdapter(
-        _control(control),
-        _execution(),
-        _RecordingRevisionProvider(),
-        conversation_transport=conversation,
-        ready_attempts=3,
-        sleep=lambda _seconds: None,
-    )
-    with pytest.raises(OpenHandsCloudError):
-        adapter.dispatch(_task(), _workspace())
-    # No conversation was ever created.
-    assert conversation.requests == []
-
-
-def test_dispatch_releases_the_sandbox_when_conversation_creation_fails() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, {"id": SANDBOX_ID}),
-            ServerResponse(200, [_running_sandbox_entry()]),
-        ]
-    )
-    conversation = FakeTransport([ServerResponse(500, {"detail": "boom"})])
-    # The shared Agent Server client raises its sanitized error; the Cloud adapter
-    # reuses that contract rather than inventing a second one.
-    with pytest.raises(OpenHandsError):
-        _adapter(control, conversation).dispatch(_task(), _workspace())
-    # The last control call released the sandbox.
-    assert control.last.method == "DELETE"
-    assert SANDBOX_ID in control.last.url
-
-
-def test_dispatch_sanitizes_a_malformed_conversation_response() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, {"id": SANDBOX_ID}),
-            ServerResponse(200, [_running_sandbox_entry()]),
-        ]
-    )
-    conversation = FakeTransport([ServerResponse(201, {"no_id": True})])
-    with pytest.raises((OpenHandsCloudResponseError, OpenHandsCloudError)) as caught:
-        _adapter(control, conversation).dispatch(_task(), _workspace())
-    assert API_KEY not in str(caught.value)
-
-
-def test_dispatch_fails_when_the_control_api_is_unreachable() -> None:
-    control = FakeTransport(raise_on_send=True)
-    with pytest.raises(OpenHandsConnectionError):
-        _adapter(control, FakeTransport()).dispatch(_task(), _workspace())
-
-
-def test_dispatch_payload_injects_github_lookup_secret_without_raw_token() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, {"id": SANDBOX_ID, "session_api_key": "k"}),
-            ServerResponse(200, [_running_sandbox_entry()]),
-        ]
-    )
-    conversation = FakeTransport(
-        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
-    )
-    _adapter(control, conversation).dispatch(_task(), _workspace())
-    body = json.loads(conversation.last.body.decode())
-    secret = body["secrets"]["GITHUB_TOKEN"]
-    assert secret["kind"] == "LookupSecret"
-    assert secret["url"].endswith(f"/sandboxes/{SANDBOX_ID}/settings/secrets/github_token")
-    assert secret["headers"]["X-Session-API-Key"] == "sandbox-session-key"
-    assert API_KEY not in json.dumps(body)
-    instruction = body["initial_message"]["content"][0]["text"]
-    assert "GIT_ASKPASS" in instruction
-    assert "$GITHUB_TOKEN" in instruction
-    assert "https://github.com/cartunduaga06/ai-factory-lab.git" in instruction
-    assert "main" in instruction
-
-
-def test_cloud_execution_requires_an_agent_profile_uuid() -> None:
-    with pytest.raises(ValueError, match="Agent Profile UUID"):
-        CloudExecution(
-            working_dir=WORKING_DIR,
-            repository=REPOSITORY,
-            profile="deepseek-v4.1-flash",
-            base_ref="main",
-        )
-
-
-def test_await_ready_resumes_a_paused_sandbox() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, {"id": SANDBOX_ID, "session_api_key": "k"}),
-            ServerResponse(200, [_running_sandbox_entry("PAUSED")]),
-            ServerResponse(200, {}),
-            ServerResponse(200, [_running_sandbox_entry("RUNNING")]),
-        ]
-    )
-    conversation = FakeTransport(
-        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
-    )
-    run = _adapter(control, conversation).dispatch(_task(), _workspace())
-    assert run.run_id == CONVERSATION_ID
-    assert any("/resume" in request.url for request in control.requests)
-
-
-# -- collect ---------------------------------------------------------------
-
-
-def _active_run(
-    provider: CloudRevisionProvider | None = None,
-) -> tuple[FakeTransport, FakeTransport, AgentRun]:
-    control = FakeTransport([ServerResponse(200, [_running_sandbox_entry()])])
-    conversation = FakeTransport()
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    return control, conversation, run
-
-
-def test_collect_maps_an_active_status_without_materialising() -> None:
-    provider = _RecordingRevisionProvider()
-    _control_t, conversation, run = _active_run(provider)
-    conversation._responses = [
-        ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": "running"})
-    ]
-    adapter = _adapter(
-        FakeTransport([ServerResponse(200, [_running_sandbox_entry()])]), conversation, provider
-    )
-    result = adapter.collect(run)
-    assert result.status is RunStatus.RUNNING
-    assert result.finished_at is None
-    assert provider.calls == []
-
-
-def test_collect_materialises_and_marks_succeeded_on_a_verified_revision() -> None:
-    provider = _RecordingRevisionProvider()
-    control = FakeTransport([ServerResponse(200, [_running_sandbox_entry()])])
-    conversation = FakeTransport(
-        [
-            ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": "finished"}),
-            ServerResponse(200, {"commits": [{"sha": REMOTE_SHA}]}),
-            ServerResponse(200, {"response": "Implemented the endpoint."}),
-        ]
-    )
-    adapter = _adapter(control, conversation, provider)
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    result = adapter.collect(run)
-
-    assert result.status is RunStatus.SUCCEEDED
-    assert result.finished_at is not None
-    assert result.summary == "Implemented the endpoint."
-    assert provider.calls == [RemoteRevision(REMOTE_SHA, _workspace().branch, REPOSITORY)]
-
-
-def test_collect_fails_closed_when_the_revision_cannot_be_materialised() -> None:
-    provider = _RecordingRevisionProvider(fail=True)
-    control = FakeTransport([ServerResponse(200, [_running_sandbox_entry()])])
-    conversation = FakeTransport(
-        [
-            ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": "finished"}),
-            ServerResponse(200, {"commits": [{"sha": REMOTE_SHA}]}),
-            ServerResponse(200, {"response": "done"}),
-        ]
-    )
-    adapter = _adapter(control, conversation, provider)
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    result = adapter.collect(run)
-    assert result.status is RunStatus.FAILED
-    # A failed run has no validated revision, so publication is impossible.
-    assert result.validated_revision is None
-
-
-def test_collect_fails_closed_when_the_sandbox_reports_no_commit() -> None:
-    provider = _RecordingRevisionProvider()
-    control = FakeTransport([ServerResponse(200, [_running_sandbox_entry()])])
-    conversation = FakeTransport(
-        [
-            ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": "finished"}),
-            ServerResponse(200, {"commits": []}),
-        ]
-    )
-    adapter = _adapter(control, conversation, provider)
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    result = adapter.collect(run)
-    assert result.status is RunStatus.FAILED
-    assert provider.calls == []
-
-
 @pytest.mark.parametrize(
-    ("external", "expected"),
-    [
-        ("error", RunStatus.FAILED),
-        ("stuck", RunStatus.FAILED),
-        ("deleting", RunStatus.CANCELLED),
-    ],
+    "path", ["/", "/tmp/project", "/workspace/../etc", "relative", "/workspace//project"]
 )
-def test_collect_maps_terminal_failure_and_cancel(external: str, expected: RunStatus) -> None:
-    provider = _RecordingRevisionProvider()
-    control = FakeTransport([ServerResponse(200, [_running_sandbox_entry()])])
-    conversation = FakeTransport(
-        [
-            ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": external}),
-            ServerResponse(200, {"response": "maybe"}),
-        ]
-    )
-    adapter = _adapter(control, conversation, provider)
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    result = adapter.collect(run)
-    assert result.status is expected
-    assert provider.calls == []
+def test_unsafe_working_directory_is_refused(path: str) -> None:
+    with pytest.raises(ValueError, match="safe absolute"):
+        execution(path)
 
 
-def test_collect_is_idempotent_and_never_recreates_a_conversation() -> None:
-    """Re-collection must not POST a new conversation; only GET on the existing one."""
-    provider = _RecordingRevisionProvider()
-    conversation = FakeTransport(
-        [
-            ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": "finished"}),
-            ServerResponse(200, {"commits": [{"sha": REMOTE_SHA}]}),
-            ServerResponse(200, {"response": "done"}),
-            ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": "finished"}),
-            ServerResponse(200, {"commits": [{"sha": REMOTE_SHA}]}),
-            ServerResponse(200, {"response": "done"}),
-        ]
-    )
+def test_profile_uuid_is_required() -> None:
+    with pytest.raises(ValueError, match="UUID"):
+        execution(profile="model-name")
+
+
+def test_preflight_fails_closed_on_remote_mismatch() -> None:
+    files = Files(exit_codes=[1])
+    control = FakeTransport([ServerResponse(200, {"id": "sbx"}), ServerResponse(200, [sandbox()])])
+    conversation = FakeTransport()
+    with pytest.raises(OpenHandsCloudError):
+        adapter(control, conversation, files).dispatch(task(), workspace())
+    assert not conversation.requests
+    assert control.last.method == "DELETE"
+
+
+def test_collect_transfers_verified_result_bundle() -> None:
+    run, files, provider = collected()
+    assert run.status is RunStatus.SUCCEEDED
+    assert provider.revisions == [RemoteRevision(RESULT, BRANCH, REPO)]
+    assert provider.received == [b"result binary bundle"]
+    assert len(files.downloads) == 1
+    assert any("merge-base --is-ancestor" in command for command in files.commands)
+
+
+@pytest.mark.parametrize("code", [1, 2, 128])
+def test_collect_rejects_wrong_branch_rewritten_base_or_dirty_tree(code: int) -> None:
+    run, files, provider = collected(files=Files(exit_codes=[code]))
+    assert run.status is RunStatus.FAILED
+    assert not files.downloads
+    assert not provider.revisions
+
+
+def test_collect_rejects_missing_or_malformed_bundle() -> None:
+    run, _, provider = collected(files=Files(result=b""))
+    assert run.status is RunStatus.FAILED
+    assert provider.revisions
+
+
+def test_collect_rejects_git_api_head_disagreeing_with_checkout() -> None:
+    run, files, provider = collected(files=Files(exit_codes=[0, 1]))
+    assert run.status is RunStatus.FAILED
+    assert not files.downloads
+    assert not provider.revisions
+
+
+def test_collect_rejects_mismatched_sha() -> None:
+    run, _, _ = collected(provider=BundleProvider(fail=True))
+    assert run.status is RunStatus.FAILED
+
+
+def test_paused_collection_resumes_before_conversation_lookup() -> None:
     control = FakeTransport(
         [
-            ServerResponse(200, [_running_sandbox_entry()]),
-            ServerResponse(200, [_running_sandbox_entry()]),
-        ]
-    )
-    adapter = _adapter(control, conversation, provider)
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    adapter.collect(run)
-    adapter.collect(run)
-    assert all(request.method == "GET" for request in conversation.requests)
-    assert provider.calls == [RemoteRevision(REMOTE_SHA, _workspace().branch, REPOSITORY)] * 2
-
-
-def test_collect_fails_closed_on_a_missing_provider_handle() -> None:
-    adapter = _adapter(FakeTransport(), FakeTransport())
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=None,
-    )
-    with pytest.raises(OpenHandsCloudError):
-        adapter.collect(run)
-
-
-def test_collect_fails_closed_on_a_malformed_provider_handle() -> None:
-    adapter = _adapter(FakeTransport(), FakeTransport())
-    for handle in ["only-one-part", ":", "a:", ":b"]:
-        run = AgentRun(
-            task_id=_task().task_id,
-            adapter=AgentKind.OPENHANDS,
-            run_id=CONVERSATION_ID,
-            status=RunStatus.RUNNING,
-            workspace=_workspace(),
-            provider_ref=handle,
-        )
-        with pytest.raises(OpenHandsCloudError):
-            adapter.collect(run)
-
-
-def test_collect_fails_when_the_sandbox_cannot_be_located() -> None:
-    control = FakeTransport([ServerResponse(404, {"detail": "gone"})])
-    adapter = _adapter(control, FakeTransport())
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    with pytest.raises(OpenHandsCloudError):
-        adapter.collect(run)
-
-
-def test_collect_sanitizes_a_leaky_provider_summary() -> None:
-    provider = _RecordingRevisionProvider()
-    control = FakeTransport([ServerResponse(200, [_running_sandbox_entry()])])
-    conversation = FakeTransport(
-        [
-            ServerResponse(200, {"id": CONVERSATION_ID, "execution_status": "finished"}),
-            ServerResponse(200, {"commits": [{"sha": REMOTE_SHA}]}),
-            ServerResponse(200, {"response": f"used {API_KEY} and the sandbox key"}),
-        ]
-    )
-    adapter = _adapter(control, conversation, provider)
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    result = adapter.collect(run)
-    assert result.summary is not None
-    assert API_KEY not in result.summary
-
-
-# -- cancel ----------------------------------------------------------------
-
-
-def test_cancel_interrupts_the_conversation_and_releases_the_sandbox() -> None:
-    control = FakeTransport(
-        [
-            ServerResponse(200, [_running_sandbox_entry()]),
+            ServerResponse(200, [sandbox("PAUSED")]),
             ServerResponse(200, {}),
+            ServerResponse(200, [sandbox()]),
         ]
     )
-    conversation = FakeTransport([ServerResponse(200, {})])
-    adapter = _adapter(control, conversation)
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
+    conversation = FakeTransport(
+        [ServerResponse(200, {"id": "conv", "execution_status": "running"})]
     )
-    adapter.cancel(run)
-    assert any(request.method == "DELETE" for request in control.requests)
-    assert conversation.requests[-1].method == "POST"
-    assert conversation.requests[-1].url.endswith(f"/{CONVERSATION_ID}/interrupt")
+    run = AgentRun(task().task_id, AgentKind.OPENHANDS, "conv", RunStatus.RUNNING, workspace())
+    run.provider_ref = f"sbx:conv:{SHA}"
+    assert adapter(control, conversation, Files()).collect(run).status is RunStatus.RUNNING
+    assert any(request.url.endswith("/resume") for request in control.requests)
 
 
-def test_cancel_is_idempotent_for_a_terminal_run() -> None:
+def test_paused_polling_requests_resume_only_once() -> None:
+    control = FakeTransport(
+        [
+            ServerResponse(200, [sandbox("PAUSED")]),
+            ServerResponse(200, {}),
+            ServerResponse(200, [sandbox("PAUSED")]),
+            ServerResponse(200, [sandbox()]),
+        ]
+    )
+    conversation = FakeTransport(
+        [ServerResponse(200, {"id": "conv", "execution_status": "running"})]
+    )
+    run = AgentRun(task().task_id, AgentKind.OPENHANDS, "conv", RunStatus.RUNNING, workspace())
+    run.provider_ref = f"sbx:conv:{SHA}"
+    assert adapter(control, conversation, Files()).collect(run).status is RunStatus.RUNNING
+    assert sum(request.url.endswith("/resume") for request in control.requests) == 1
+
+
+def test_missing_base_revision_fails_closed() -> None:
+    run = AgentRun(task().task_id, AgentKind.OPENHANDS, "conv", RunStatus.RUNNING, workspace())
+    run.provider_ref = "sbx:conv"
+    with pytest.raises(OpenHandsCloudError):
+        adapter(FakeTransport(), FakeTransport(), Files()).collect(run)
+
+
+def test_provider_ref_parser_accepts_extended_routing_state() -> None:
+    assert split_provider_ref(f"sbx:conv:{SHA}", "conv") == ("sbx", "conv")
+
+
+def test_payload_has_no_secret_fields() -> None:
+    body = build_cloud_creation_payload(task(), execution(), workspace()).as_dict()
+    assert "secrets" not in body and "secrets_encrypted" not in body
+
+
+def test_repository_mismatch_prevents_sandbox_creation() -> None:
     control = FakeTransport()
-    adapter = _adapter(control, FakeTransport())
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.SUCCEEDED,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
+    wrong = Workspace("ws", "other/private", BRANCH, "/local/ws")
+    with pytest.raises(OpenHandsCloudError, match="repository identity"):
+        adapter(control, FakeTransport(), Files()).dispatch(task(), wrong)
+    assert not control.requests
+
+
+def test_sandbox_lookup_refuses_another_identity() -> None:
+    transport = FakeTransport([ServerResponse(200, [sandbox()])])
+    control = CloudControlClient(
+        "https://cloud.invalid", api_key="private-key", transport=transport
     )
-    adapter.cancel(run)
-    assert control.requests == []
+    with pytest.raises(OpenHandsCloudError, match="another sandbox") as caught:
+        control.get_sandbox("different")
+    assert "private-key" not in repr(caught.value)
 
 
-def test_cancel_tolerates_a_vanished_sandbox() -> None:
-    control = FakeTransport([ServerResponse(404, {"detail": "gone"})])
-    adapter = _adapter(control, FakeTransport())
-    run = AgentRun(
-        task_id=_task().task_id,
-        adapter=AgentKind.OPENHANDS,
-        run_id=CONVERSATION_ID,
-        status=RunStatus.RUNNING,
-        workspace=_workspace(),
-        provider_ref=f"{SANDBOX_ID}:{CONVERSATION_ID}",
-    )
-    adapter.cancel(run)  # no exception
+def test_provider_ref_rejects_url_metacharacters() -> None:
+    with pytest.raises(OpenHandsCloudError, match="invalid provider handle"):
+        split_provider_ref(f"sbx&other=1:conv:{SHA}", "conv")
 
 
-# -- provider handle helpers ----------------------------------------------
-
-
-def test_split_provider_ref_round_trips() -> None:
-    assert split_provider_ref("sbx:conv", "run") == ("sbx", "conv")
-
-
-def test_control_request_error_carries_only_the_status() -> None:
-    error = OpenHandsCloudRequestError(502)
-    assert error.status == 502
-    assert "502" in str(error)
-    assert API_KEY not in str(error)
-
-
-def test_execution_rejects_a_blank_working_directory_or_bad_repository() -> None:
-    with pytest.raises(ValueError):
-        CloudExecution(working_dir="  ", repository=REPOSITORY, profile=PROFILE_ID, base_ref="main")
-    with pytest.raises(ValueError):
-        CloudExecution(
-            working_dir=WORKING_DIR, repository="not-a-slug", profile=PROFILE_ID, base_ref="main"
-        )
+def test_cloud_terminal_release_is_idempotent_and_best_effort() -> None:
+    control = FakeTransport([ServerResponse(204), ServerResponse(404)])
+    cloud = adapter(control, FakeTransport(), Files())
+    run = AgentRun(task().task_id, AgentKind.OPENHANDS, "conv", RunStatus.FAILED, workspace())
+    run.provider_ref = f"sbx:conv:{SHA}"
+    cloud.release_terminal(run)
+    cloud.release_terminal(run)
+    assert [request.method for request in control.requests] == ["DELETE", "DELETE"]

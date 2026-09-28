@@ -819,3 +819,30 @@ def test_reconcile_does_not_invent_a_revision_from_stale_gates(
     assert result.run.validated_revision is None
     # Lifecycle is still reconciled from the terminal run.
     assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
+
+
+def test_terminal_cleanup_follows_persistence_and_task_reconciliation(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    task = _running_task(tasks)
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+
+    class ReleasingAdapter(FakeAgentAdapter):
+        def __init__(self) -> None:
+            super().__init__(collect_status=RunStatus.FAILED)
+            self.releases = 0
+
+        def release_terminal(self, terminal: AgentRun) -> None:
+            stored = _runs(db_path).get_run(terminal.run_id)
+            assert stored is not None and stored.status is RunStatus.FAILED
+            assert tasks.get(task.task_id).status is TaskStatus.FAILED
+            self.releases += 1
+            raise RuntimeError("best effort")
+
+    adapter = ReleasingAdapter()
+    service = _service(db_path)
+    assert service.refresh(run.run_id, adapter).task_status is TaskStatus.FAILED
+    assert service.refresh(run.run_id, adapter).task_status is TaskStatus.FAILED
+    assert adapter.releases == 2
+    assert adapter.collected == 1

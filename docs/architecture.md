@@ -143,7 +143,7 @@ src/factory/
 │   │   ├── git.py           # GitWorktreeWorkspaceProvisioner (worktree per run)
 │   │   ├── shared_policy.py # cross-UID permission policy + OpenHands hook CLI
 │   │   ├── cloud_provisioner.py # CloudWorkspaceProvisioner (fresh validation worktree)
-│   │   ├── cloud_revision.py    # GitCloudRevisionProvider (exact-revision fetch)
+│   │   ├── cloud_bundle.py      # GitCloudBundleProvider (binary local transfer)
 │   │   └── git_publish.py   # GitWorkspacePublisher (commit + secure push)
 │   ├── github/
 │   │   ├── client.py        # read-only REST client, injectable transport
@@ -939,29 +939,24 @@ The integration uses only supported, versioned contracts (OpenHands SDK 1.49.6,
   contract as local mode (`POST /api/conversations`) and requires an exact
   Agent Profile UUID in `agent_profile_id`. Direct model selection is rejected
   rather than falsely advertised as enforced.
-* **Repository bootstrap** — the sandbox receives a sandbox-scoped
-  `LookupSecret` for the SaaS `github_token`. The bounded instruction clones
-  the exact configured repository into the configured working directory when
-  needed, starts from the configured base ref, and uses a temporary
-  `GIT_ASKPASS` helper so the token never appears in a URL or argv. Only the
-  per-run factory branch may be pushed.
-* **Recovery** — a `PAUSED` sandbox is resumed through the supported resume
-  endpoint and polling continues until `RUNNING`.
-* **Revision retrieval** — the factory never trusts the runtime's word. On a
-  terminal success it reads the head commit from the sandbox's own git contract
-  (`GET /api/git/commits?limit=1`) and hands the resulting `RemoteRevision` to
-  `GitCloudRevisionProvider`, which re-fetches that exact commit from the remote
-  into the run's local validation workspace. For private GitHub repositories the
-  read token is supplied only through a temporary `GIT_ASKPASS` environment;
-  the source checkout's `origin` is validated against the expected repository
-  and is never rewritten from a worktree.
+* **Secretless workspace transfer** — the local Cloud provisioner creates the
+  isolated branch at the chosen base ref. The adapter bundles that exact local
+  branch, uploads it through the supported binary file API, and checks the
+  sandbox checkout against the immutable base SHA before starting the conversation.
+  No GitHub credential enters the Cloud conversation or sandbox Git workflow.
+* **Recovery** — paused sandboxes are resumed before collection. Terminal
+  creation responses remain pending until the normal collect path verifies the
+  result. Sandbox release follows durable terminal run and task reconciliation.
+* **Revision retrieval** — factory-controlled bash verifies the branch, clean
+  worktree, and base ancestry. The supported Git API supplies HEAD. The result
+  branch is bundled, downloaded, checked under a temporary local ref, and
+  applied as the exact tree in the local validation worktree. The source remote is untouched.
 
 ### Fail-closed validation invariant
 
 Cloud work **cannot bypass** the revision binding + quality gate + publication
 path. `collect` only returns `SUCCEEDED` after the exact cloud revision has been
-materialised locally; if the revision cannot be retrieved, is unsafe (unpushed
-branch, moved branch, wrong repository), or the workspace is missing, the run is
+materialised locally; if the revision cannot be retrieved, is unsafe (dirty branch, rewritten base, malformed bundle, mismatched SHA), or the workspace is missing, the run is
 returned as `FAILED` and no PR is ever opened. Publication still requires the
 locally bound `AgentRun.validated_revision`, so a Cloud run with no independently
 validated revision fails the same way any other unvalidated run does.
@@ -969,7 +964,7 @@ validated revision fails the same way any other unvalidated run does.
 ### Routing, idempotency and recovery
 
 The Cloud conversation id *is* `AgentRun.run_id`. The sandbox id and conversation
-id are persisted together as `AgentRun.provider_ref` (`"<sandbox>:<conversation>"`),
+id are persisted together as `AgentRun.provider_ref` (`"<sandbox>:<conversation>:<base-sha>"`),
 a nullable column added by an idempotent migration. Re-collection re-derives both
 from that handle and never creates a second sandbox or conversation; a retry is a
 new `AgentRun` on a new branch, exactly as in local mode.

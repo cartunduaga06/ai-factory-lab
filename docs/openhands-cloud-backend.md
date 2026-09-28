@@ -6,28 +6,28 @@ anything here.
 
 ## What Cloud changes, and what it does not
 
-A Cloud run executes the agent on an OpenHands Cloud sandbox instead of the
-self-hosted Agent Server. Everything after execution is unchanged:
+A Cloud run executes in an OpenHands sandbox. The factory provisions an isolated
+local worktree at the configured base ref, records its immutable HEAD, creates a
+Git bundle locally, and uploads that binary through the supported Agent Server
+file API. Factory-controlled bash imports the bundle into a safe sandbox path and
+checks the exact branch and base SHA before conversation creation. The conversation
+has no GitHub credential and the agent does no network Git operation.
 
-```
-dispatch ──► Cloud sandbox conversation ──► collect
-                                             │  terminal success only
-                                             ▼
-                        read head commit from the sandbox git contract
-                                             ▼
-                        fetch that exact commit into a fresh LOCAL worktree
-                                             ▼
-                        quality gates run locally (VALIDATING)
-                                             ▼
-                        validated revision binding (Phase 4)
-                                             ▼
-                        publication (Phase 5) — PR, then WAITING_HUMAN
-```
+On terminal success, the factory verifies the sandbox branch, base ancestry, and
+clean worktree, reads HEAD through the supported Git API, creates a result bundle
+in the sandbox, and downloads it through the binary file API. It verifies the
+bundle branch and SHA under a temporary local ref, then applies its exact tree
+to the run's local worktree while retaining the base HEAD. Local gates bind
+`validated_revision`; only the existing local
+publisher may push and open a PR. The task stops at `WAITING_HUMAN`.
 
-The factory **never publishes a Cloud result on the sandbox's word**. If the
-exact revision cannot be retrieved and re-fetched locally, the run is failed
-closed and no pull request is opened. The factory always stops at
-`WAITING_HUMAN`; it never merges.
+Any uncertain identity, bundle, branch, ancestry, or transfer fails closed. After
+terminal state and task reconciliation are durable, sandbox release is best-effort
+and idempotent. A paused sandbox is resumed before collection.
+
+**Follow-up before merge:** sandbox creation still precedes durable run persistence.
+A process crash in that small window can orphan a sandbox; closing it requires a
+larger transactional lifecycle design.
 
 ## Configuration
 
@@ -42,7 +42,7 @@ until Cloud is selected, and none is logged or committed (see `.env.example`):
 | `OPENHANDS_CLOUD_API_URL` | Cloud API base URL. Default `https://app.all-hands.dev`. |
 | `OPENHANDS_CLOUD_WORKING_DIR` | Exact sandbox directory used for the repository checkout. |
 | `OPENHANDS_CLOUD_BASE_REF` | Optional commit-ish the isolated branch starts from; otherwise workspace/default branch config is used. |
-| `OPENHANDS_CLOUD_PROFILE` | Exact Agent Profile UUID. Required; choose the desired model inside this Cloud profile. |
+| `OPENHANDS_CLOUD_PROFILE` | Exact Agent Profile UUID resolvable by the new sandbox's Agent Server. Required. |
 | `OPENHANDS_CLOUD_MODEL` | Direct model selector is unsupported on this Agent Server path; if set, startup fails closed. |
 
 Credentials come from the environment or a secret store. The factory never
@@ -50,9 +50,11 @@ handles an LLM key when an agent profile is used: the sandbox resolves it.
 
 ### Profile selection is explicit; there is no silent paid-model fallback
 
-The Cloud backend requires an exact **Agent Profile UUID**. Configure the desired
-model in that profile in your OpenHands Cloud account, then set
-`OPENHANDS_CLOUD_PROFILE` to that UUID. The Factory does not infer a profile,
+The Cloud backend requires an exact **Agent Profile UUID** that the new sandbox's
+Agent Server can resolve. Configure the desired model in that server-side Agent
+Profile, then set `OPENHANDS_CLOUD_PROFILE` to its UUID. A SaaS LLM profile name
+is not an Agent Profile UUID; this adapter does not retrieve or translate SaaS
+LLM profile settings. The Factory does not infer a profile,
 does not silently choose a default model, and does not automatically fall back
 to another model.
 
@@ -72,7 +74,7 @@ operator from believing a specific/free model was enforced when it was not.
   fails closed rather than silently selecting something else.
 - A Cloud dispatch/collect failure → a sanitized error; the run follows the
   existing failure path. There is no local↔cloud fallback.
-- A terminal success whose revision cannot be retrieved or re-fetched → the run
+- A terminal success whose revision cannot be retrieved or imported → the run
   is `FAILED`; nothing is published.
 
 ### Redaction check
@@ -85,12 +87,9 @@ The Cloud API key must appear as `"***"` (or `null` when unset), and the bearer
 key must never appear in any log line, error message or URL.
 
 
-For private repositories, local revision retrieval uses the Factory's read-scoped
-`GITHUB_TOKEN` through a temporary `GIT_ASKPASS` helper. The token is passed
-only in the subprocess environment; it is never placed in the Git remote URL,
-argv, persisted Git config, error text or logs. The source checkout's `origin`
-is validated against the expected repository and is never rewritten by the Cloud
-workspace provisioner.
+Private target repositories need no GitHub credential in the Cloud sandbox.
+The local provisioner must already have the selected base revision. The local
+publisher alone uses its existing write credential after successful local gates.
 
 ## Manual smoke test (no paid-model fallback)
 
@@ -127,13 +126,11 @@ switching the production/default factory to Cloud.
    profile UUID, keep the quality gates configured, and dispatch a single task
    against the matching target repository on an isolated factory branch.
 
-   - The factory creates one sandbox and one conversation; a sandbox-scoped
-     `github_token` is exposed to the conversation through a `LookupSecret`.
-   - If the repository is not already present, the instruction bootstraps the
-     exact configured repository with a temporary `GIT_ASKPASS` helper and never
-     embeds a token in a remote URL or command argument.
-   - The run starts from the configured base ref and never pushes to
-     `main`/`master`; only its isolated factory branch may be pushed.
+   - The factory uploads a bundle from the local isolated worktree and verifies
+     the exact base SHA and branch before the conversation starts.
+   - The conversation receives no GitHub token or secret.
+   - On success the factory downloads a result bundle, verifies its branch and
+     SHA locally, then runs local gates. The agent never pushes.
    - Watch `--show-config` and the logs: no credential may appear.
    - On success, confirm the run reaches `VALIDATING`, gates run **locally**, and
      the run stops at `WAITING_HUMAN` after a PR — or fails closed with `FAILED`

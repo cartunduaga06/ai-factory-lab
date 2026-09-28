@@ -24,7 +24,14 @@ from factory.domain.errors import (
     TaskStateChangedError,
     WorkspaceProvisioningError,
 )
-from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, TaskSource, new_workspace
+from factory.domain.models import (
+    AgentAdapter,
+    AgentRun,
+    FactoryTask,
+    TaskSource,
+    Workspace,
+    new_workspace,
+)
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
 from factory.orchestration import DispatchService
 from factory.orchestration.retry import RetryService
@@ -634,3 +641,30 @@ def test_legacy_claim_rechecks_exact_status_before_transition(db_path: str) -> N
         (TaskStatus.CLAIMED, TaskStatus.CANCELLED)
     ]
     assert runs.list_runs(task.task_id) == [failed]
+
+
+def test_provider_ref_survives_dispatch_persistence_and_collect(
+    db_path: str, tmp_path: Path
+) -> None:
+    """Cloud routing state survives the reconstruction and SQLite boundary."""
+    from factory.orchestration import RunTrackingService
+
+    class RoutedAdapter(FakeAgentAdapter):
+        def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
+            produced = super().dispatch(task, workspace)
+            produced.provider_ref = "sandbox:conversation:" + "a" * 40
+            return produced
+
+        def collect(self, run: AgentRun) -> AgentRun:
+            assert run.provider_ref == "sandbox:conversation:" + "a" * 40
+            return super().collect(run)
+
+    tasks = _tasks(db_path)
+    task = _ready_task(tasks)
+    adapter = RoutedAdapter()
+    run = _service(db_path, tmp_path).dispatch(task.task_id, adapter)
+    assert run.provider_ref == "sandbox:conversation:" + "a" * 40
+    stored = _runs(db_path).get_run(run.run_id)
+    assert stored is not None and stored.provider_ref == run.provider_ref
+    RunTrackingService(tasks, _runs(db_path)).refresh(run.run_id, adapter)
+    assert adapter.collected == 1

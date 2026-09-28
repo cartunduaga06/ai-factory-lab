@@ -194,6 +194,8 @@ class DispatchService:
             started_at=produced.started_at or started_at,
             finished_at=produced.finished_at,
             gates=produced.gates,
+            provider_ref=produced.provider_ref,
+            validated_revision=produced.validated_revision,
         )
         return self._persist_run(run)
 
