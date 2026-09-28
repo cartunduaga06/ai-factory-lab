@@ -60,6 +60,25 @@ The output masks all credentials (`"***"`). Never commit `.env`.
 All four checks (tests, lint, format, types) must pass before a change is
 proposed.
 
+### Cache-neutral gates for cross-UID shared workspaces
+
+When the Factory validates a workspace produced by OpenHands in a different UID,
+OpenHands leaves ignored/private caches (`.pytest_cache/`, `.ruff_cache/`,
+`.mypy_cache/`) owner-only, so host-side gates must not need to write into them.
+The self-development validation profile uses cache-neutral invocations:
+
+```bash
+pytest -p no:cacheprovider
+ruff check --no-cache .
+ruff format --check --no-cache .
+mypy --cache-dir=/dev/null
+```
+
+These keep the private ignored cache contents opaque and avoid a gate that would
+require group write to an owner-only directory. The permission policy itself is
+in `integrations/workspace/shared_policy.py`; see
+[`openhands-shared-workspace-runtime.md`](openhands-shared-workspace-runtime.md).
+
 ## Project layout
 
 ```

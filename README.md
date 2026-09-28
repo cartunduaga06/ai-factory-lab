@@ -218,6 +218,16 @@ FACTORY_SOURCE_CHECKOUT=~/projects/finanza-ia
 FACTORY_QUALITY_GATES=[{"name":"tests","argv":["pytest"],"required":true}]
 ```
 
+When the Factory and OpenHands run as different UIDs, a shared workspace must be
+group-accessible while ignored/private files stay owner-only. That policy lives
+in one module (`integrations/workspace/shared_policy.py`) and is applied from
+both sides: the Factory-side provisioner repair, and a synchronous OpenHands
+command hook (`PostToolUse` on `file_editor`, plus a blocking `Stop`) that
+normalizes the workspace owner-side — because the editor creates new files as
+`0600` regardless of umask. Set `OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND` to the
+normalizer command; see
+[the shared-workspace runtime runbook](docs/openhands-shared-workspace-runtime.md).
+
 No secrets are required for this phase's tests or smoke run: they use disposable
 local repositories.
 

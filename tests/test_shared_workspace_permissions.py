@@ -62,6 +62,13 @@ def test_compliant_foreign_node_skips_chmod(
     else:
         node.write_text("test-only")
     node.chmod(mode)
+    # Record the ignored subtree's pre-repair modes so the invariant asserted
+    # below is "unchanged", not a hard-coded mode that depends on the ambient
+    # umask (0775 and 0755 are both valid pre-repair modes).
+    nested_before = nested_secret_before = None
+    if name == "private":
+        nested_before = stat.S_IMODE((node / "nested").stat().st_mode)
+        nested_secret_before = stat.S_IMODE((node / "nested" / "secret").stat().st_mode)
     provisioner = GitWorktreeWorkspaceProvisioner(str(source))
     provisioner.prepare(task, run.workspace)
     attempted = _deny_chmod(monkeypatch, [node])
@@ -71,9 +78,10 @@ def test_compliant_foreign_node_skips_chmod(
     assert stat.S_IMODE(node.stat().st_mode) == mode
     if name == "private":
         # Ignored directories are opaque; their children are deliberately not
-        # inspected or normalized by the factory.
-        assert stat.S_IMODE((node / "nested").stat().st_mode) == 0o755
-        assert stat.S_IMODE((node / "nested" / "secret").stat().st_mode) == 0o644
+        # inspected or normalized by the factory, so the nested modes are exactly
+        # what they were before repair — whatever the umask produced.
+        assert stat.S_IMODE((node / "nested").stat().st_mode) == nested_before
+        assert stat.S_IMODE((node / "nested" / "secret").stat().st_mode) == nested_secret_before
 
 
 @pytest.mark.parametrize("directory", [False, True])

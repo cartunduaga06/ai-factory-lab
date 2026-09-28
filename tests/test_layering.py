@@ -142,10 +142,21 @@ def test_orchestration_imports_no_process_or_git_modules() -> None:
 def test_workspace_and_gate_integrations_live_outside_core_layers() -> None:
     # The concrete implementations exist, and exist only under integrations.
     assert (SRC / "integrations" / "workspace" / "git.py").exists()
+    assert (SRC / "integrations" / "workspace" / "shared_policy.py").exists()
     assert (SRC / "integrations" / "gates" / "local.py").exists()
     for layer in ("domain", "orchestration"):
         violations = _violations(layer, "factory.integrations.workspace")
         violations += _violations(layer, "factory.integrations.gates")
+        assert violations == []
+
+
+def test_shared_workspace_policy_has_one_home() -> None:
+    # The cross-UID permission policy is a single module in integrations; neither
+    # the domain nor orchestration may re-implement or import it.
+    policy = SRC / "integrations" / "workspace" / "shared_policy.py"
+    assert policy.exists()
+    for layer in ("domain", "orchestration"):
+        violations = _violations(layer, "factory.integrations.workspace.shared_policy")
         assert violations == []
 
 

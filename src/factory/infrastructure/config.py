@@ -240,6 +240,12 @@ class FactoryConfig:
     github_git_host: str = DEFAULT_GITHUB_GIT_HOST
     run_poll_interval: float = DEFAULT_RUN_POLL_INTERVAL
     run_timeout: float = DEFAULT_RUN_TIMEOUT
+    # Command the OpenHands conversation runs as a shared-workspace hook. When
+    # set, it is passed as ``hook_config`` on conversation creation: it
+    # normalizes owner-side after ``file_editor`` writes and blocks completion
+    # (exit 2) when the shared permission policy cannot be enforced. It is a
+    # command local to the OpenHands container, not a factory process argument.
+    openhands_shared_workspace_hook_command: str | None = None
 
     @property
     def database(self) -> DatabaseConfig:
@@ -288,6 +294,9 @@ class FactoryConfig:
                 source.get("FACTORY_RUN_POLL_INTERVAL"), DEFAULT_RUN_POLL_INTERVAL
             ),
             run_timeout=_duration(source.get("FACTORY_RUN_TIMEOUT"), DEFAULT_RUN_TIMEOUT),
+            openhands_shared_workspace_hook_command=_clean(
+                source.get("OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND")
+            ),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -323,6 +332,9 @@ class FactoryConfig:
             "github_git_host": self.github_git_host,
             "run_poll_interval": self.run_poll_interval,
             "run_timeout": self.run_timeout,
+            "openhands_shared_workspace_hook_command": (
+                self.openhands_shared_workspace_hook_command
+            ),
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
 

@@ -21,6 +21,9 @@ dev = [
 
 [project.scripts]
 factory = "factory.__main__:main"
+# Standalone entry point for the OpenHands PostToolUse/Stop hooks. It reads the
+# hook event on stdin and exits 2 when the workspace cannot be normalized.
+factory-hook = "factory.integrations.workspace.shared_policy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/factory"]

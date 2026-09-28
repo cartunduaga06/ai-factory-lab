@@ -21,6 +21,7 @@ from factory.integrations.openhands.client import (
     UrllibTransport,
 )
 from factory.integrations.openhands.execution import (
+    DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_MAX_ITERATIONS,
     OpenHandsExecution,
     build_instruction,
@@ -32,6 +33,7 @@ from factory.integrations.openhands.status import (
 )
 
 __all__ = [
+    "DEFAULT_HOOK_TIMEOUT_SECONDS",
     "DEFAULT_MAX_ITERATIONS",
     "OpenHandsAdapter",
     "OpenHandsClient",

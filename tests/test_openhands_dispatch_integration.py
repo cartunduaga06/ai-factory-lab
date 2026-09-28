@@ -82,3 +82,36 @@ def test_dispatch_then_collect_through_the_real_adapter(tmp_path: Path) -> None:
     assert collected.status is RunStatus.SUCCEEDED
     assert collected.finished_at is not None
     assert collected.summary == "Workspace inspected; no files changed."
+
+
+def test_dispatch_carries_the_shared_workspace_hook_config(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "factory.db")
+    tasks = SqliteTaskRepository(db_path)
+    tasks.initialize()
+    runs = SqliteRunRepository(db_path)
+    runs.initialize()
+
+    transport = FakeTransport(
+        [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
+    )
+    adapter = OpenHandsAdapter(
+        OpenHandsClient(BASE_URL, transport=transport),
+        OpenHandsExecution(
+            agent_profile_id="profile-1",
+            shared_workspace_hook_command=(
+                "python -m factory.integrations.workspace.shared_policy"
+            ),
+        ),
+    )
+    task = _ready_task(tasks)
+    DispatchService(
+        tasks, runs, provisioner=FakeWorkspaceProvisioner(), workspace_root=str(tmp_path / "ws")
+    ).dispatch(task.task_id, adapter)
+
+    request_body = json.loads(transport.requests[0].body.decode())
+    hook_config = request_body["hook_config"]
+    assert hook_config["PostToolUse"][0]["matcher"] == "file_editor"
+    assert hook_config["PostToolUse"][0]["hooks"][0]["async"] is False
+    assert hook_config["Stop"][0]["hooks"][0]["async"] is False
+    # The factory still sends no LLM credential of its own.
+    assert "api_key" not in json.dumps(request_body)

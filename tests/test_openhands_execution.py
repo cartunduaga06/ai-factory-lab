@@ -146,3 +146,74 @@ def test_conversation_payload_returns_a_copy() -> None:
     copied = payload.as_dict()
     copied["b"] = 2
     assert payload.as_dict() == {"a": 1}
+
+
+# -- shared-workspace hook configuration -----------------------------------
+
+HOOK_COMMAND = "python -m factory.integrations.workspace.shared_policy"
+
+
+def test_no_hook_config_by_default() -> None:
+    execution = OpenHandsExecution(agent_profile_id="p")
+    assert execution.hook_payload() is None
+    payload = build_creation_payload(_task(), WORKSPACE_PATH, execution).as_dict()
+    assert "hook_config" not in payload
+
+
+def test_hook_config_targets_file_editor_and_stop_synchronously() -> None:
+    execution = OpenHandsExecution(agent_profile_id="p", shared_workspace_hook_command=HOOK_COMMAND)
+    hook_config = execution.hook_payload()
+    assert hook_config is not None
+    post = hook_config["PostToolUse"]
+    stop = hook_config["Stop"]
+    assert isinstance(post, list) and isinstance(stop, list)
+    assert post[0]["matcher"] == "file_editor"  # type: ignore[index]
+    post_hook = post[0]["hooks"][0]  # type: ignore[index]
+    stop_hook = stop[0]["hooks"][0]  # type: ignore[index]
+    for hook in (post_hook, stop_hook):
+        assert hook["type"] == "command"
+        assert hook["command"] == HOOK_COMMAND
+        # Synchronous: an async hook cannot normalize before the next step, and
+        # an async Stop hook cannot block completion.
+        assert hook["async"] is False
+        assert hook["timeout"] >= 1
+
+
+def test_hook_config_is_attached_to_the_creation_payload() -> None:
+    payload = build_creation_payload(
+        _task(),
+        WORKSPACE_PATH,
+        OpenHandsExecution(agent_profile_id="p", shared_workspace_hook_command=HOOK_COMMAND),
+    ).as_dict()
+    assert payload["hook_config"]["PostToolUse"][0]["matcher"] == "file_editor"  # type: ignore[index]
+
+
+def test_blank_hook_command_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        OpenHandsExecution(agent_profile_id="p", shared_workspace_hook_command="  ")
+
+
+def test_non_positive_hook_timeout_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        OpenHandsExecution(
+            agent_profile_id="p",
+            shared_workspace_hook_command=HOOK_COMMAND,
+            hook_timeout=0,
+        )
+
+
+def test_hook_payload_matches_the_installed_hook_config_contract() -> None:
+    # Validate the emitted payload against the real HookConfig when the SDK is
+    # importable; skipped otherwise so the suite has no hard SDK dependency.
+    hooks = pytest.importorskip("openhands.sdk.hooks.config")
+    config = hooks.HookConfig.model_validate(
+        OpenHandsExecution(
+            agent_profile_id="p", shared_workspace_hook_command=HOOK_COMMAND
+        ).hook_payload()
+    )
+    post = config.post_tool_use[0]
+    assert post.matches("file_editor")
+    assert [h.command for h in post.hooks] == [HOOK_COMMAND]
+    assert [h.command for m in config.stop for h in m.hooks] == [HOOK_COMMAND]
+    # Only exit code 2 blocks; the hook module returns exactly 2 on failure.
+    assert post.hooks[0].async_ is False
