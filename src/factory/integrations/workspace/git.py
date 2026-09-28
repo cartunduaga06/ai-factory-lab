@@ -32,13 +32,16 @@ Safety properties, all enforced below:
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 from pathlib import Path
 
 from factory.domain.errors import WorkspaceProvisioningError
 from factory.domain.models import FactoryTask, Workspace
 from factory.domain.ports import WorkspaceProvisioner
+from factory.integrations.workspace.shared_policy import (
+    SharedWorkspacePolicyError,
+    normalize_workspace_path,
+)
 
 #: Default per-command timeout. Git worktree operations are local and cheap.
 DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -113,106 +116,21 @@ class GitWorktreeWorkspaceProvisioner(WorkspaceProvisioner):
     def _normalize_permissions(self, target: Path, workspace_id: str) -> None:
         """Share the checkout with its group without following links or sharing secrets.
 
-        Ignored files can hold local credentials: restrict them to their owner.
-        Worktree Git metadata outside this directory is never traversed.
+        The modes and the ignored-path classification come from the shared
+        :mod:`factory.integrations.workspace.shared_policy` module, so the
+        Factory-side repair and the OpenHands owner-side normalizer apply one
+        policy. Ignored files can hold local credentials: they are restricted to
+        their owner. Worktree Git metadata outside this directory is never
+        traversed.
         """
-        ignored_output = self._run_capture(
-            ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
-            cwd=target,
-            workspace_id=workspace_id,
-        )
-        if ignored_output is None:
-            raise WorkspaceProvisioningError(workspace_id)
-        ignored = set(ignored_output.split("\0"))
-        ignored_directory_output = self._run_capture(
-            ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
-            cwd=target,
-            workspace_id=workspace_id,
-        )
-        if ignored_directory_output is None:
-            raise WorkspaceProvisioningError(workspace_id)
-        ignored_directories = tuple(
-            name for name in ignored_directory_output.split("\0") if name.endswith("/")
-        )
-
-        def fail_walk(error: OSError) -> None:
-            raise error
-
         try:
-            for directory, dirnames, files, directory_fd in os.fwalk(
-                target, follow_symlinks=False, onerror=fail_walk
-            ):
-                relative_directory = Path(directory).relative_to(target).as_posix() + "/"
-                directory_mode = (
-                    0o700 if relative_directory.startswith(ignored_directories) else 0o2770
-                )
-                if stat.S_IMODE(os.fstat(directory_fd).st_mode) != directory_mode:
-                    os.fchmod(directory_fd, directory_mode)
-                for name in list(dirnames):
-                    relative = (Path(directory) / name).relative_to(target).as_posix() + "/"
-                    if relative not in ignored_directories:
-                        continue
-                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                        raise WorkspaceProvisioningError(workspace_id)
-                    if stat.S_IMODE(info.st_mode) != 0o700:
-                        child_fd = os.open(
-                            name,
-                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                            dir_fd=directory_fd,
-                        )
-                        try:
-                            opened = os.fstat(child_fd)
-                            if (
-                                not stat.S_ISDIR(opened.st_mode)
-                                or stat.S_ISLNK(opened.st_mode)
-                                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
-                            ):
-                                raise WorkspaceProvisioningError(workspace_id)
-                            os.fchmod(child_fd, 0o700)
-                        finally:
-                            os.close(child_fd)
-                    # A compliant ignored directory is intentionally opaque:
-                    # fwalk must never try to open it or inspect its children.
-                    dirnames.remove(name)
-                for name in files:
-                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                    if stat.S_ISLNK(info.st_mode):
-                        continue
-                    # Stat first: a compliant foreign-owned ignored secret may
-                    # be owner-readable only, so even opening it is unnecessary.
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                        raise WorkspaceProvisioningError(workspace_id)
-                    relative = (Path(directory) / name).relative_to(target).as_posix()
-                    executable = bool(info.st_mode & stat.S_IXUSR)
-                    mode = (
-                        (0o700 if executable else 0o600)
-                        if relative in ignored
-                        else (0o770 if executable else 0o660)
-                    )
-                    if stat.S_IMODE(info.st_mode) == mode:
-                        continue
-                    fd = os.open(
-                        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd
-                    )
-                    try:
-                        opened = os.fstat(fd)
-                        # Refuse replacements and hardlinks before chmod can
-                        # affect anything outside the isolated checkout.
-                        if (
-                            not stat.S_ISREG(opened.st_mode)
-                            or opened.st_nlink != 1
-                            or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
-                        ):
-                            raise WorkspaceProvisioningError(workspace_id)
-                        if stat.S_IMODE(opened.st_mode) != mode:
-                            os.fchmod(fd, mode)
-                    finally:
-                        os.close(fd)
-        except OSError:
+            normalize_workspace_path(target, timeout=self._timeout)
+        except SharedWorkspacePolicyError:
             pass
         else:
             return
+        # Raised outside the ``except`` block so the policy error is not retained
+        # as ``__context__``: a chained error would be rendered in a traceback.
         raise WorkspaceProvisioningError(workspace_id)
 
     def _require_source_checkout(self, workspace_id: str) -> None:

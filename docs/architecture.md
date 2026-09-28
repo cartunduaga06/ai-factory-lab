@@ -141,6 +141,7 @@ src/factory/
 │   │   └── local.py         # LocalQualityGateRunner (argv, no shell, bounded)
 │   ├── workspace/
 │   │   ├── git.py           # GitWorktreeWorkspaceProvisioner (worktree per run)
+│   │   ├── shared_policy.py # cross-UID permission policy + OpenHands hook CLI
 │   │   └── git_publish.py   # GitWorkspacePublisher (commit + secure push)
 │   ├── github/
 │   │   ├── client.py        # read-only REST client, injectable transport
@@ -697,7 +698,9 @@ Permission normalization skips chmod when the current mode already matches;
 compliant foreign-owned files therefore require no ownership privileges.
 Ignored directories are owner-only (`0700`). See the read-only
 [OpenHands audit](openhands-shared-workspace-audit.md) for why umask alone cannot
-fix the editor's new-file `0600` atomic writes.
+fix the editor's new-file `0600` atomic writes, and
+[the shared-workspace runtime runbook](openhands-shared-workspace-runtime.md) for
+the owner-side hook that repairs them.
 
 Workspace permissions are independent of the parent process umask: directories
 are `2770` (setgid, owner/group rwx, no others), regular checkout files are `0660`,
@@ -707,6 +710,16 @@ set to `2770`. No group ownership or infrastructure is changed. Symlinks are not
 followed, hardlinks/special files are refused, and external Git metadata is never
 traversed. Ignored files retain owner-only access (`0600`/`0700`) because they can
 contain local secrets. No process-global umask change is needed.
+
+The policy itself lives in **one** module,
+`integrations/workspace/shared_policy.py`. Both the Factory-side provisioner
+repair and the OpenHands-side owner normalizer call it, so the two cannot drift
+into incompatible rules. The OpenHands side is a synchronous command hook
+(`PostToolUse` on `file_editor`, plus a blocking `Stop`) attached to each
+conversation's `hook_config`; it normalizes the isolated workspace as its owner
+(UID 10001) and exits `2` when it cannot enforce the policy, so an unsafe or
+unrepairable workspace cannot be reported as a successful run. The Factory-side
+post-agent repair remains as defense in depth.
 
 ### Quality gate semantics
 

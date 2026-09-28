@@ -311,3 +311,27 @@ def test_github_git_host_placeholder_is_treated_as_unset() -> None:
 
     config = FactoryConfig.from_env({"FACTORY_GITHUB_GIT_HOST": "<your-git-host>"})
     assert config.github_git_host == DEFAULT_GITHUB_GIT_HOST
+
+
+# -- shared-workspace hook configuration -----------------------------------
+
+
+def test_shared_workspace_hook_command_is_unset_by_default() -> None:
+    config = FactoryConfig.from_env({})
+    assert config.openhands_shared_workspace_hook_command is None
+    assert config.redacted()["openhands_shared_workspace_hook_command"] is None
+
+
+def test_shared_workspace_hook_command_loads_and_is_configuration_not_a_secret() -> None:
+    command = "python -m factory.integrations.workspace.shared_policy"
+    config = FactoryConfig.from_env({"OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND": command})
+    assert config.openhands_shared_workspace_hook_command == command
+    # A command is configuration; it is shown (unmasked) in the log-safe view.
+    assert config.redacted()["openhands_shared_workspace_hook_command"] == command
+
+
+def test_shared_workspace_hook_placeholder_is_treated_as_unset() -> None:
+    config = FactoryConfig.from_env(
+        {"OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND": "<your-hook-command>"}
+    )
+    assert config.openhands_shared_workspace_hook_command is None

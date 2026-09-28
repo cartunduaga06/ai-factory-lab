@@ -209,7 +209,10 @@ def _run_runtime(config: FactoryConfig) -> int:
                 config.openhands.base_url,
                 session_api_key=config.openhands.session_api_key,
             ),
-            OpenHandsExecution(agent_profile_id=config.openhands.agent_profile_id),
+            OpenHandsExecution(
+                agent_profile_id=config.openhands.agent_profile_id,
+                shared_workspace_hook_command=(config.openhands_shared_workspace_hook_command),
+            ),
             workspace_paths=mapper,
         )
         write_client = GitHubWriteClient(config.github_write_token, config.github.api_url)

@@ -85,8 +85,30 @@ explicitly reconfigured conversation. No OpenHands rerun is needed to repair the
 existing acceptance file later: its owner can normalize permissions without
 changing content, followed by the guarded Factory revalidation.
 
+## Status update: versioned runtime support (code only)
+
+The reviewed owner-side normalizer and its hook wiring are now implemented and
+versioned in this repository; they are **not** installed on the host by this
+change:
+
+- the shared permission policy is the single module
+  `src/factory/integrations/workspace/shared_policy.py`, used both by the
+  Factory-side provisioner repair and by the hook executable;
+- the OpenHands adapter attaches the supported conversation `hook_config`
+  (`PostToolUse` on `file_editor`, plus `Stop`) from
+  `OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND`;
+- the executable reads the hook event on stdin, normalizes `working_dir`
+  owner-side, and exits `2` when it cannot enforce the policy (so `Stop` blocks
+  a successful completion).
+
+Installing the helper into the container, exposing the run's Git metadata
+read-only, and recreating the container remain human, out-of-band steps. The
+installation/runbook is
+[`openhands-shared-workspace-runtime.md`](openhands-shared-workspace-runtime.md);
+the compose wrapper and its `umask 0007` remain a convenience, never the fix.
+
 Sources: installed code and `/proc` observations above;
 [OpenHands hook contract](https://docs.openhands.dev/sdk/guides/hooks) documents
 PostToolUse/Stop semantics and exit code 2. Runtime readiness remains blocked on
-implementing and verifying owner-side normalization; the umask wrapper alone is
-not an operational fix.
+installing and verifying owner-side normalization in the container; the umask
+wrapper alone is not an operational fix.

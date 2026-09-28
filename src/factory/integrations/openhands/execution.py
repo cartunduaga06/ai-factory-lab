@@ -31,6 +31,12 @@ MAX_INSTRUCTION_CHARS = 8_000
 #: Default iteration budget for a factory-dispatched conversation.
 DEFAULT_MAX_ITERATIONS = 500
 
+#: Default timeout, in seconds, for each shared-workspace hook invocation.
+DEFAULT_HOOK_TIMEOUT_SECONDS = 60
+
+#: The tool whose writes create the owner-only ``0600`` files the hook repairs.
+_SHARED_WRITE_TOOL_MATCHER = "file_editor"
+
 _SPRINT = "OpenHands Agent Server"
 
 
@@ -78,6 +84,15 @@ class OpenHandsExecution:
     ``secrets_encrypted`` mirrors the server's flag for round-tripping settings
     whose credential fields are already cipher-encrypted server-side; the
     factory never stores or logs the plaintext in that case.
+
+    ``shared_workspace_hook_command``, when set, is passed to the agent server as
+    the conversation's ``hook_config``. The audit
+    (``docs/openhands-shared-workspace-audit.md``) established that merely
+    placing a user ``hooks.json`` does not activate hooks in the supported
+    server, so the configuration must travel with conversation creation. The
+    command runs synchronously after every ``file_editor`` tool call and at the
+    ``Stop`` event, where an exit code of ``2`` blocks the agent from reporting
+    success until the workspace satisfies the shared permission policy.
     """
 
     agent_profile_id: str | None = None
@@ -86,12 +101,19 @@ class OpenHandsExecution:
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     stuck_detection: bool = True
     autotitle: bool = True
+    shared_workspace_hook_command: str | None = None
+    hook_timeout: int = DEFAULT_HOOK_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if (self.agent_profile_id is None) == (self.agent_settings is None):
             raise ValueError("exactly one of agent_profile_id or agent_settings must be provided")
         if self.max_iterations < 1:
             raise ValueError("max_iterations must be positive")
+        if self.shared_workspace_hook_command is not None:
+            if not self.shared_workspace_hook_command.strip():
+                raise ValueError("shared_workspace_hook_command must not be blank")
+            if self.hook_timeout < 1:
+                raise ValueError("hook_timeout must be positive")
 
     def agent_payload(self) -> dict[str, object]:
         """The agent-selection fields to merge into the creation request."""
@@ -100,6 +122,29 @@ class OpenHandsExecution:
         return {
             "agent_settings": dict(self.agent_settings or {}),
             "secrets_encrypted": self.secrets_encrypted,
+        }
+
+    def hook_payload(self) -> dict[str, object] | None:
+        """The ``hook_config`` to attach to the conversation, or ``None``.
+
+        The shape matches the OpenHands ``HookConfig`` contract: PascalCase event
+        keys, a matcher list, and ``type``/``command``/``timeout``/``async`` hook
+        definitions. ``PostToolUse`` normalizes owner-side after each
+        ``file_editor`` write; ``Stop`` blocks completion (exit ``2``) when the
+        policy cannot be enforced. Both run synchronously (``async: false``).
+        """
+        command = self.shared_workspace_hook_command
+        if command is None:
+            return None
+        hook = {
+            "type": "command",
+            "command": command,
+            "timeout": self.hook_timeout,
+            "async": False,
+        }
+        return {
+            "PostToolUse": [{"matcher": _SHARED_WRITE_TOOL_MATCHER, "hooks": [dict(hook)]}],
+            "Stop": [{"hooks": [dict(hook)]}],
         }
 
     def secret_values(self) -> tuple[str, ...]:
@@ -167,11 +212,15 @@ def build_creation_payload(
             "run": True,
         },
     }
+    hook_config = execution.hook_payload()
+    if hook_config is not None:
+        body["hook_config"] = hook_config
     body.update(execution.agent_payload())
     return ConversationPayload(body=body)
 
 
 __all__ = [
+    "DEFAULT_HOOK_TIMEOUT_SECONDS",
     "DEFAULT_MAX_ITERATIONS",
     "MAX_INSTRUCTION_CHARS",
     "ConversationPayload",

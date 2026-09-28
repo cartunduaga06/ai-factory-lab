@@ -52,6 +52,10 @@ integrations  ──┼──► orchestration ──► domain
   exactly the isolated branch; `integrations/gates/local.py` runs argv-only,
   shell-free, bounded gate processes. `integrations/github/pull_requests.py` and
   `write_client.py` are the only Phase 5 write path, and expose no merge.
+  `integrations/workspace/shared_policy.py`
+  is the single cross-UID shared-workspace permission policy: the Factory-side
+  repair in `git.py` and the OpenHands owner-side hook executable call it, and it
+  must not move into `domain`/`orchestration`.
 - `factory/infrastructure` — configuration, logging, persistence. May not import
   `orchestration`. Core-domain `ports` live in `domain/ports.py`:
   `IssueSource`, `TaskRepository`, `RunRepository`, `WorkspaceProvisioner`,
@@ -136,4 +140,6 @@ of truth; keep `docs/architecture.md` in sync with it.
 - Architecture: `docs/architecture.md`
 - Security policy and agent boundaries: `docs/security.md`
 - Development workflow: `docs/development.md`
+- Cross-UID shared-workspace audit (read-only): `docs/openhands-shared-workspace-audit.md`
+- Shared-workspace runtime runbook: `docs/openhands-shared-workspace-runtime.md`
 - Configuration reference: `.env.example`

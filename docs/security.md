@@ -147,6 +147,33 @@ in code:
   another UID's files. If the Factory lacks read/chmod authority, repair fails
   closed with a required failed integrity gate; this code grants no privileges
   and changes no host or container configuration.
+- **One permission policy serves both UIDs.** The mode table and the
+  ignored-path classification live in exactly one module
+  (`integrations/workspace/shared_policy.py`). The Factory-side repair and the
+  OpenHands owner-side normalizer both call it, so the two can never drift into
+  incompatible policies. Neither `domain` nor `orchestration` re-implements or
+  imports it.
+- **Owner-side normalization cannot be bypassed into a false success.**
+  OpenHands' `file_editor/create` writes a new file through `NamedTemporaryFile`
+  as `0600` regardless of umask, so the workspace is normalised by its owner (UID
+  10001) through a synchronous command hook attached to the conversation's
+  `hook_config`: `PostToolUse` on `file_editor` after each write, and a `Stop`
+  hook that exits `2` when the policy cannot be enforced. Exit `2` is the
+  OpenHands blocking contract, so the agent cannot report success on an unsafe or
+  unrepairable workspace. The hook receives the workspace only as the event's
+  `working_dir`; a missing, relative or symlinked working directory, an
+  unreadable Git classification, or any unsafe node fails closed with a fixed,
+  path-free message. A process-level `umask 0007` is a convenience for ordinary
+  creation only and is never treated as sufficient.
+- **Ignored/private contents stay opaque and out of the published revision.**
+  A compliant ignored directory is pruned from the walk: it is never opened to
+  read and its children are never inspected or normalized. The validated
+  revision is a Git tree object id, which excludes ignored paths, so private
+  contents cannot enter the revision the factory may publish. Gates for the
+  self-development profile are cache-neutral (`pytest -p no:cacheprovider`,
+  `ruff check --no-cache`, `ruff format --check --no-cache`,
+  `mypy --cache-dir=/dev/null`) so no gate needs to write into an owner-only
+  cache.
 - **Gates run without a shell.** `LocalQualityGateRunner` executes an argv tuple
   with `shell=False`. Arguments are data, never syntax: metacharacters cannot
   become a second command, and there is no command string to interpolate.
