@@ -70,8 +70,10 @@ def test_compliant_foreign_node_skips_chmod(
     assert attempted == []
     assert stat.S_IMODE(node.stat().st_mode) == mode
     if name == "private":
-        assert stat.S_IMODE((node / "nested").stat().st_mode) == 0o700
-        assert stat.S_IMODE((node / "nested" / "secret").stat().st_mode) == 0o600
+        # Ignored directories are opaque; their children are deliberately not
+        # inspected or normalized by the factory.
+        assert stat.S_IMODE((node / "nested").stat().st_mode) == 0o755
+        assert stat.S_IMODE((node / "nested" / "secret").stat().st_mode) == 0o644
 
 
 @pytest.mark.parametrize("directory", [False, True])
@@ -154,3 +156,58 @@ def test_compliant_foreign_workspace_binds_revision_without_chmod(
     assert attempted == []
     assert stat.S_IMODE(outside.stat().st_mode) == 0o600
     assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+
+
+def test_compliant_ignored_directory_is_pruned_before_foreign_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _, task, run = _setup(tmp_path)
+    assert run.workspace is not None
+    root = Path(run.workspace.path)
+    (root / ".gitignore").write_text("private/\n")
+    private = root / "private"
+    private.mkdir()
+    secret = private / "secret.txt"
+    secret.write_text("do not inspect")
+    private.chmod(0o700)
+    provisioner = GitWorktreeWorkspaceProvisioner(str(source))
+    provisioner.prepare(task, run.workspace)
+    inspector = GitWorkspaceRevisionInspector()
+    before = inspector.fingerprint(run.workspace)
+    attempted: list[str] = []
+    original_open = os.open
+
+    def open_guard(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        if path == "private" and flags & os.O_DIRECTORY:
+            attempted.append(path)
+            raise PermissionError("foreign ignored directory cannot be opened")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_guard)
+    original_secret = secret.read_text(encoding="utf-8")
+    assert provisioner.repair(task, run.workspace) == run.workspace
+
+    assert attempted == []
+    assert secret.read_text(encoding="utf-8") == original_secret
+    secret.write_text("changed but still ignored")
+    assert inspector.fingerprint(run.workspace) == before
+
+
+def test_noncompliant_ignored_directory_fails_closed_without_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _, task, run = _setup(tmp_path)
+    assert run.workspace is not None
+    root = Path(run.workspace.path)
+    (root / ".gitignore").write_text("private/\n")
+    private = root / "private"
+    private.mkdir()
+    private.chmod(0o750)
+    provisioner = GitWorktreeWorkspaceProvisioner(str(source))
+    provisioner.prepare(task, run.workspace)
+    private.chmod(0o750)
+    attempted = _deny_chmod(monkeypatch, [private])
+
+    with pytest.raises(WorkspaceProvisioningError):
+        provisioner.repair(task, run.workspace)
+    assert len(attempted) == 1

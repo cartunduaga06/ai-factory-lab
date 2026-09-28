@@ -139,7 +139,7 @@ class GitWorktreeWorkspaceProvisioner(WorkspaceProvisioner):
             raise error
 
         try:
-            for directory, _, files, directory_fd in os.fwalk(
+            for directory, dirnames, files, directory_fd in os.fwalk(
                 target, follow_symlinks=False, onerror=fail_walk
             ):
                 relative_directory = Path(directory).relative_to(target).as_posix() + "/"
@@ -148,6 +148,33 @@ class GitWorktreeWorkspaceProvisioner(WorkspaceProvisioner):
                 )
                 if stat.S_IMODE(os.fstat(directory_fd).st_mode) != directory_mode:
                     os.fchmod(directory_fd, directory_mode)
+                for name in list(dirnames):
+                    relative = (Path(directory) / name).relative_to(target).as_posix() + "/"
+                    if relative not in ignored_directories:
+                        continue
+                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                        raise WorkspaceProvisioningError(workspace_id)
+                    if stat.S_IMODE(info.st_mode) != 0o700:
+                        child_fd = os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                        try:
+                            opened = os.fstat(child_fd)
+                            if (
+                                not stat.S_ISDIR(opened.st_mode)
+                                or stat.S_ISLNK(opened.st_mode)
+                                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                            ):
+                                raise WorkspaceProvisioningError(workspace_id)
+                            os.fchmod(child_fd, 0o700)
+                        finally:
+                            os.close(child_fd)
+                    # A compliant ignored directory is intentionally opaque:
+                    # fwalk must never try to open it or inspect its children.
+                    dirnames.remove(name)
                 for name in files:
                     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                     if stat.S_ISLNK(info.st_mode):
