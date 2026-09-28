@@ -233,6 +233,7 @@ def test_run_without_write_token_fails_closed_before_provider_access(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.delenv("GITHUB_WRITE_TOKEN", raising=False)
     for key, value in _runtime_env(tmp_path, write_token=None).items():
         monkeypatch.setenv(key, value)
 

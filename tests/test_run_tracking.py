@@ -28,6 +28,7 @@ from tests.fake_adapter import FakeAgentAdapter
 from tests.fake_workspace import (
     FakeQualityGateRunner,
     FakeRevisionInspector,
+    FakeWorkspaceProvisioner,
     specs,
     statuses,
 )
@@ -95,7 +96,8 @@ def _service(
         _runs(db_path),
         gate_specs=gate_specs,
         gate_runner=runner,
-        revision_inspector=revision_inspector,
+        revision_inspector=revision_inspector or FakeRevisionInspector(),
+        provisioner=FakeWorkspaceProvisioner(),
     )
 
 
@@ -334,7 +336,7 @@ def test_succeeded_run_without_workspace_fails_its_gates(db_path: str, tmp_path:
     )
 
     assert result.outcome is ValidationOutcome.GATES_FAILED
-    assert result.run.gates[0].detail == "no_workspace"
+    assert result.run.gates[0].detail == "workspace repair unavailable"
 
 
 # -- crash-window reconciliation ------------------------------------------
@@ -770,11 +772,12 @@ def test_no_revision_inspector_binds_nothing(db_path: str, tmp_path: Path) -> No
     task = _running_task(tasks)
     run = _run_with_workspace(_runs(db_path), task, tmp_path)
 
-    result = _service(db_path, gate_specs=specs("tests"), runner=FakeQualityGateRunner()).refresh(
-        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
-    )
+    result = RunTrackingService(
+        _tasks(db_path), _runs(db_path), provisioner=FakeWorkspaceProvisioner()
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
 
     assert result.run.validated_revision is None
+    assert result.outcome is ValidationOutcome.GATES_FAILED
 
 
 def test_inspection_failure_binds_no_revision(db_path: str, tmp_path: Path) -> None:

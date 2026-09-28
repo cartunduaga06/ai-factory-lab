@@ -138,9 +138,15 @@ in code:
   with exact-state guards. It does not contact providers or rewrite history.
 - **Checkout access is limited to owner and shared group.** Preparation and reuse
   enforce `2770` directories and `0660`/`0770` checkout files independent of
-  umask. Ignored files are owner-only; symlinks are not followed and hardlinks
+  umask. Compliant nodes skip chmod, including foreign-owned nodes; ignored
+  files and directories are owner-only (`0600`/`0700`); symlinks are not followed and hardlinks
   and special files are refused. The source checkout and external Git metadata
-  are never chmodded.
+  are never chmodded. The same policy is applied after agent success, before
+  fingerprints or gates, through an existing-checkout-only repair operation.
+  Ownership still matters: group membership alone does not permit chmod of
+  another UID's files. If the Factory lacks read/chmod authority, repair fails
+  closed with a required failed integrity gate; this code grants no privileges
+  and changes no host or container configuration.
 - **Gates run without a shell.** `LocalQualityGateRunner` executes an argv tuple
   with `shell=False`. Arguments are data, never syntax: metacharacters cannot
   become a second command, and there is no command string to interpolate.
