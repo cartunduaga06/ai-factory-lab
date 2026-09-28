@@ -4,7 +4,7 @@ Available commands:
 
 * ``--show-config`` / ``--version`` — Phase 1 configuration sanity check.
 * ``intake`` — one read-only issue intake pass.
-* ``retry --task-id`` — explicitly unblock one task without dispatch.
+* ``retry --task-id`` — explicitly recover one task without dispatch.
 * ``run`` — one bounded, resumable task through the existing Phases 2A–5.
 
 There is deliberately no daemon, scheduler or polling loop: intake runs once,
@@ -77,8 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="Run at most one factory-ready task through WAITING_HUMAN.",
     )
-    retry = subparsers.add_parser("retry", help="Make one BLOCKED task READY without dispatch.")
-    retry.add_argument("--task-id", required=True, type=UUID, help="UUID of the blocked task.")
+    retry = subparsers.add_parser(
+        "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
+    )
+    retry.add_argument("--task-id", required=True, type=UUID, help="UUID of the task to recover.")
     return parser
 
 

@@ -544,8 +544,13 @@ dispatch persists the workspace and a terminal `FAILED` run, then records
 `AgentDispatchError`.
 
 `python -m factory retry --task-id <uuid>` explicitly records `BLOCKED → READY`
-for that task only, provided it has no active run. Other states and repeated
-requests are refused clearly. The compare-and-swap guards concurrent retries.
+for that task only, provided it has no active run. For legacy `CLAIMED` tasks,
+retry additionally requires historical runs with the most recent run `FAILED`,
+then records `CLAIMED → BLOCKED → READY`. The first transition requires the
+state to remain exactly `CLAIMED`; both transitions use lifecycle compare-and-swap
+and persist history. A missing history, a latest non-failed run, any active run,
+other states and repeated requests are refused clearly. Concurrent retries
+cannot duplicate recovery transitions.
 Retry performs no intake or dispatch and never alters historical runs or
 workspaces. The next dispatch creates a new workspace, branch and run identity;
 there is no automatic retry loop.

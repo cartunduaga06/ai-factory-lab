@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 import factory.__main__ as cli
-from factory.domain.enums import TaskStatus
-from factory.domain.models import FactoryTask, Repository, TaskSource
+from factory.domain.enums import AgentKind, RunStatus, TaskStatus
+from factory.domain.models import AgentRun, FactoryTask, Repository, TaskSource
 from factory.domain.ports import IssueSource
 from factory.infrastructure.config import FactoryConfig
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
@@ -296,7 +296,8 @@ def test_retry_cli_changes_only_requested_blocked_task(
         assert len(tasks.history(task.task_id)) == 1
     else:
         assert code == cli.EXIT_INTAKE_ERROR
-        assert "not BLOCKED" in output
+        message = "latest run FAILED" if status is TaskStatus.CLAIMED else "not BLOCKED"
+        assert message in output
         assert tasks.get(task.task_id).status is status
         assert tasks.history(task.task_id) == []
     assert tasks.get(other.task_id) == other
@@ -319,3 +320,33 @@ def test_retry_cli_requires_uuid(arguments: list[str]) -> None:
     with pytest.raises(SystemExit) as caught:
         cli.main(arguments)
     assert caught.value.code == 2
+
+
+def test_retry_cli_recovers_legacy_claim_without_processing_other_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = str(tmp_path / "retry.db")
+    config = FactoryConfig.from_env({"DATABASE_URL": f"sqlite:///{database}"})
+    monkeypatch.setattr(cli.FactoryConfig, "from_env", lambda: config)
+    tasks = SqliteTaskRepository(database)
+    runs = SqliteRunRepository(database)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(
+        FactoryTask(title="legacy", target_repository="example/target", status=TaskStatus.CLAIMED)
+    )
+    other = tasks.save(FactoryTask(title="other", target_repository="example/target"))
+    failed = runs.save_run(
+        AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, status=RunStatus.FAILED)
+    )
+    assert cli.main(["retry", "--task-id", task.task_id]) == cli.EXIT_OK
+    assert "Task status: READY" in capsys.readouterr().out
+    assert tasks.get(task.task_id).status is TaskStatus.READY
+    assert [(edge.from_status, edge.to_status) for edge in tasks.history(task.task_id)] == [
+        (TaskStatus.CLAIMED, TaskStatus.BLOCKED),
+        (TaskStatus.BLOCKED, TaskStatus.READY),
+    ]
+    assert tasks.get(other.task_id) == other
+    assert runs.list_runs() == [failed]

@@ -313,7 +313,7 @@ class DuplicatePullRequestError(FactoryError):
 
 
 class RetryNotAllowedError(FactoryError):
-    """Explicit retry requires a blocked task without an active run."""
+    """Explicit retry requires a recoverable task without an active run."""
 
 
 __all__ = [

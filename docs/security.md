@@ -132,8 +132,10 @@ in code:
   rewritten to hide the failure.
 - **Failed adapter dispatch is recoverable and auditable.** The workspace and
   `FAILED` run remain durable, and the task moves `CLAIMED → BLOCKED`. Only an
-  explicit `retry --task-id <uuid>` can make a blocked task ready again, and it
-  refuses tasks with active runs. It does not contact providers or rewrite history.
+  explicit `retry --task-id <uuid>` can recover a task. It accepts `BLOCKED` or a
+  legacy `CLAIMED` task whose most recent historical run is `FAILED`, always
+  refusing active runs. Legacy recovery records `CLAIMED → BLOCKED → READY`
+  with exact-state guards. It does not contact providers or rewrite history.
 - **Checkout access is limited to owner and shared group.** Preparation and reuse
   enforce `2770` directories and `0660`/`0770` checkout files independent of
   umask. Ignored files are owner-only; symlinks are not followed and hardlinks
