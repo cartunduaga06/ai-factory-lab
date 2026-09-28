@@ -79,8 +79,8 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     INSERT INTO {AGENT_RUNS_TABLE} (
                         run_id, task_id, adapter, status, workspace_id,
                         summary, started_at, finished_at, gates, validated_revision,
-                        created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        provider_ref, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
@@ -93,6 +93,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                         encode_datetime(run.finished_at) if run.finished_at else None,
                         _encode_gates(run.gates),
                         run.validated_revision,
+                        run.provider_ref,
                         created_at,
                     ),
                 )
@@ -143,7 +144,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                 f"""
                 UPDATE {AGENT_RUNS_TABLE}
                    SET status = ?, summary = ?, started_at = ?, finished_at = ?,
-                       gates = ?, validated_revision = ?
+                       gates = ?, validated_revision = ?, provider_ref = ?
                  WHERE run_id = ?
                 """,
                 (
@@ -153,6 +154,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     encode_datetime(run.finished_at) if run.finished_at else None,
                     _encode_gates(run.gates),
                     run.validated_revision,
+                    run.provider_ref,
                     run.run_id,
                 ),
             )
@@ -320,6 +322,7 @@ def _row_to_run(row: sqlite3.Row, workspace: Workspace | None) -> AgentRun:
         finished_at=decode_datetime(finished_at) if finished_at else None,
         gates=_decode_gates(row["gates"]),
         validated_revision=row["validated_revision"],
+        provider_ref=row["provider_ref"],
     )
 
 

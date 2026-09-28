@@ -28,8 +28,10 @@ import urllib.request
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
+from urllib.parse import quote
 
 CONVERSATIONS_PATH = "/api/conversations"
+GIT_COMMITS_PATH = "/api/git/commits"
 
 #: Longest sanitized detail attached to an error, so a pathological body cannot
 #: turn an exception message into a payload dump.
@@ -299,6 +301,32 @@ class OpenHandsClient:
             return text
         return None
 
+    def head_commit(self, repository_path: str) -> str | None:
+        """Return the newest commit sha of ``repository_path``, or ``None``.
+
+        Uses the supported Agent Server git contract (``GET /api/git/commits``,
+        ``limit=1``) so a Cloud run can report the exact head commit it produced.
+        Returns ``None`` when the path is not a repository or the response is
+        unusable; the caller decides whether that is fatal.
+        """
+        path_query = quote(repository_path, safe="")
+        response = self._send("GET", f"{GIT_COMMITS_PATH}?path={path_query}&limit=1")
+        if not response.ok:
+            return None
+        body = _as_mapping(response.body)
+        if body is None:
+            return None
+        commits = body.get("commits")
+        if not isinstance(commits, list) or not commits:
+            return None
+        first = _as_mapping(commits[0])
+        if first is None:
+            return None
+        sha = first.get("sha")
+        if isinstance(sha, str) and sha.strip():
+            return sha.strip()
+        return None
+
     # -- internals ---------------------------------------------------------
 
     def _send(
@@ -324,6 +352,7 @@ class OpenHandsClient:
 
 __all__ = [
     "CONVERSATIONS_PATH",
+    "GIT_COMMITS_PATH",
     "OpenHandsClient",
     "OpenHandsConfigurationError",
     "OpenHandsConnectionError",

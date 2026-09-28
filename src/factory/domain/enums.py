@@ -79,6 +79,19 @@ class AgentKind(StrEnum):
     OTHER = "OTHER"
 
 
+class AgentBackend(StrEnum):
+    """Which OpenHands execution backend a dispatch targets.
+
+    ``LOCAL`` is the self-hosted Agent Server / local worktree behaviour that is
+    the factory's default. ``CLOUD`` is OpenHands Cloud, reached through its
+    supported API contract. The value is selected explicitly by configuration and
+    never silently falls back from one backend to the other.
+    """
+
+    LOCAL = "local"
+    CLOUD = "cloud"
+
+
 class RepositoryRole(StrEnum):
     """Why the factory knows about a repository."""
 

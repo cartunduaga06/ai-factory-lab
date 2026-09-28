@@ -47,15 +47,23 @@ integrations  ──┼──► orchestration ──► domain
   Translates external APIs into domain types. `integrations/openhands/` talks to
   the OpenHands Agent Server over HTTP through an injectable transport; the
   factory never imports the OpenHands SDK, and no OpenHands code belongs in
-  `domain` or `orchestration`. `integrations/workspace/git.py` creates one Git
-  worktree per run; `integrations/workspace/git_publish.py` commits and pushes
-  exactly the isolated branch; `integrations/gates/local.py` runs argv-only,
-  shell-free, bounded gate processes. `integrations/github/pull_requests.py` and
+  `domain` or `orchestration`. `integrations/openhands/cloud.py` is the optional
+  OpenHands Cloud backend (sandbox lifecycle over the Cloud control API, then the
+  same Agent Server conversation contract); it is selected only through
+  `OPENHANDS_BACKEND=cloud` and never becomes the default. `integrations/workspace/git.py`
+  creates one Git worktree per run; `integrations/workspace/cloud_provisioner.py`
+  and `cloud_revision.py` materialise a Cloud result's exact revision into a fresh
+  local validation worktree and fail closed when it cannot; `integrations/workspace/git_publish.py`
+  commits and pushes exactly the isolated branch; `integrations/gates/local.py`
+  runs argv-only, shell-free, bounded gate processes. `integrations/github/pull_requests.py` and
   `write_client.py` are the only Phase 5 write path, and expose no merge.
   `integrations/workspace/shared_policy.py`
   is the single cross-UID shared-workspace permission policy: the Factory-side
   repair in `git.py` and the OpenHands owner-side hook executable call it, and it
   must not move into `domain`/`orchestration`.
+- `factory/backend.py` — application-layer backend selection. The only module
+  that knows both concrete OpenHands adapters; resolves `OPENHANDS_BACKEND` into
+  an `AgentAdapter` + `WorkspaceProvisioner` pair. Not domain, not orchestration.
 - `factory/infrastructure` — configuration, logging, persistence. May not import
   `orchestration`. Core-domain `ports` live in `domain/ports.py`:
   `IssueSource`, `TaskRepository`, `RunRepository`, `WorkspaceProvisioner`,
@@ -104,7 +112,7 @@ All four checks must pass before a change is proposed. Python 3.11+.
 | `FactoryTask` | A unit of work, carrying a structured `TaskSource` identity. |
 | `TaskSource` | Frozen `(provider, repository_slug, issue_number)` identity of a task. |
 | `TaskTransition` | Auditable record of one lifecycle status change. |
-| `AgentRun` | One attempt by one engine to complete a task. |
+| `AgentRun` | One attempt by one engine to complete a task; carries optional `provider_ref` (cloud routing handle) and `validated_revision`. |
 | `RunRepository` | Persistence port for `Workspace` and `AgentRun`; `update_run` refreshes a stored run. |
 | `Repository` | A repo the factory knows about, tagged `CONTROL_PLANE` or `TARGET`. |
 | `Workspace` | An isolated per-run checkout on its own branch, keyed by its own id. |
@@ -118,7 +126,9 @@ All four checks must pass before a change is proposed. Python 3.11+.
 | `PullRequestSink` | Port to find/open pull requests. Deliberately has no merge. |
 | `PullRequestRepository` | Port that durably stores the PRs the factory opens. |
 | `ValidationOutcome` | Deterministic result of validating a run (`PENDING`/`READY_FOR_NEXT_PHASE`/`GATES_FAILED`). |
-| `AgentAdapter` | Engine-agnostic execution interface (OpenHands, Codex, ...). |
+| `AgentAdapter` | Engine-agnostic execution interface (OpenHands local, OpenHands Cloud, Codex, ...). |
+| `AgentBackend` | Explicit `OPENHANDS_BACKEND` choice: `LOCAL` (default) or `CLOUD`; never auto-fallback. |
+| `RemoteRevision` | Frozen `(commit_sha, branch, repository_slug)` a remote backend claims it produced; materialised and re-validated locally, never trusted as publication authority. |
 | `IssueIntakeService` | Idempotent intake: eligible issues → persisted tasks. |
 | `TaskLifecycleService` | Validates a transition, then persists status + history atomically. |
 | `DispatchService` | Claims a task, provisions a per-run workspace, starts the run. |
@@ -142,4 +152,5 @@ of truth; keep `docs/architecture.md` in sync with it.
 - Development workflow: `docs/development.md`
 - Cross-UID shared-workspace audit (read-only): `docs/openhands-shared-workspace-audit.md`
 - Shared-workspace runtime runbook: `docs/openhands-shared-workspace-runtime.md`
+- OpenHands Cloud backend runbook: `docs/openhands-cloud-backend.md`
 - Configuration reference: `.env.example`

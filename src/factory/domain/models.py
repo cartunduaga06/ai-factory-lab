@@ -282,6 +282,18 @@ class AgentRun:
     #: bound (never validated, or the gates failed, or the workspace changed while
     #: the gates ran). Publication requires it to be present and to still match.
     validated_revision: str | None = None
+    #: Provider-side handle for a run whose execution is not reachable through a
+    #: single ``run_id`` lookup.
+    #:
+    #: The local OpenHands backend maps ``run_id`` directly to a conversation id, so
+    #: this stays ``None``. The Cloud backend needs two opaque identifiers — the
+    #: sandbox and the conversation started inside it — to collect a run
+    #: idempotently after a process restart, because the cloud sandbox is
+    #: provisioned by the factory and is not addressable by conversation id alone.
+    #: The value is *opaque provider routing state*, never a credential, and it is
+    #: persisted so re-collection never has to create a second cloud sandbox or
+    #: conversation. It carries no revised-validation meaning.
+    provider_ref: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -357,6 +369,34 @@ class PublishedRevision:
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteRevision:
+    """A revision identity a *remote* execution backend claims it produced.
+
+    This is the Cloud analog of :class:`PublishedRevision`: an opaque, immutable
+    ``(commit_sha, branch, repository_slug)`` triple a remote backend reports.
+    It is deliberately a plain value object with no provider field, so the domain
+    and orchestration never learn which backend produced it.
+
+    It is **not** a substitution for :attr:`AgentRun.validated_revision`: a
+    ``RemoteRevision`` is only ever a pointer the factory uses to materialise the
+    exact revision into a fresh local workspace, where the normal gates and
+    revision binding run. Publication still requires the locally bound
+    ``validated_revision``.
+    """
+
+    commit_sha: str
+    branch: str
+    repository_slug: str
+
+    def __post_init__(self) -> None:
+        if not self.commit_sha.strip():
+            raise ValueError("remote revision must carry a commit sha")
+        if not self.branch.strip():
+            raise ValueError("remote revision must carry a branch")
+        _validate_slug(self.repository_slug)
+
+
+@dataclass(slots=True, frozen=True)
 class PullRequest:
     """A pull request opened by an agent, awaiting mandatory human approval.
 
@@ -417,6 +457,7 @@ __all__ = [
     "PullRequest",
     "QualityGate",
     "QualityGateSpec",
+    "RemoteRevision",
     "Repository",
     "TaskSource",
     "TaskTransition",

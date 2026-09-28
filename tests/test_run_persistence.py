@@ -678,3 +678,98 @@ def test_migration_is_idempotent(db_path: str) -> None:
     loaded = repository.get_run(run.run_id)
     assert loaded is not None
     assert loaded.validated_revision == "tree-keep"
+
+
+# -- cloud routing handle (provider_ref) ------------------------------------
+
+
+def test_provider_ref_round_trips(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    run.provider_ref = "sbx-1:conv-1"
+    repository.save_run(run)
+
+    loaded = repository.get_run(run.run_id)
+    assert loaded is not None
+    assert loaded.provider_ref == "sbx-1:conv-1"
+
+
+def test_provider_ref_is_none_by_default(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    repository.save_run(_run(task.task_id))
+
+    loaded = repository.get_run("run-1")
+    assert loaded is not None
+    assert loaded.provider_ref is None
+
+
+def test_provider_ref_survives_reopen_and_update(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    run.provider_ref = "sbx-9:conv-9"
+    repository.save_run(run)
+
+    # A later update that does not touch the handle preserves it.
+    run.status = RunStatus.SUCCEEDED
+    run.summary = "done"
+    repository.update_run(run)
+
+    reloaded = _runs(db_path).get_run(run.run_id)
+    assert reloaded is not None
+    assert reloaded.provider_ref == "sbx-9:conv-9"
+    assert reloaded.status is RunStatus.SUCCEEDED
+
+
+def test_legacy_database_gains_provider_ref_without_data_loss(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.db")
+    tasks = SqliteTaskRepository(db_path)
+    tasks.initialize()
+    task = tasks.save(_task())
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("DROP TABLE IF EXISTS agent_runs")
+    conn.execute(
+        """
+        CREATE TABLE agent_runs (
+            run_id        TEXT PRIMARY KEY,
+            task_id       TEXT NOT NULL,
+            adapter       TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            workspace_id  TEXT,
+            summary       TEXT,
+            started_at    TEXT,
+            finished_at   TEXT,
+            gates         TEXT NOT NULL DEFAULT '[]',
+            created_at    TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO agent_runs (
+            run_id, task_id, adapter, status, summary, gates, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("legacy-run", task.task_id, "OTHER", "FAILED", "old", "[]", "2026-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    repository = _runs(db_path)
+    loaded = repository.get_run("legacy-run")
+    assert loaded is not None
+    assert loaded.provider_ref is None
+
+    new_run = AgentRun(task_id=task.task_id, adapter=AgentKind.OPENHANDS, run_id="cloud-run")
+    new_run.provider_ref = "sbx-new:conv-new"
+    repository.save_run(new_run)
+    assert repository.get_run("cloud-run").provider_ref == "sbx-new:conv-new"  # type: ignore[union-attr]

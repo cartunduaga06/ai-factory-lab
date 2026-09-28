@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from uuid import UUID
 
 from factory import __version__
+from factory.backend import BackendConfigurationError, build_backend
 from factory.domain.enums import RepositoryRole
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
 from factory.domain.models import Repository
@@ -36,17 +37,7 @@ from factory.integrations.github import (
     GitHubPullRequestSink,
     GitHubWriteClient,
 )
-from factory.integrations.openhands import (
-    OpenHandsAdapter,
-    OpenHandsClient,
-    OpenHandsExecution,
-    WorkspacePathMapper,
-)
-from factory.integrations.workspace import (
-    GitWorkspacePublisher,
-    GitWorkspaceRevisionInspector,
-    GitWorktreeWorkspaceProvisioner,
-)
+from factory.integrations.workspace import GitWorkspacePublisher, GitWorkspaceRevisionInspector
 from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.retry import RetryService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
@@ -183,10 +174,6 @@ def _run_runtime(config: FactoryConfig) -> int:
             raise ConfigurationError("FACTORY_TARGET_REPO is required for run")
         if config.source_checkout is None:
             raise ConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
-        if config.openhands.base_url is None:
-            raise ConfigurationError("OPENHANDS_BASE_URL is required for run")
-        if config.openhands.agent_profile_id is None:
-            raise ConfigurationError("OPENHANDS_AGENT_PROFILE_ID is required for run")
         if config.github_write_token is None:
             raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
@@ -203,28 +190,18 @@ def _run_runtime(config: FactoryConfig) -> int:
             source=GitHubIssueSource(read_client, target_repository=config.github.target_repo),
             repository=tasks,
         )
-        mapper = WorkspacePathMapper(config.workspace_root, config.openhands_workspace_root)
-        adapter = OpenHandsAdapter(
-            OpenHandsClient(
-                config.openhands.base_url,
-                session_api_key=config.openhands.session_api_key,
-            ),
-            OpenHandsExecution(
-                agent_profile_id=config.openhands.agent_profile_id,
-                shared_workspace_hook_command=(config.openhands_shared_workspace_hook_command),
-            ),
-            workspace_paths=mapper,
-        )
+        # The configured backend (local by default) resolves both the agent
+        # adapter and the workspace provisioner, so dispatch/collect/publication
+        # stay identical regardless of where the work executed.
+        backend = build_backend(config)
         write_client = GitHubWriteClient(config.github_write_token, config.github.api_url)
         runtime = FactoryRuntime(
             intake=intake,
             intake_repository=repository,
             tasks=tasks,
             runs=runs,
-            adapter=adapter,
-            provisioner=GitWorktreeWorkspaceProvisioner(
-                config.source_checkout, base_ref=config.workspace_base_ref
-            ),
+            adapter=backend.adapter,
+            provisioner=backend.provisioner,
             workspace_root=config.workspace_root,
             gate_specs=config.quality_gates,
             gate_runner=LocalQualityGateRunner(),
@@ -240,7 +217,7 @@ def _run_runtime(config: FactoryConfig) -> int:
             timeout=config.run_timeout,
         )
         result = runtime.run_once()
-    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+    except (ConfigurationError, BackendConfigurationError, UnsupportedDatabaseError) as exc:
         print(f"configuration error: {exc}")
         return EXIT_CONFIG_ERROR
     except Exception as exc:  # noqa: BLE001 - runtime boundary is secret-safe by design

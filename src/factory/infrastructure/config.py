@@ -13,9 +13,10 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
+from factory.domain.enums import AgentBackend
 from factory.domain.models import QualityGateSpec
 
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
@@ -26,6 +27,10 @@ DEFAULT_DATABASE_PATH = "./factory.db"
 DEFAULT_TARGET_BRANCH = "main"
 DEFAULT_RUN_POLL_INTERVAL = 5.0
 DEFAULT_RUN_TIMEOUT = 1800.0
+DEFAULT_OPENHANDS_CLOUD_API_URL = "https://app.all-hands.dev"
+#: Working directory inside a Cloud sandbox where the configured repository is
+#: checked out. Configurable because it is a property of the Cloud runtime image.
+DEFAULT_OPENHANDS_CLOUD_WORKING_DIR = "/workspace/project"
 
 
 class DatabaseScheme(StrEnum):
@@ -50,6 +55,34 @@ class Environment(StrEnum):
     DEVELOPMENT = "development"
     STAGING = "staging"
     PRODUCTION = "production"
+
+
+class InvalidBackendError(ValueError):
+    """``OPENHANDS_BACKEND`` named a backend the factory does not support.
+
+    Raised rather than silently defaulting to local: a typo in the backend
+    selection must not change where work is executed. The message names only the
+    variable and never falls through to a fallback.
+    """
+
+
+def parse_backend(raw: str | None) -> AgentBackend:
+    """Parse ``OPENHANDS_BACKEND`` into an explicit :class:`AgentBackend`.
+
+    The default is :attr:`AgentBackend.LOCAL`; Cloud is never the default and is
+    never selected implicitly. An unrecognized value raises
+    :class:`InvalidBackendError` so a misconfiguration fails closed instead of
+    silently running locally.
+    """
+    cleaned = _clean(raw)
+    if cleaned is None:
+        return AgentBackend.LOCAL
+    try:
+        return AgentBackend(cleaned.lower())
+    except ValueError:
+        raise InvalidBackendError(
+            "OPENHANDS_BACKEND must be one of: " + ", ".join(b.value for b in AgentBackend)
+        ) from None
 
 
 class LogFormat(StrEnum):
@@ -145,6 +178,59 @@ class AgentConfig:
         ``api_key`` alone does not make the engine dispatchable.
         """
         return self.api_key is not None or self.base_url is not None
+
+
+@dataclass(slots=True, frozen=True)
+class OpenHandsCloudConfig:
+    """Out-of-band configuration for the OpenHands Cloud execution backend.
+
+    Cloud credentials are injected through the environment / a secret store and
+    are never committed, defaulted to a real value or logged. ``api_key`` is the
+    Cloud API bearer credential; the factory never handles an LLM key.
+
+    Selecting the Cloud backend requires both an ``api_key`` and a
+    ``repository`` (the ``owner/name`` Cloud clones and works in). Absence of
+    Cloud configuration never affects local mode: it only makes a ``cloud``
+    backend selection fail closed with a clear message.
+
+    ``profile`` / ``model`` choose the LLM configuration Cloud uses. They are
+    configuration, never a hard-coded "free model" dependency: an unavailable
+    profile or model surfaces as a sanitized provider failure rather than a silent
+    fallback to a paid model.
+    """
+
+    api_url: str = DEFAULT_OPENHANDS_CLOUD_API_URL
+    api_key: str | None = None
+    repository: str | None = None
+    working_dir: str = DEFAULT_OPENHANDS_CLOUD_WORKING_DIR
+    base_ref: str | None = None
+    profile: str | None = None
+    model: str | None = None
+
+    @property
+    def enabled(self) -> bool:
+        """Whether Cloud is configured enough to be selected at all.
+
+        This is not a health check: a configured Cloud target can still fail (bad
+        credential, unavailable model); the factory then fails closed rather than
+        falling back to the local backend.
+        """
+        return self.api_key is not None and self.repository is not None
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> OpenHandsCloudConfig:
+        return cls(
+            api_url=(_clean(env.get("OPENHANDS_CLOUD_API_URL")) or DEFAULT_OPENHANDS_CLOUD_API_URL),
+            api_key=_clean(env.get("OPENHANDS_CLOUD_API_KEY")),
+            repository=_clean(env.get("OPENHANDS_CLOUD_REPOSITORY")),
+            working_dir=(
+                _clean(env.get("OPENHANDS_CLOUD_WORKING_DIR"))
+                or DEFAULT_OPENHANDS_CLOUD_WORKING_DIR
+            ),
+            base_ref=_clean(env.get("OPENHANDS_CLOUD_BASE_REF")),
+            profile=_clean(env.get("OPENHANDS_CLOUD_PROFILE")),
+            model=_clean(env.get("OPENHANDS_CLOUD_MODEL")),
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -246,6 +332,12 @@ class FactoryConfig:
     # (exit 2) when the shared permission policy cannot be enforced. It is a
     # command local to the OpenHands container, not a factory process argument.
     openhands_shared_workspace_hook_command: str | None = None
+    # Explicit execution backend. Defaults to ``local``; ``cloud`` is never the
+    # default and is never selected implicitly. An unknown value is rejected.
+    backend: AgentBackend = AgentBackend.LOCAL
+    # Out-of-band OpenHands Cloud settings. Optional and secret-safe; absent
+    # configuration never breaks local mode.
+    openhands_cloud: OpenHandsCloudConfig = field(default_factory=OpenHandsCloudConfig)
 
     @property
     def database(self) -> DatabaseConfig:
@@ -297,6 +389,8 @@ class FactoryConfig:
             openhands_shared_workspace_hook_command=_clean(
                 source.get("OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND")
             ),
+            backend=parse_backend(source.get("OPENHANDS_BACKEND")),
+            openhands_cloud=OpenHandsCloudConfig.from_env(source),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -318,6 +412,16 @@ class FactoryConfig:
                 "api_key": "***" if self.openhands.api_key else None,
                 "session_api_key": "***" if self.openhands.session_api_key else None,
             },
+            "openhands_cloud": {
+                "api_url": self.openhands_cloud.api_url,
+                "repository": self.openhands_cloud.repository,
+                "working_dir": self.openhands_cloud.working_dir,
+                "base_ref": self.openhands_cloud.base_ref,
+                "profile": self.openhands_cloud.profile,
+                "model": self.openhands_cloud.model,
+                "api_key": "***" if self.openhands_cloud.api_key else None,
+            },
+            "backend": self.backend.value,
             "codex": {"api_key": "***" if self.codex.api_key else None},
             "database_url": _redact_url(self.database_url),
             "workspace_root": self.workspace_root,
@@ -382,6 +486,7 @@ __all__ = [
     "DEFAULT_DATABASE_PATH",
     "DEFAULT_GITHUB_API_URL",
     "DEFAULT_GITHUB_GIT_HOST",
+    "DEFAULT_OPENHANDS_CLOUD_API_URL",
     "DEFAULT_TARGET_BRANCH",
     "DEFAULT_RUN_POLL_INTERVAL",
     "DEFAULT_RUN_TIMEOUT",
@@ -393,9 +498,12 @@ __all__ = [
     "Environment",
     "FactoryConfig",
     "GitHubConfig",
+    "InvalidBackendError",
     "InvalidGateSpecError",
     "LogFormat",
     "LoggingConfig",
+    "OpenHandsCloudConfig",
     "UnsupportedDatabaseError",
+    "parse_backend",
     "parse_gate_specs",
 ]

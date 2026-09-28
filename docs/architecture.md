@@ -142,6 +142,8 @@ src/factory/
 │   ├── workspace/
 │   │   ├── git.py           # GitWorktreeWorkspaceProvisioner (worktree per run)
 │   │   ├── shared_policy.py # cross-UID permission policy + OpenHands hook CLI
+│   │   ├── cloud_provisioner.py # CloudWorkspaceProvisioner (fresh validation worktree)
+│   │   ├── cloud_revision.py    # GitCloudRevisionProvider (exact-revision fetch)
 │   │   └── git_publish.py   # GitWorkspacePublisher (commit + secure push)
 │   ├── github/
 │   │   ├── client.py        # read-only REST client, injectable transport
@@ -152,7 +154,8 @@ src/factory/
 │       ├── client.py        # Agent Server HTTP client, injectable transport
 │       ├── execution.py     # task -> conversation request + instruction
 │       ├── status.py        # execution_status -> RunStatus (single source)
-│       └── adapter.py       # OpenHandsAdapter (AgentAdapter implementation)
+│       ├── adapter.py       # OpenHandsAdapter (local AgentAdapter implementation)
+│       └── cloud.py         # OpenHandsCloudAdapter (Cloud AgentAdapter implementation)
 └── infrastructure/
     ├── config.py            # FactoryConfig.from_env + redaction + DatabaseConfig
     ├── logging.py           # configure_logging
@@ -164,6 +167,11 @@ src/factory/
         ├── run_sqlite.py    # SqliteRunRepository (RunRepository implementation)
         └── pr_sqlite.py     # SqlitePullRequestRepository (PullRequestRepository)
 ```
+
+`factory/backend.py` sits beside the CLI in the application layer and is the only
+place that knows both concrete backends; it resolves `OPENHANDS_BACKEND` into an
+adapter + provisioner pair. Neither the domain nor the orchestration layer learns
+which backend is configured.
 
 ## Domain model
 
@@ -612,6 +620,25 @@ provider-specific domain field. Engine execution states are normalized by
 An unrecognized state raises `OpenHandsStatusError`. It is never guessed — in
 particular never mapped to `SUCCEEDED`.
 
+### Backend selection (`local` vs `cloud`)
+
+OpenHands is reachable through two backends behind the same domain-facing
+`AgentAdapter` contract:
+
+* `local` (default) — the self-hosted Agent Server above, plus a local Git
+  worktree per run.
+* `cloud` — OpenHands Cloud, selected explicitly through `OPENHANDS_BACKEND=cloud`.
+
+`factory/backend.py` is the only module that knows both concrete adapters. It
+resolves the choice into an `AgentAdapter` + `WorkspaceProvisioner` pair at
+startup; the orchestration layer still sees only the ports. There is no implicit
+or automatic fallback between backends, and Cloud is never the default.
+
+Cloud configuration (`OPENHANDS_CLOUD_*`) is optional and secret-safe: absent
+configuration never affects local mode, and a `cloud` selection with missing
+credentials/repository fails closed with a `BackendConfigurationError` before any
+task is claimed. `--show-config` masks the Cloud API key.
+
 ### Cancel
 
 `cancel` requests an interrupt on the conversation. It is idempotent: a run that
@@ -887,6 +914,62 @@ come from `QualityGateSpec` as an **argv tuple**, and execution is
 Which gates exist is supplied by the application layer through
 `FACTORY_QUALITY_GATES` (a JSON array of `{name, argv, required}`); neither the
 domain nor orchestration hard-codes a command.
+
+## OpenHands Cloud backend
+
+`integrations/openhands/cloud.py` implements a second `AgentAdapter` that drives
+OpenHands Cloud sandboxes. It is *not* the default and is only built when
+`OPENHANDS_BACKEND=cloud` and the Cloud configuration is complete.
+
+### Supported contract
+
+The integration uses only supported, versioned contracts (OpenHands SDK 1.49.6,
+`openhands.workspace.cloud`):
+
+* **Authentication** — the Cloud control API uses `Authorization: Bearer <key>`;
+  each sandbox's agent-server uses the per-sandbox `X-Session-API-Key` the Cloud
+  API returns. No browser session, cookie or UI state is involved.
+* **Sandbox lifecycle** — `POST /api/v1/sandboxes` creates a runtime and returns
+  `{id, session_api_key}`; `GET /api/v1/sandboxes?id=<id>` reports `status` and
+  `exposed_urls` (the agent-server URL is the entry named `AGENT_SERVER`);
+  `POST /api/v1/sandboxes/<id>/resume` resumes a paused runtime.
+* **Conversation / profile** — conversation creation reuses the same Agent Server
+  contract as local mode (`POST /api/conversations`), including
+  `agent_profile_id`. The payload carries only fields the conversation model
+  accepts (`extra="forbid"`); repository selection is owned by the Cloud
+  repository integration and the run's branch travels in the instruction text.
+* **Revision retrieval** — the factory never trusts the runtime's word. On a
+  terminal success it reads the head commit from the sandbox's own git contract
+  (`GET /api/git/commits?limit=1`) and hands the resulting `RemoteRevision` to
+  `GitCloudRevisionProvider`, which re-fetches that exact commit from the remote
+  into the run's local validation workspace.
+
+### Fail-closed validation invariant
+
+Cloud work **cannot bypass** the revision binding + quality gate + publication
+path. `collect` only returns `SUCCEEDED` after the exact cloud revision has been
+materialised locally; if the revision cannot be retrieved, is unsafe (unpushed
+branch, moved branch, wrong repository), or the workspace is missing, the run is
+returned as `FAILED` and no PR is ever opened. Publication still requires the
+locally bound `AgentRun.validated_revision`, so a Cloud run with no independently
+validated revision fails the same way any other unvalidated run does.
+
+### Routing, idempotency and recovery
+
+The Cloud conversation id *is* `AgentRun.run_id`. The sandbox id and conversation
+id are persisted together as `AgentRun.provider_ref` (`"<sandbox>:<conversation>"`),
+a nullable column added by an idempotent migration. Re-collection re-derives both
+from that handle and never creates a second sandbox or conversation; a retry is a
+new `AgentRun` on a new branch, exactly as in local mode.
+
+### Safety boundaries
+
+The Cloud HTTP transports are injectable, so tests never touch the network. The
+bearer key lives in a private attribute and never appears in a URL, `repr`, log
+line or exception; remote error bodies are discarded and only the numeric HTTP
+status and opaque provider identifiers cross the boundary. Provider text and
+summaries are redacted and bounded. There is no automatic paid-model fallback and
+no automatic local↔cloud fallback.
 
 ## Planned evolution
 

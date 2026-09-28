@@ -6,6 +6,12 @@ filesystem and a version-control tool, so it lives here — outside ``domain`` a
 :class:`~factory.domain.ports.WorkspaceProvisioner` port.
 """
 
+from factory.integrations.workspace.cloud_provisioner import CloudWorkspaceProvisioner
+from factory.integrations.workspace.cloud_revision import (
+    CloudRevisionError,
+    CloudRevisionProvider,
+    GitCloudRevisionProvider,
+)
 from factory.integrations.workspace.git import GitWorktreeWorkspaceProvisioner
 from factory.integrations.workspace.git_publish import GitWorkspacePublisher
 from factory.integrations.workspace.revision import GitWorkspaceRevisionInspector
@@ -34,6 +40,10 @@ __all__ = [
     "GitWorkspacePublisher",
     "GitWorkspaceRevisionInspector",
     "GitWorktreeWorkspaceProvisioner",
+    "CloudRevisionError",
+    "CloudRevisionProvider",
+    "CloudWorkspaceProvisioner",
+    "GitCloudRevisionProvider",
     "SharedWorkspacePolicyError",
     "classify_ignored_paths",
     "normalize_workspace",

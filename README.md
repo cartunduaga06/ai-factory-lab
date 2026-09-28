@@ -228,6 +228,18 @@ normalizes the workspace owner-side — because the editor creates new files as
 normalizer command; see
 [the shared-workspace runtime runbook](docs/openhands-shared-workspace-runtime.md).
 
+### 1c-bis. OpenHands Cloud backend (optional)
+
+Execution can also target **OpenHands Cloud** instead of the self-hosted Agent
+Server by setting `OPENHANDS_BACKEND=cloud` plus `OPENHANDS_CLOUD_API_KEY` and
+`OPENHANDS_CLOUD_REPOSITORY`. Cloud is never the default; it is never selected
+implicitly, and there is no local↔cloud fallback. A Cloud run cannot bypass the
+revision-binding, quality-gate and publication path: the factory reads the head
+commit from the sandbox, re-fetches that exact revision into a fresh local
+worktree, runs the gates locally and still stops at `WAITING_HUMAN`. If the exact
+revision cannot be retrieved, the run fails closed and no PR is opened. See
+[the Cloud backend runbook](docs/openhands-cloud-backend.md).
+
 No secrets are required for this phase's tests or smoke run: they use disposable
 local repositories.
 

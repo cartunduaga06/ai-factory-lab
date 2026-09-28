@@ -20,6 +20,13 @@ from factory.integrations.openhands.client import (
     Transport,
     UrllibTransport,
 )
+from factory.integrations.openhands.cloud import (
+    CloudControlClient,
+    CloudExecution,
+    OpenHandsCloudAdapter,
+    OpenHandsCloudError,
+    split_provider_ref,
+)
 from factory.integrations.openhands.execution import (
     DEFAULT_HOOK_TIMEOUT_SECONDS,
     DEFAULT_MAX_ITERATIONS,
@@ -35,8 +42,12 @@ from factory.integrations.openhands.status import (
 __all__ = [
     "DEFAULT_HOOK_TIMEOUT_SECONDS",
     "DEFAULT_MAX_ITERATIONS",
+    "CloudControlClient",
+    "CloudExecution",
     "OpenHandsAdapter",
     "OpenHandsClient",
+    "OpenHandsCloudAdapter",
+    "OpenHandsCloudError",
     "OpenHandsConfigurationError",
     "OpenHandsConnectionError",
     "OpenHandsError",
@@ -52,4 +63,5 @@ __all__ = [
     "UrllibTransport",
     "build_instruction",
     "map_status",
+    "split_provider_ref",
 ]
