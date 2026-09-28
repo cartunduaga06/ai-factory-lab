@@ -231,6 +231,15 @@ class WorkspaceProvisioner(ABC):
                 command line or a credential.
         """
 
+    @abstractmethod
+    def repair(self, task: FactoryTask, workspace: Workspace) -> Workspace:
+        """Restore access to the existing checkout without creating one.
+
+        Confirm the checkout and branch identity, preserve contents and executable
+        bits, and return the same workspace. Missing or unsafe checkouts must be
+        refused with WorkspaceProvisioningError.
+        """
+
 
 class QualityGateRunner(ABC):
     """Executes a declarative quality gate inside a run's workspace.

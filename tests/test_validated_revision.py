@@ -28,6 +28,7 @@ from factory.infrastructure.persistence import (
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.integrations.workspace.git import GitWorktreeWorkspaceProvisioner
 from factory.integrations.workspace.git_publish import GitWorkspacePublisher
 from factory.integrations.workspace.revision import GitWorkspaceRevisionInspector
 from factory.orchestration import PublicationService, RunTrackingService
@@ -133,6 +134,9 @@ def _validate(db_path: str, task: FactoryTask, run: AgentRun) -> AgentRun:
         gate_specs=specs("tests"),
         gate_runner=FakeQualityGateRunner(statuses={"tests": QualityGateStatus.PASSED}),
         revision_inspector=GitWorkspaceRevisionInspector(),
+        provisioner=GitWorktreeWorkspaceProvisioner(
+            str(Path(run.workspace.path).parent / "source")
+        ),  # type: ignore[union-attr]
     )
     result = service.refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
     assert result.run.validated_revision is not None

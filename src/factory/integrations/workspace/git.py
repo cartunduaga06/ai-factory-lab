@@ -96,6 +96,18 @@ class GitWorktreeWorkspaceProvisioner(WorkspaceProvisioner):
         self._normalize_permissions(target, workspace.workspace_id)
         return workspace
 
+    def repair(self, task: FactoryTask, workspace: Workspace) -> Workspace:
+        """Repair only an existing matching workspace using preparation's policy."""
+        del task
+        self._require_source_checkout(workspace.workspace_id)
+        target = Path(workspace.path).expanduser()
+        if target.is_symlink() or not target.is_dir():
+            raise WorkspaceProvisioningError(workspace.workspace_id)
+        self._confirm_existing(target, workspace)
+        self._normalize_permissions(target, workspace.workspace_id)
+        self._confirm_existing(target, workspace)
+        return workspace
+
     # -- internals ---------------------------------------------------------
 
     def _normalize_permissions(self, target: Path, workspace_id: str) -> None:

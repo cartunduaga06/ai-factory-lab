@@ -755,10 +755,14 @@ Two guards make reconciliation safe and deterministic:
   evaluated once and its gates persisted (the one recovery case). With no gate
   specs configured the factory invents nothing and only reconciles.
 
-A `SUCCEEDED` run with persisted, green gates but **no** bound revision (a crash
-between running the gates and persisting the revision, in a build that predates
-revision binding) is left unbound. Reconciliation never invents a revision from
-stale gate results: the run is simply not publishable until it is re-validated.
+A latest `SUCCEEDED` run with persisted green required gates but **no** bound
+revision can recover while its task is `VALIDATING`, provided neither durable PR
+storage (run or branch) nor the provider has a matching PR. Reconciliation repairs
+the same workspace, fingerprints it, executes **all configured gates again**,
+and fingerprints it again. Only identical fingerprints and green required gates
+bind a revision. No adapter call, new run or new workspace is involved. Failed
+required gates are not retried automatically; once bound, refresh is idempotent.
+A failed revalidation keeps the task `VALIDATING` and blocks publication.
 
 `CLAIMED → RUNNING` happens only *after* the run is durable, so a task is never
 `RUNNING` without a run behind it.
@@ -770,16 +774,22 @@ carry the identity of the exact workspace revision that passed the gates, and
 publication must re-verify it, because a completed coding agent (or a concurrent
 writer) can change the workspace — or its Git configuration — after validation.
 
-`RunTrackingService` inspects the workspace through the optional
-`WorkspaceRevisionInspector` port immediately **before** and **after** the gates
-run, and binds the identity only when the two match:
+`RunTrackingService` first loads the task and calls `WorkspaceProvisioner.repair`.
+This operation refuses missing checkouts and confirms the existing branch; it
+reuses preparation's permission policy without creating a worktree or changing
+contents. Tracking checks that the returned workspace identity is unchanged.
+It then uses `WorkspaceRevisionInspector` immediately **before** and **after**
+the gates and binds the identity only when the two match:
 
 - required gate failed → no revision bound;
 - workspace changed while the gates ran → a required, factory-controlled
   `workspace_integrity` gate is recorded as failed (detail
   `workspace changed during validation`) and no revision is bound. The configured
   gates are **never silently re-run**;
-- no inspector injected → no revision is bound. The factory never guesses.
+- repair or inspection fails (including a missing provisioner/inspector) → a
+  required failed `workspace_integrity` gate with a constant sanitized detail,
+  `GATES_FAILED`, and no bound revision. Raw errors and paths are discarded;
+  publication is not attempted by the runtime.
 
 The concrete `GitWorkspaceRevisionInspector` computes a **Git tree object id**
 over a private temporary index (`read-tree HEAD` → `add -A` → `write-tree`). That

@@ -44,6 +44,11 @@ class FakeWorkspaceProvisioner(WorkspaceProvisioner):
         self.prepared.append((workspace.workspace_id, workspace.branch, workspace.path))
         return workspace
 
+    def repair(self, task: FactoryTask, workspace: Workspace) -> Workspace:
+        if not Path(workspace.path).is_dir():
+            raise WorkspaceProvisioningError(workspace.workspace_id)
+        return self.prepare(task, workspace)
+
 
 def specs(*names: str) -> tuple[QualityGateSpec, ...]:
     """Build required gate specs named ``names`` with a trivial argv."""

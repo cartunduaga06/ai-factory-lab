@@ -202,3 +202,50 @@ def test_host_path_mapping_is_explicit_and_rejects_escape(tmp_path: Path) -> Non
     assert mapper.to_container(str(inside)) == "/projects/ws-1"
     with pytest.raises(WorkspacePathError):
         mapper.to_container(str(tmp_path / "elsewhere" / "ws-1"))
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_legacy_validating_runtime_revalidates_without_agent_or_new_records(
+    runtime_parts, failed: bool
+) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, runner = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)
+    task = tasks.list(TaskStatus.DISCOVERED)[0]
+    for target in (TaskStatus.READY, TaskStatus.CLAIMED, TaskStatus.RUNNING, TaskStatus.VALIDATING):
+        runtime._dispatch.lifecycle.transition(task.task_id, target)
+    root = Path(runtime._dispatch._workspace_root)
+    workspace = Workspace(
+        repository_slug=task.target_repository,
+        branch=f"factory/{task.task_id}/legacy",
+        path=str(root / "legacy"),
+    )
+    Path(workspace.path).mkdir(parents=True)
+    run = runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            workspace=workspace,
+            gates=(QualityGate("tests", QualityGateStatus.PASSED),),
+        )
+    )
+    if failed:
+        runner._statuses["tests"] = QualityGateStatus.FAILED
+
+    result = runtime.run_once()
+    stored = runs.get_run(run.run_id)
+    assert stored is not None
+    assert result.run_id == run.run_id
+    assert runner.calls == [("tests", workspace.path)]
+    assert adapter.dispatched == [] and adapter.collected == 0
+    assert len(runs.list_runs(task.task_id)) == 1
+    assert stored.workspace == workspace
+    assert runs.get_workspace(workspace.workspace_id) == workspace
+    assert list(root.iterdir()) == [Path(workspace.path)]
+    assert (stored.validated_revision is not None) == (not failed)
+    assert publisher.calls == sink.create_calls == (0 if failed else 1)
+    assert result.outcome == ("QUALITY_GATES_FAILED" if failed else "WAITING_HUMAN")
+    assert result.task_status is (TaskStatus.VALIDATING if failed else TaskStatus.WAITING_HUMAN)
+    runtime.run_once()
+    assert runner.calls == [("tests", workspace.path)]
+    assert adapter.dispatched == [] and adapter.collected == 0

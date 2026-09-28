@@ -81,6 +81,10 @@ class FactoryRuntime:
             gate_specs=gate_specs,
             gate_runner=gate_runner,
             revision_inspector=revision_inspector,
+            provisioner=provisioner,
+            pull_requests=pull_requests,
+            pull_request_sink=pull_request_sink,
+            base_branch=base_branch,
         )
         self._publication = PublicationService(
             tasks,

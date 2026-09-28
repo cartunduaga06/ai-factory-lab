@@ -26,26 +26,36 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from factory.domain.enums import QualityGateStatus, RunStatus, TaskStatus, ValidationOutcome
+from factory.domain.enums import (
+    QualityGateStatus,
+    RepositoryRole,
+    RunStatus,
+    TaskStatus,
+    ValidationOutcome,
+)
 from factory.domain.errors import AgentCollectError, FactoryError, WorkspaceRevisionError
 from factory.domain.models import (
     AgentAdapter,
     AgentRun,
     QualityGate,
     QualityGateSpec,
+    Repository,
     Workspace,
 )
 from factory.domain.ports import (
+    PullRequestRepository,
+    PullRequestSink,
     QualityGateRunner,
     RunRepository,
     TaskRepository,
+    WorkspaceProvisioner,
     WorkspaceRevisionInspector,
 )
 from factory.orchestration.machine import InvalidTransitionError
 from factory.orchestration.transitions import TaskLifecycleService
 
 #: Name of the factory-controlled integrity gate recorded when the workspace
-#: changes while the configured gates are executing. It is required, so a
+#: cannot be repaired/inspected or changes during validation. It is required, so a
 #: mutation makes the run's validation outcome ``GATES_FAILED`` (which blocks
 #: publication) rather than silently publishing an unverified revision.
 WORKSPACE_INTEGRITY_GATE = "workspace_integrity"
@@ -84,19 +94,28 @@ class RunTrackingService:
         gate_specs: Sequence[QualityGateSpec] = (),
         gate_runner: QualityGateRunner | None = None,
         revision_inspector: WorkspaceRevisionInspector | None = None,
+        provisioner: WorkspaceProvisioner | None = None,
+        pull_requests: PullRequestRepository | None = None,
+        pull_request_sink: PullRequestSink | None = None,
+        base_branch: str = "main",
     ) -> None:
         self._tasks = tasks
         self._runs = runs
         self._gate_specs = tuple(gate_specs)
         self._gate_runner = gate_runner
         self._revision_inspector = revision_inspector
+        self._provisioner = provisioner
+        self._pull_requests = pull_requests
+        self._pull_request_sink = pull_request_sink
+        self._base_branch = base_branch
         self._lifecycle = TaskLifecycleService(tasks)
 
     def refresh(self, run_id: str, adapter: AgentAdapter) -> RunRefresh:
         """Collect ``run_id`` from ``adapter``, persist it and advance the task.
 
         A run that is already terminal in storage is *not* re-collected and its
-        gates are not re-run, but the task lifecycle is still reconciled: a crash
+        gates are re-run only for the guarded unbound recovery case. Its task
+        lifecycle is still reconciled: a crash
         between persisting the terminal run and applying the task transition must
         be recoverable. The terminal path is therefore idempotent — a second pass
         changes nothing.
@@ -155,11 +174,10 @@ class RunTrackingService:
         gates are evaluated once and persisted. With no gate specs configured the
         factory invents nothing — an empty gate list is the documented result.
 
-        A successful run with green gates but **no** bound revision (a crash
-        between running the gates and persisting the revision, from a build that
-        predates revision binding) is left unbound. The factory never invents a
-        revision from stale gate results: an unverified revision is never claimed
-        green, so such a run is simply not publishable until it is re-validated.
+        A latest successful run with green persisted gates but no revision may
+        recover only while VALIDATING and without a persisted or remote PR.
+        Repair, both fingerprints and all configured gates run again; old gate
+        results never certify a new revision. Failed gates are never retried.
 
         Only the task's latest run may drive the task. A superseded terminal run
         (the task was retried and now has a newer run) must not rewind the
@@ -167,10 +185,44 @@ class RunTrackingService:
         """
         if not self._is_latest_run(run):
             return
-        if run.status is RunStatus.SUCCEEDED and not run.gates and self._gate_specs:
+        if run.status is RunStatus.SUCCEEDED and (
+            (not run.gates and self._gate_specs and run.validated_revision is None)
+            or self._can_revalidate(run)
+        ):
             run.gates, run.validated_revision = self._validate_revision(run)
             self._runs.update_run(run)
         self._drive_task(run)
+
+    def _can_revalidate(self, run: AgentRun) -> bool:
+        """Allow legacy recovery only with explicit evidence that no PR exists."""
+        task = self._tasks.get(run.task_id)
+        workspace = run.workspace
+        if (
+            task is None
+            or task.status is not TaskStatus.VALIDATING
+            or run.validated_revision is not None
+            or not run.gates
+            or not run.required_gates_passed
+            or workspace is None
+            or self._pull_requests is None
+            or self._pull_request_sink is None
+        ):
+            return False
+        if self._pull_requests.get_for_run(run.run_id) is not None:
+            return False
+        if (
+            self._pull_requests.find_by_branch(workspace.repository_slug, workspace.branch)
+            is not None
+        ):
+            return False
+        return (
+            self._pull_request_sink.find_open_pull_request(
+                Repository(task.target_repository, role=RepositoryRole.TARGET),
+                workspace.branch,
+                self._base_branch,
+            )
+            is None
+        )
 
     def _is_latest_run(self, run: AgentRun) -> bool:
         """Whether ``run`` is the most recent run for its task.
@@ -200,20 +252,26 @@ class RunTrackingService:
         * workspace changed during validation → a required
           ``workspace_integrity`` gate is recorded as failed and the revision is
           not bound;
-        * no revision inspector is injected → no revision is bound. The factory
-          never guesses one; publication then refuses the run.
+        * repair or inspection unavailable/failed → required integrity failure.
         """
-        if run.workspace is None:
-            # `_evaluate_gates` records every gate as failed; nothing is bound.
-            return self._evaluate_gates(run), None
+        workspace = run.workspace
+        task = self._tasks.get(run.task_id)
+        if workspace is None or task is None or self._provisioner is None:
+            return self._integrity_failure("workspace repair unavailable"), None
+        try:
+            repaired = self._provisioner.repair(task, workspace)
+            if repaired != workspace or workspace.repository_slug != task.target_repository:
+                return self._integrity_failure("workspace identity mismatch"), None
+        except Exception:  # noqa: BLE001 - no filesystem or provider detail crosses this boundary
+            return self._integrity_failure("workspace repair failed"), None
 
-        before = self._fingerprint(run.workspace)
+        before = self._fingerprint(workspace)
+        if before is None:
+            return self._integrity_failure("workspace inspection failed"), None
         gates = self._evaluate_gates(run)
-        after = self._fingerprint(run.workspace)
-
-        if before is None or after is None:
-            # The workspace could not be inspected, so no revision can be bound.
-            return gates, None
+        after = self._fingerprint(workspace)
+        if after is None:
+            return (*gates, *self._integrity_failure("workspace inspection failed")), None
         if before != after:
             # The workspace changed while the gates ran. Record a deterministic,
             # required integrity failure rather than trusting either snapshot, and
@@ -232,6 +290,10 @@ class RunTrackingService:
             # A required gate is not green: nothing may be published.
             return gates, None
         return gates, after
+
+    @staticmethod
+    def _integrity_failure(detail: str) -> tuple[QualityGate, ...]:
+        return (QualityGate(WORKSPACE_INTEGRITY_GATE, QualityGateStatus.FAILED, detail, True),)
 
     def _fingerprint(self, workspace: Workspace) -> str | None:
         """Return the workspace revision, or ``None`` if it cannot be inspected.
@@ -252,11 +314,10 @@ class RunTrackingService:
     def _evaluate_gates(self, run: AgentRun) -> tuple[QualityGate, ...]:
         """Run every configured gate in the run's workspace.
 
-        With no gates configured the run carries no gate results and
+        With no gates configured this method returns no gate results and
         :attr:`AgentRun.required_gates_passed` is vacuously true, so the outcome
-        is ``READY_FOR_NEXT_PHASE``. This is deliberate: the factory does not
-        invent gates a repository never defined, and nothing was configured to
-        block the run. The behaviour is documented rather than hidden.
+        is ``READY_FOR_NEXT_PHASE`` only if repair and inspection succeed.
+        No configured check is invented; workspace integrity is still required.
 
         A run without a workspace cannot be validated, so its gates are recorded
         as failed — never as a silent pass.
