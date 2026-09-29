@@ -53,6 +53,8 @@ The output masks all credentials (`"***"`). Never commit `.env`.
 | Types | `mypy` |
 | Config sanity check | `python -m factory --show-config` |
 | Manual issue intake | `python -m factory intake` |
+| One-shot task run | `python -m factory run` |
+| Automatic worker | `python -m factory watch` |
 
 `pyproject.toml` sets `testpaths = ["tests"]` and `pythonpath = ["src"]`, so
 `pytest` works from the repository root without installing the package.

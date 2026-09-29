@@ -26,6 +26,9 @@ DEFAULT_DATABASE_PATH = "./factory.db"
 DEFAULT_TARGET_BRANCH = "main"
 DEFAULT_RUN_POLL_INTERVAL = 5.0
 DEFAULT_RUN_TIMEOUT = 1800.0
+# Idle wait between watch iterations when no eligible work exists. Positive by
+# default so an unattended worker cannot spin against the GitHub API.
+DEFAULT_WATCH_IDLE_INTERVAL = 60.0
 
 
 class DatabaseScheme(StrEnum):
@@ -240,6 +243,9 @@ class FactoryConfig:
     github_git_host: str = DEFAULT_GITHUB_GIT_HOST
     run_poll_interval: float = DEFAULT_RUN_POLL_INTERVAL
     run_timeout: float = DEFAULT_RUN_TIMEOUT
+    # Idle wait between iterations of the automatic worker. Only ``factory watch``
+    # reads it; ``factory run`` stays a single bounded pass.
+    watch_idle_interval: float = DEFAULT_WATCH_IDLE_INTERVAL
     # Command the OpenHands conversation runs as a shared-workspace hook. When
     # set, it is passed as ``hook_config`` on conversation creation: it
     # normalizes owner-side after ``file_editor`` writes and blocks completion
@@ -294,6 +300,9 @@ class FactoryConfig:
                 source.get("FACTORY_RUN_POLL_INTERVAL"), DEFAULT_RUN_POLL_INTERVAL
             ),
             run_timeout=_duration(source.get("FACTORY_RUN_TIMEOUT"), DEFAULT_RUN_TIMEOUT),
+            watch_idle_interval=_duration(
+                source.get("FACTORY_WATCH_IDLE_INTERVAL"), DEFAULT_WATCH_IDLE_INTERVAL
+            ),
             openhands_shared_workspace_hook_command=_clean(
                 source.get("OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND")
             ),
@@ -332,6 +341,7 @@ class FactoryConfig:
             "github_git_host": self.github_git_host,
             "run_poll_interval": self.run_poll_interval,
             "run_timeout": self.run_timeout,
+            "watch_idle_interval": self.watch_idle_interval,
             "openhands_shared_workspace_hook_command": (
                 self.openhands_shared_workspace_hook_command
             ),

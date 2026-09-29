@@ -132,6 +132,36 @@ Acceptance: apply `factory-ready` to Issue #8, confirm the command creates one
 isolated branch and PR, verify the final task state is `WAITING_HUMAN`, then
 stop for human review. Do not merge or deploy as part of acceptance.
 
+## 1a-bis. Automatic worker (Phase 6)
+
+The autonomous mode reuses the one-shot runtime above rather than duplicating any
+phase. It calls `FactoryRuntime.run_once()` in a sequential loop:
+
+```bash
+python -m factory watch
+```
+
+* **WIP = 1.** Each iteration invokes the runtime exactly once, and the runtime
+  completes at most one task at a time. A `WAITING_HUMAN` task stays the single
+  in-flight task until a human advances it, so no second issue is started while
+  work is awaiting review.
+* **Idle wait.** When an iteration finds no eligible task
+  (`NO_ELIGIBLE_TASK`), the worker sleeps `FACTORY_WATCH_IDLE_INTERVAL` seconds
+  (default `60`) and checks again. It never spins against the GitHub API.
+* **Clean stop.** `SIGINT` (Ctrl+C) and `SIGTERM` only set a stop flag, which the
+  loop observes *between* iterations. A signal never interrupts an in-flight
+  task or corrupts persisted state, and the previous signal handlers are
+  restored before the process exits.
+* **Idempotent by construction.** The runtime reconciles by persisted state, so a
+  restart or a repeated iteration re-observes the same task/run/branch/PR rather
+  than creating a duplicate.
+* **No auto-merge, no deploy.** The worker stops at `WAITING_HUMAN` exactly as
+  `factory run` does.
+
+`factory run` is unchanged: it remains a single bounded pass an operator or a
+health check can invoke. There is still no scheduler; `watch` is a foreground
+loop supervised by an operator or a service manager (e.g. `systemd`).
+
 ## 1b. Run lifecycle and dispatch (Phase 2B)
 
 The second capability claims a ready task and records the run it produces:
@@ -402,8 +432,9 @@ Not present yet — deliberately deferred:
   `AgentAdapter` seam still admits others.
 - **Any merge capability.** The factory stops at `WAITING_HUMAN`; merge,
   auto-merge and deploy are human actions and are absent from the code.
-- **A scheduler or daemon.** Intake is a single manual run; dispatch, tracking and
-  publication are called programmatically.
+- **A scheduler or daemon.** `factory watch` is a foreground loop an operator
+  supervises; the factory ships no scheduler, service unit or background daemon
+  of its own.
 - **A dashboard, API or FastAPI service.**
 - **PostgreSQL.** Persistence is SQLite only; `DATABASE_URL` rejects other
   schemes.
@@ -470,7 +501,7 @@ policy is stated in full — with the reasoning behind each boundary — in
 | 3 ✅ | `OpenHandsAdapter`: real OpenHands Agent Server dispatch, collect and cancel |
 | 4 ✅ | Isolated `git worktree` workspace per run; quality gates evaluated in `VALIDATING` |
 | 5 ✅ | Commit/push the isolated branch, open and persist a PR, hand off at `WAITING_HUMAN` (never merge) |
-| 6 | API / dashboard on top of the orchestrator |
+| 6 ✅ | Automatic worker `watch`: sequential one-task iterations (WIP=1), configurable idle wait, clean SIGINT/SIGTERM stop |
 
 Each phase is delivered through a Pull Request and is never merged by the agent
 that produced it.

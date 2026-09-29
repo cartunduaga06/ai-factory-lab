@@ -10,6 +10,7 @@ import pytest
 from factory.infrastructure.config import (
     DEFAULT_DATABASE_PATH,
     DEFAULT_GITHUB_API_URL,
+    DEFAULT_WATCH_IDLE_INTERVAL,
     DEFAULT_WORKSPACE_ROOT,
     DatabaseScheme,
     Environment,
@@ -31,6 +32,8 @@ def test_defaults_are_safe_with_empty_environment() -> None:
     assert config.workspace_root == DEFAULT_WORKSPACE_ROOT
     assert config.logging.level == "INFO"
     assert config.logging.fmt is LogFormat.TEXT
+    assert config.watch_idle_interval == DEFAULT_WATCH_IDLE_INTERVAL
+    assert config.watch_idle_interval > 0
 
 
 def test_placeholders_are_treated_as_unset() -> None:
@@ -285,6 +288,21 @@ def test_target_default_branch_is_configurable() -> None:
     config = FactoryConfig.from_env({"FACTORY_TARGET_DEFAULT_BRANCH": "develop"})
     assert config.target_default_branch == "develop"
     assert config.redacted()["target_default_branch"] == "develop"
+
+
+def test_watch_idle_interval_defaults_safe_and_is_configurable() -> None:
+    default = FactoryConfig.from_env({})
+    assert default.watch_idle_interval == DEFAULT_WATCH_IDLE_INTERVAL
+    assert default.redacted()["watch_idle_interval"] == DEFAULT_WATCH_IDLE_INTERVAL
+
+    custom = FactoryConfig.from_env({"FACTORY_WATCH_IDLE_INTERVAL": "12.5"})
+    assert custom.watch_idle_interval == 12.5
+    assert custom.redacted()["watch_idle_interval"] == 12.5
+
+
+def test_watch_idle_interval_placeholder_falls_back_to_default() -> None:
+    config = FactoryConfig.from_env({"FACTORY_WATCH_IDLE_INTERVAL": "<seconds>"})
+    assert config.watch_idle_interval == DEFAULT_WATCH_IDLE_INTERVAL
 
 
 def test_write_token_placeholder_is_treated_as_unset() -> None:
