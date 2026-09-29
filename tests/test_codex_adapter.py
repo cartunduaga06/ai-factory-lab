@@ -12,6 +12,7 @@ import pytest
 from factory.domain.enums import AgentKind, RunStatus, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.integrations.codex import CodexAdapter
+from factory.integrations.codex.worker import MAX_OUTPUT_BYTES
 
 
 def _task() -> FactoryTask:
@@ -74,6 +75,45 @@ pathlib.Path(args[6]).write_text('Done')
     assert run.status is RunStatus.SUCCEEDED
     assert run.finished_at is not None
     assert run.summary is None
+
+
+def test_code_can_write_large_workspace_file_and_last_message(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    executable = _executable(
+        tmp_path,
+        """import pathlib, sys
+args = sys.argv[1:]
+pathlib.Path('generated.bin').write_bytes(b'x' * 1_048_577)
+pathlib.Path(args[6]).write_text('Done')
+print('complete')
+""",
+    )
+    adapter = CodexAdapter(executable=executable)
+    run = _collect(adapter, adapter.dispatch(_task(), _workspace(checkout)))
+    assert run.status is RunStatus.SUCCEEDED
+    assert (checkout / "generated.bin").stat().st_size == MAX_OUTPUT_BYTES + 1
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_oversized_output_fails_and_capture_is_bounded(tmp_path: Path, stream: str) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    executable = _executable(
+        tmp_path,
+        f"""import pathlib, sys
+pathlib.Path(sys.argv[7]).write_text('Done')
+sys.{stream}.buffer.write(b'x' * {MAX_OUTPUT_BYTES + 1})
+sys.{stream}.flush()
+""",
+    )
+    adapter = CodexAdapter(executable=executable)
+    workspace = _workspace(checkout)
+    run = _collect(adapter, adapter.dispatch(_task(), workspace))
+    evidence = json.loads((CodexAdapter._state_dir(workspace) / f"{run.run_id}.result").read_text())
+    assert run.status is RunStatus.FAILED
+    assert evidence["status"] == "FAILED"
+    assert evidence[f"{stream}_bytes"] == MAX_OUTPUT_BYTES
 
 
 @pytest.mark.parametrize(
