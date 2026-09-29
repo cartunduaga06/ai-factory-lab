@@ -24,13 +24,23 @@ def _task(title: str, *, kind: TaskKind = TaskKind.CODE) -> FactoryTask:
     return FactoryTask(title=title, target_repository="owner/repo", kind=kind)
 
 
-def test_pinned_registry_parses_and_selects_explicit_type() -> None:
+@pytest.mark.parametrize(
+    ("task_type", "name", "heading"),
+    [
+        ("verification", "verification-loop", "# Verification Loop Skill"),
+        ("code-quality", "coding-standards", "# Coding Standards & Best Practices"),
+        ("error-handling", "error-handling", "# Error Handling Patterns"),
+    ],
+)
+def test_pinned_registry_parses_and_selects_explicit_type(
+    task_type: str, name: str, heading: str
+) -> None:
     records = load_registry()
-    assert len(records) == 1
-    selected = select_skill(_task("Review change [type:verification]"), records)
-    assert selected.name == "verification-loop"
+    assert len(records) == 3
+    selected = select_skill(_task(f"Review change [type:{task_type}]"), records)
+    assert selected.name == name
     assert selected.upstream_commit == "c9148d0bb239ed01a95724a5928b98cdf9c30658"
-    assert "# Verification Loop Skill" in load_registered_skill(selected)
+    assert heading in load_registered_skill(selected)
 
 
 def test_registry_rejects_bad_schema_and_duplicate_names() -> None:
@@ -39,6 +49,10 @@ def test_registry_rejects_bad_schema_and_duplicate_names() -> None:
     with pytest.raises(ValueError, match="version"):
         parse_registry(json.dumps(data).encode())
     data["version"] = 1
+    data["skills"].pop()
+    with pytest.raises(ValueError, match="3 to 5"):
+        parse_registry(json.dumps(data).encode())
+    data = json.loads(REGISTRY_PATH.read_text())
     data["skills"].append(data["skills"][0])
     with pytest.raises(ValueError, match="duplicate"):
         parse_registry(json.dumps(data).encode())
@@ -77,8 +91,9 @@ def test_selection_rejects_unknown_blocked_and_ambiguous() -> None:
         select_skill(_task("[type:verification]"), (records[0], duplicate_type))
 
 
-def test_selected_skill_digest_mismatch_and_symlink(tmp_path: Path) -> None:
-    selected = load_registry()[0]
+@pytest.mark.parametrize("name", ["verification-loop", "coding-standards", "error-handling"])
+def test_selected_skill_digest_mismatch_and_symlink(tmp_path: Path, name: str) -> None:
+    selected = next(record for record in load_registry() if record.name == name)
     with pytest.raises(ValueError, match="unregistered"):
         load_registered_skill(replace(selected, name="unknown"))
     location = tmp_path / selected.name

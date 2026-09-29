@@ -13,7 +13,7 @@ from factory.domain.enums import TaskKind
 from factory.domain.models import FactoryTask
 
 REGISTRY_PATH = Path(__file__).parent / "ecc" / "registry.json"
-REGISTRY_SHA256 = "2b2f2d459b4cc4763996ad73e2c3eeecf87df4d13e1e647abc7af77b22f282e4"
+REGISTRY_SHA256 = "61de28f0352632cfb80d69add1a59e5e98b62a6353df691c90824a23efc5feef"
 _TASK_TYPE = re.compile(r"\[type:([a-z][a-z0-9-]*)\]")
 _NAME = re.compile(r"[a-z][a-z0-9-]*")
 _SHA = re.compile(r"[0-9a-f]{64}")
@@ -52,14 +52,18 @@ def parse_registry(content: bytes) -> tuple[SkillRecord, ...]:
         if type(data["version"]) is not int or data["version"] != 1:
             raise ValueError("unsupported ECC registry version")
         entries = data["skills"]
-        if not isinstance(entries, list) or not entries:
-            raise ValueError("empty ECC registry")
+        if not isinstance(entries, list) or not 3 <= len(entries) <= 5:
+            raise ValueError("ECC registry must contain 3 to 5 skills")
         records: list[SkillRecord] = []
         for entry in entries:
             if not isinstance(entry, dict) or set(entry) != set(SkillRecord.__dataclass_fields__):
                 raise ValueError("invalid ECC skill record")
             strings = (
-                "name", "upstream_repository", "upstream_commit", "source_path", "sha256",
+                "name",
+                "upstream_repository",
+                "upstream_commit",
+                "source_path",
+                "sha256",
                 "approval_status",
             )
             if any(not isinstance(entry[key], str) for key in strings):
@@ -79,22 +83,29 @@ def parse_registry(content: bytes) -> tuple[SkillRecord, ...]:
                 raise ValueError("invalid ECC approval")
             for field in ("task_types", "capabilities"):
                 values = entry[field]
-                if not isinstance(values, list) or not values or any(
-                    not isinstance(value, str) or not _NAME.fullmatch(value) for value in values
-                ) or len(values) != len(set(values)):
+                if (
+                    not isinstance(values, list)
+                    or not values
+                    or any(
+                        not isinstance(value, str) or not _NAME.fullmatch(value) for value in values
+                    )
+                    or len(values) != len(set(values))
+                ):
                     raise ValueError("invalid ECC allowlist")
             if entry["capabilities"] != ["code-guidance"]:
                 raise ValueError("unsupported ECC capability")
-            records.append(SkillRecord(
-                name=name,
-                upstream_repository=entry["upstream_repository"],
-                upstream_commit=entry["upstream_commit"],
-                source_path=entry["source_path"],
-                sha256=entry["sha256"],
-                task_types=tuple(entry["task_types"]),
-                capabilities=tuple(entry["capabilities"]),
-                approval_status=entry["approval_status"],
-            ))
+            records.append(
+                SkillRecord(
+                    name=name,
+                    upstream_repository=entry["upstream_repository"],
+                    upstream_commit=entry["upstream_commit"],
+                    source_path=entry["source_path"],
+                    sha256=entry["sha256"],
+                    task_types=tuple(entry["task_types"]),
+                    capabilities=tuple(entry["capabilities"]),
+                    approval_status=entry["approval_status"],
+                )
+            )
         if len({record.name for record in records}) != len(records):
             raise ValueError("duplicate ECC skill")
         return tuple(records)

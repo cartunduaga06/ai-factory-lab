@@ -60,15 +60,25 @@ def test_pinned_ecc_skill_loading_fails_closed(tmp_path: Path) -> None:
         load_skill(SKILL_NAME, path=changed)
 
 
-@pytest.mark.parametrize("selection", [SKILL_NAME, "auto"])
-def test_ecc_codex_then_factory_gate_in_isolated_checkout(tmp_path: Path, selection: str) -> None:
+@pytest.mark.parametrize(
+    ("selection", "task_type", "heading"),
+    [
+        (SKILL_NAME, None, "# Verification Loop Skill"),
+        ("auto", "verification", "# Verification Loop Skill"),
+        ("auto", "code-quality", "# Coding Standards & Best Practices"),
+        ("auto", "error-handling", "# Error Handling Patterns"),
+    ],
+)
+def test_ecc_codex_then_factory_gate_in_isolated_checkout(
+    tmp_path: Path, selection: str, task_type: str | None, heading: str
+) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     executable = _executable(
         tmp_path,
-        """import pathlib, sys
+        f"""import pathlib, sys
 instruction = sys.stdin.read()
-assert '# Verification Loop Skill' in instruction
+assert {heading!r} in instruction
 assert 'Factory quality gates and human review remain authoritative' in instruction
 pathlib.Path('result.txt').write_text('reviewed')
 pathlib.Path(sys.argv[7]).write_text('Done')
@@ -77,8 +87,8 @@ pathlib.Path(sys.argv[7]).write_text('Done')
     workspace = _workspace(checkout)
     adapter = CodexAdapter(executable=executable, ecc_skill=selection)
     task = _task()
-    if selection == "auto":
-        task.title = "Implement a feature [type:verification]"
+    if task_type is not None:
+        task.title = f"Implement a feature [type:{task_type}]"
     run = _collect(adapter, adapter.dispatch(task, workspace))
     assert run.status is RunStatus.SUCCEEDED
     gate = LocalQualityGateRunner().run(
