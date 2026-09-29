@@ -469,6 +469,19 @@ def test_two_runs_cannot_share_a_workspace(db_path: str) -> None:
     assert len(repository.list_runs(second.task_id)) == 0
 
 
+def test_terminal_rework_runs_may_reuse_the_same_task_workspace(db_path: str) -> None:
+    tasks = _tasks(db_path)
+    task = tasks.save(_task())
+    repository = _runs(db_path)
+    shared = _workspace(task.task_id, workspace_id="ws-reviewed")
+    first = _run(task.task_id, run_id="review-1", workspace=shared)
+    first.status = RunStatus.SUCCEEDED
+    repository.save_run(first)
+    second = _run(task.task_id, run_id="review-2", workspace=shared)
+    repository.save_run(second)
+    assert len(repository.list_runs(task.task_id)) == 2
+
+
 def test_runs_without_workspace_do_not_collide(db_path: str) -> None:
     # The one-workspace-per-run index is partial: NULL workspaces are exempt.
     tasks = _tasks(db_path)

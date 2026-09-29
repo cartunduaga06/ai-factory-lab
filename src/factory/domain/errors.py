@@ -62,10 +62,9 @@ class DuplicateRunError(FactoryError):
     Raised by persistence when a run with the same ``run_id`` already exists,
     when the task already has an active (non-terminal) run, or when another run
     already owns the workspace the run points at. The unique indexes over active
-    runs and over run workspaces are the defense-in-depth guards behind dispatch
-    idempotency and the one-workspace-per-run isolation invariant: even if two
-    dispatchers slip past the application-level check, storage refuses the
-    duplicate.
+    runs and active workspace use guard dispatch idempotency. Sequential QA
+    rework runs of the same task may reuse its completed checkout; a different
+    task may never claim that workspace.
     """
 
     def __init__(

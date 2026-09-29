@@ -123,15 +123,15 @@ class Repository:
 class Workspace:
     """An isolated checkout where a single agent run operates.
 
-    Workspaces are ephemeral and per-run: an agent never shares a working tree
-    with another run or with the factory's own repository.
+    Workspaces are isolated from other tasks and from the factory's own
+    repository. Sequential QA rework runs for one task reuse its reviewed
+    checkout and branch; concurrent runs never share a working tree.
 
     ``workspace_id`` is the stable pre-dispatch identity of the workspace. It is
     generated before the agent engine is involved (the engine's own conversation
     id is not known until dispatch), and it — not the task id — is what makes a
-    workspace unique. That distinction is the guardrail behind one branch and one
-    working tree per *run attempt*: retrying the same task yields a fresh
-    workspace id, and therefore a different branch and path.
+    workspace unique. Ordinary retries create a fresh workspace id, branch and
+    path. Human QA rework deliberately keeps the reviewed workspace identity.
     """
 
     workspace_id: str = field(default_factory=_new_id)

@@ -21,6 +21,7 @@ import json
 import signal
 import threading
 from collections.abc import Sequence
+from pathlib import Path
 from types import FrameType
 from typing import Any
 from uuid import UUID
@@ -59,6 +60,7 @@ from factory.integrations.workspace import (
 )
 from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.retry import RetryService
+from factory.orchestration.rework import ReworkNotAllowedError, ReworkService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
 
@@ -96,6 +98,13 @@ def build_parser() -> argparse.ArgumentParser:
         "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
     )
     retry.add_argument("--task-id", required=True, type=UUID, help="UUID of the task to recover.")
+    rework = subparsers.add_parser(
+        "request-changes", help="Record human QA feedback for an open PR."
+    )
+    rework.add_argument("--task-id", required=True, type=UUID)
+    rework.add_argument(
+        "--feedback-file", required=True, help="UTF-8 file containing reviewed QA feedback."
+    )
     return parser
 
 
@@ -120,6 +129,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_intake(config)
     if args.command == "retry":
         return _run_retry(config, str(args.task_id))
+    if args.command == "request-changes":
+        return _request_changes(config, str(args.task_id), args.feedback_file)
     if args.command == "run":
         return _run_runtime(config)
     if args.command == "watch":
@@ -194,6 +205,39 @@ def _run_retry(config: FactoryConfig, task_id: str) -> int:
         return EXIT_INTAKE_ERROR
     except Exception as exc:  # noqa: BLE001 - never print storage errors or paths
         print(f"retry failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    print(f"Task: {task.task_id}")
+    print(f"Task status: {task.status.value}")
+    return EXIT_OK
+
+
+def _request_changes(config: FactoryConfig, task_id: str, feedback_file: str) -> int:
+    """Record a human rejection after confirming the exact PR is still open."""
+    try:
+        feedback_path = Path(feedback_file)
+        if feedback_path.stat().st_size > 16000:
+            raise ReworkNotAllowedError("QA feedback file is too large")
+        feedback = feedback_path.read_text(encoding="utf-8")
+        if config.github.token is None:
+            raise ConfigurationError("GITHUB_TOKEN is required to verify the PR")
+        tasks = SqliteTaskRepository(config.database.path)
+        runs = SqliteRunRepository(config.database.path)
+        prs = SqlitePullRequestRepository(config.database.path)
+        tasks.initialize()
+        runs.initialize()
+        prs.initialize()
+        state = GitHubPullRequestStateSource(
+            GitHubClient(token=config.github.token, api_url=config.github.api_url)
+        )
+        task = ReworkService(tasks, runs, prs, state).request(task_id, feedback)
+    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except (ReworkNotAllowedError, TaskStateChangedError, KeyError) as exc:
+        print(f"request-changes refused: {exc}")
+        return EXIT_INTAKE_ERROR
+    except Exception as exc:  # noqa: BLE001 - no raw provider, path or credential text
+        print(f"request-changes failed: {type(exc).__name__}")
         return EXIT_INTAKE_ERROR
     print(f"Task: {task.task_id}")
     print(f"Task status: {task.status.value}")

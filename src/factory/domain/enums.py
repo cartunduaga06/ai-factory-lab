@@ -23,6 +23,7 @@ class TaskStatus(StrEnum):
     VALIDATING = "VALIDATING"
     PR_OPEN = "PR_OPEN"
     WAITING_HUMAN = "WAITING_HUMAN"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
     DONE = "DONE"
 
     # Failure / interruption paths.

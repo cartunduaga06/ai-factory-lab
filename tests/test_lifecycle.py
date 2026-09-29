@@ -61,6 +61,24 @@ def test_blocked_can_recover_to_ready() -> None:
     assert task.status is TaskStatus.READY
 
 
+def test_human_rework_returns_to_the_execution_pipeline() -> None:
+    machine = TaskStateMachine()
+    task = _task()
+    for target in HAPPY_PATH[1:-1]:
+        machine.apply(task, target)
+    for target in (
+        TaskStatus.CHANGES_REQUESTED,
+        TaskStatus.READY,
+        TaskStatus.CLAIMED,
+        TaskStatus.RUNNING,
+        TaskStatus.VALIDATING,
+        TaskStatus.PR_OPEN,
+        TaskStatus.WAITING_HUMAN,
+    ):
+        machine.apply(task, target)
+    assert task.status is TaskStatus.WAITING_HUMAN
+
+
 def test_illegal_transition_is_rejected() -> None:
     machine = TaskStateMachine()
     task = _task()

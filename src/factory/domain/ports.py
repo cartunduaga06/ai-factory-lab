@@ -71,6 +71,15 @@ class TaskRepository(ABC):
     """
 
     @abstractmethod
+    def request_rework(self, task_id: str, run_id: str, feedback: str) -> FactoryTask:
+        """Atomically record QA feedback and WAITING_HUMAN -> CHANGES_REQUESTED."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def latest_rework_feedback(self, task_id: str) -> str | None:
+        """Return the most recent durable, sanitized QA feedback."""
+
+    @abstractmethod
     def initialize(self) -> None:
         """Create the schema if needed. Idempotent and safe to call repeatedly."""
 

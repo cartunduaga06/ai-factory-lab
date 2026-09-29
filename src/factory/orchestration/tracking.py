@@ -79,6 +79,7 @@ class RunRefresh:
 
 #: Task status each terminal run status drives the task toward. ``SUCCEEDED``
 #: stops at ``VALIDATING`` on purpose; ``PR_OPEN`` belongs to a later phase.
+#: Failed QA rework is overridden to recoverable ``BLOCKED`` below.
 _TERMINAL_TASK_TARGET: dict[RunStatus, TaskStatus] = {
     RunStatus.SUCCEEDED: TaskStatus.VALIDATING,
     RunStatus.FAILED: TaskStatus.FAILED,
@@ -393,6 +394,11 @@ class RunTrackingService:
         target = _TERMINAL_TASK_TARGET.get(run.status)
         if target is None:
             return
+        if (
+            run.status is RunStatus.FAILED
+            and self._tasks.latest_rework_feedback(run.task_id) is not None
+        ):
+            target = TaskStatus.BLOCKED
         task = self._tasks.get(run.task_id)
         if task is None or task.status is target:
             return

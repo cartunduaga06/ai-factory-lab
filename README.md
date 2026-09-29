@@ -132,6 +132,19 @@ Acceptance: apply `factory-ready` to Issue #8, confirm the command creates one
 isolated branch and PR, verify the final task state is `WAITING_HUMAN`, then
 stop for human review. Do not merge or deploy as part of acceptance.
 
+To request a Codex QA rework pass on an open reviewed PR, save the human
+feedback in a UTF-8 file and run:
+
+```bash
+python -m factory request-changes --task-id <uuid> --feedback-file qa-feedback.txt
+python -m factory run
+```
+
+The request command checks the exact open PR, stores sanitized feedback and
+records `CHANGES_REQUESTED`. The next run uses the reviewed branch and updates
+the same PR, then returns to `WAITING_HUMAN`. A failed rework run can be resumed
+with `python -m factory retry --task-id <uuid>`.
+
 ## 1a-bis. Automatic worker (Phase 6)
 
 The autonomous mode reuses the one-shot runtime above rather than duplicating any

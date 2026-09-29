@@ -35,7 +35,11 @@ class RetryService:
             raise RetryNotAllowedError(f"task {task_id} has an active run")
         if task.status is TaskStatus.CLAIMED:
             history = self._runs.list_runs(task_id)
-            if not history or history[-1].status is not RunStatus.FAILED:
+            rework_claim = self._tasks.latest_rework_feedback(task_id) is not None
+            if not history or (
+                history[-1].status is not RunStatus.FAILED
+                and not (rework_claim and history[-1].is_terminal)
+            ):
                 raise RetryNotAllowedError(
                     f"task {task_id} legacy CLAIMED recovery requires latest run FAILED"
                 )

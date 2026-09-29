@@ -18,6 +18,7 @@ from factory.orchestration.publication import (
     PublicationService,
     build_pull_request_body,
 )
+from factory.orchestration.rework import ReworkNotAllowedError, ReworkService, sanitize_feedback
 from factory.orchestration.tracking import RunRefresh, RunTrackingService
 from factory.orchestration.transitions import TaskLifecycleService
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
@@ -32,6 +33,8 @@ __all__ = [
     "IssueIntakeService",
     "PublicationResult",
     "PublicationService",
+    "ReworkNotAllowedError",
+    "ReworkService",
     "RunRefresh",
     "RunTrackingService",
     "TaskLifecycleService",
@@ -41,4 +44,5 @@ __all__ = [
     "build_pull_request_body",
     "can_transition",
     "next_states",
+    "sanitize_feedback",
 ]
