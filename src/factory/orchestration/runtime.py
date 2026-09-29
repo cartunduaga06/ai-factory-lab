@@ -226,9 +226,29 @@ class FactoryRuntime:
 
     def _select_task(self) -> FactoryTask | None:
         # Recovery states take precedence over new work; ordering within each
-        # state is the repository's stable created_at/task_id order.
+        # state is the repository's stable created_at/task_id order. Human
+        # review of a CODE PR does not occupy the separate scratch workflow.
+        waiting = self._tasks.list(TaskStatus.WAITING_HUMAN)
+        if waiting:
+            for status in (
+                TaskStatus.VALIDATING,
+                TaskStatus.RUNNING,
+                TaskStatus.CLAIMED,
+                TaskStatus.READY,
+                TaskStatus.DISCOVERED,
+            ):
+                operational = next(
+                    (
+                        task
+                        for task in self._tasks.list(status)
+                        if task.kind is TaskKind.OPERATIONAL
+                    ),
+                    None,
+                )
+                if operational is not None:
+                    return operational
+            return waiting[0]
         for status in (
-            TaskStatus.WAITING_HUMAN,
             TaskStatus.PR_OPEN,
             TaskStatus.VALIDATING,
             TaskStatus.RUNNING,

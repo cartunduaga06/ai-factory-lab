@@ -215,6 +215,50 @@ def test_watch_codex_scratch_acceptance_without_pr(tmp_path: Path) -> None:
     assert publisher.calls == sink.create_calls == 0
 
 
+def test_new_operational_issue_runs_while_code_awaits_human(tmp_path: Path) -> None:
+    operational = _task()
+    operational.source = TaskSource("github", "example/control", 39)
+    runtime, tasks, runs, publisher, sink = _runtime(
+        tmp_path, operational, _fake_codex(tmp_path), github=True
+    )
+    code = tasks.save(
+        FactoryTask(
+            title="Code PR awaiting review",
+            target_repository="example/target",
+            source=TaskSource("github", "example/control", 36),
+            kind=TaskKind.CODE,
+        )
+    )
+    for status in (
+        TaskStatus.READY,
+        TaskStatus.CLAIMED,
+        TaskStatus.RUNNING,
+        TaskStatus.VALIDATING,
+        TaskStatus.PR_OPEN,
+        TaskStatus.WAITING_HUMAN,
+    ):
+        runtime._dispatch.lifecycle.transition(code.task_id, status)
+
+    summary = runtime._intake.intake(runtime._intake_repository)
+    discovered = tasks.find_by_source(operational.source)
+    assert summary.created == 1
+    assert discovered is not None and discovered.status is TaskStatus.DISCOVERED
+    assert tasks.history(discovered.task_id) == []
+
+    result = runtime.run_once()
+
+    assert result.task_id == discovered.task_id
+    assert result.outcome == "OPERATIONAL_DONE"
+    assert tasks.get(discovered.task_id).status is TaskStatus.DONE
+    assert [(t.from_status, t.to_status) for t in tasks.history(discovered.task_id)][:2] == [
+        (TaskStatus.DISCOVERED, TaskStatus.READY),
+        (TaskStatus.READY, TaskStatus.CLAIMED),
+    ]
+    assert len(runs.list_runs(discovered.task_id)) == 1
+    assert tasks.get(code.task_id).status is TaskStatus.WAITING_HUMAN
+    assert publisher.calls == sink.create_calls == 0
+
+
 def test_agent_exit_zero_without_artifact_blocks(tmp_path: Path) -> None:
     task = _task()
     runtime, tasks, runs, publisher, sink = _runtime(
