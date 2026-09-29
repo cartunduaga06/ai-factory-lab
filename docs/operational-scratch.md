@@ -43,3 +43,28 @@ human gate and a stronger host capability; this MVP authorizes no such action.
 The repository's offline watcher test exercises intake, Codex worker, scratch
 artifact validation and the branchless final state. It does not claim that a
 live GitHub Issue or the ai-server host was modified during development.
+
+## OPERATIONAL v2 boundary
+
+`OperationalCapability` names `scratch`, `database_readonly`, `docker_inspect`,
+`service_health`, and `backup`. `OperationalPolicy` defaults to scratch only;
+its host, path, command, and target allowlists start empty. The runtime checks
+that scratch is enabled before dispatch. A declaration cannot modify this
+operator-owned policy. The intake parser and Codex adapter still accept only the
+fixed scratch declaration, so naming or even configuring a v2 capability does
+not execute a host command. This is a policy foundation, not an authorization
+to inspect a live database, Docker daemon, or service. Backup is always denied
+until its route and allowlist design and human gate are implemented and tested.
+
+Future read-only executors must use exact allowlisted hosts, paths, argv commands,
+and targets, a non-root account, bounded time and output, and sanitized evidence.
+`database_readonly` must use a database-enforced read-only connection;
+`docker_inspect` must expose no start, stop, or recreate; `service_health` must
+read only allowlisted targets. Cutover, webhook, Meta, and destructive actions
+have no capability. Until those executors and their offline E2E tests exist,
+requests for these modes fail closed at intake or dispatch.
+
+Rollback is to stop the worker, restore the previous release, and leave any
+blocked task for an explicit retry after correcting policy. The scratch artifact
+is disposable under its per-run directory. No database, service, or Docker
+state is changed by this release.

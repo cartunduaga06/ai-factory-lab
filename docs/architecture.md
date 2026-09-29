@@ -268,6 +268,13 @@ Transition table (authoritative: `factory/orchestration/lifecycle.py`):
 continue through `PR_OPEN → WAITING_HUMAN`. The operational declaration,
 capability and gates are described in [operational-scratch.md](operational-scratch.md).
 
+For CODE tasks at `WAITING_HUMAN`, each runtime pass reads the persisted PR by
+number through the read-only GitHub client. Only an exact repository, head,
+base, and number match can advance it: a confirmed merge moves it to `DONE`,
+and a confirmed close without merge moves it to `CANCELLED`. Open or uncertain
+responses leave it at `WAITING_HUMAN`; read errors stop the pass before new work.
+The transition is durable and idempotent. The factory never merges or closes a PR.
+
 Two deliberate choices:
 
 - **`VALIDATING → READY`** is the retry edge: a failed gate sends the task back

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from enum import StrEnum
 
 from factory.domain.enums import TaskStatus
 from factory.domain.models import (
@@ -366,6 +367,22 @@ class PullRequestSink(ABC):
         branch already exists, that PR is returned instead of a second one being
         created.
         """
+
+
+class PullRequestState(StrEnum):
+    """Provider-confirmed review outcome; absence is never inferred as closure."""
+
+    OPEN = "open"
+    MERGED = "merged"
+    CLOSED = "closed"
+
+
+class PullRequestStateSource(ABC):
+    """Read the state of one previously persisted PR without provider writes."""
+
+    @abstractmethod
+    def state(self, pull_request: PullRequest) -> PullRequestState:
+        """Require exact PR identity; raise on missing or ambiguous provider data."""
 
 
 class PullRequestRepository(ABC):

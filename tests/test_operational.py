@@ -18,7 +18,11 @@ from factory.domain.models import (
     TaskSource,
     new_operational_workspace,
 )
-from factory.domain.operational import parse_scratch_artifact
+from factory.domain.operational import (
+    OperationalCapability,
+    OperationalPolicy,
+    parse_scratch_artifact,
+)
 from factory.infrastructure.config import FactoryConfig
 from factory.infrastructure.persistence import (
     SqlitePullRequestRepository,
@@ -55,6 +59,55 @@ class IssueSource:
     def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
         del repository
         return source == self.task.source
+
+
+def test_v2_capabilities_are_explicit_and_deny_by_default() -> None:
+    policy = OperationalPolicy()
+    assert policy.permits(OperationalCapability.SCRATCH)
+    for capability in OperationalCapability:
+        if capability is OperationalCapability.SCRATCH:
+            continue
+        assert not policy.permits(
+            capability, host="local", path="/safe", command="read", target="db"
+        )
+    configured = OperationalPolicy(
+        enabled=frozenset({OperationalCapability.DATABASE_READONLY}),
+        hosts=frozenset({"local"}),
+        paths=frozenset({"/safe"}),
+        commands=frozenset({"read"}),
+        targets=frozenset({"db"}),
+    )
+    assert configured.permits(
+        OperationalCapability.DATABASE_READONLY,
+        host="local",
+        path="/safe",
+        command="read",
+        target="db",
+    )
+    assert not configured.permits(
+        OperationalCapability.DATABASE_READONLY,
+        host="remote",
+        path="/safe",
+        command="read",
+        target="db",
+    )
+    assert not configured.permits(
+        OperationalCapability.BACKUP,
+        host="local",
+        path="/safe",
+        command="read",
+        target="db",
+    )
+
+
+def test_disabling_scratch_blocks_before_agent_dispatch(tmp_path: Path) -> None:
+    task = _task()
+    runtime, tasks, runs, publisher, sink = _runtime(tmp_path, task, None)
+    runtime._operational_policy = OperationalPolicy(enabled=frozenset())
+    result = runtime.run_once()
+    assert result.outcome == "OPERATIONAL_POLICY_BLOCKED"
+    assert runs.list_runs() == []
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED  # type: ignore[union-attr]
 
 
 class IssueTransport:
