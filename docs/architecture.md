@@ -311,6 +311,16 @@ enforces `UNIQUE(source_provider, source_repository, source_issue_number)` as a
 defense-in-depth guarantee: a concurrent writer that slips past the check still
 cannot create a duplicate.
 
+Before a persisted `DISCOVERED` or unstarted `READY` task advances toward
+dispatch, the runtime asks its `IssueSource` to recheck that structured source
+against current eligibility rules. A readable closed, unlabelled, or pull request
+payload moves the task to `CANCELLED` with a durable transition record; it creates
+no run or workspace. Any source read failure, including HTTP 404, stops the
+invocation without changing the task or its transition history and without
+dispatching it: a 404 can also mean the token lacks access to a private repository.
+Tasks with recovery history, active runs, and human-review states retain their
+existing recovery behavior.
+
 ### Transition persistence
 
 `TaskLifecycleService.transition()` retrieves the task, validates the requested
@@ -940,3 +950,5 @@ domain nor orchestration hard-codes a command.
 | 4 | ✅ Isolated Git worktree workspace per run; quality-gate validation in `VALIDATING` |
 | 5 | ✅ Commit/push the isolated branch, open a PR, persist it, hand off at `WAITING_HUMAN` |
 | 6 | API / dashboard over the orchestrator; Codex adapter (not started) |
+
+[executed on device: ai-server (72a24a98-37c5-4a0b-8ff9-5a0c8fd6a3b4)]

@@ -48,6 +48,15 @@ class IssueSource(ABC):
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
         """Fetch a single work item by its structured source identity."""
 
+    @abstractmethod
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        """Return whether the current work item still meets source intake rules.
+
+        Return ``False`` only when a readable item definitively fails those
+        rules. Any source read failure, including a missing/404 response, must
+        propagate so the caller does not dispatch or cancel uncertain work.
+        """
+
 
 class TaskRepository(ABC):
     """Persistence boundary for tasks and their lifecycle history.
@@ -397,3 +406,5 @@ __all__ = [
     "WorkspacePublisher",
     "WorkspaceRevisionInspector",
 ]
+
+[executed on device: ai-server (72a24a98-37c5-4a0b-8ff9-5a0c8fd6a3b4)]

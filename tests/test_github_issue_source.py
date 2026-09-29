@@ -220,6 +220,38 @@ def test_get_task_rejects_pull_request() -> None:
         _source(transport).get_task(REPO, TaskSource("github", "cartunduaga06/ai-factory-lab", 5))
 
 
+@pytest.mark.parametrize(
+    ("payload", "eligible"),
+    [
+        (_issue(5, labels=["factory-ready"]), True),
+        (_issue(5, labels=["factory-ready"], state="closed"), False),
+        (_issue(5, labels=["backend"]), False),
+        (_issue(5, labels=["factory-ready"], is_pull_request=True), False),
+    ],
+)
+def test_single_issue_eligibility_uses_intake_rules(
+    payload: dict[str, Any], eligible: bool
+) -> None:
+    source = TaskSource("github", REPO.slug, 5)
+    assert _source(FakeTransport([payload])).is_eligible(REPO, source) is eligible
+
+
+@pytest.mark.parametrize("status", [404, 500])
+def test_single_issue_read_failure_propagates(status: int) -> None:
+    source = TaskSource("github", REPO.slug, 5)
+    with pytest.raises(GitHubRequestError) as error:
+        _source(FakeTransport([GitHubRequestError(status, "read failed")])).is_eligible(
+            REPO, source
+        )
+    assert error.value.status == status
+
+
+@pytest.mark.parametrize("payload", [{}, {"state": "open"}, {"state": "open", "labels": None}])
+def test_incomplete_single_issue_payload_propagates_uncertainty(payload: dict[str, Any]) -> None:
+    with pytest.raises(GitHubRequestError):
+        _source(FakeTransport([payload])).is_eligible(REPO, TaskSource("github", REPO.slug, 5))
+
+
 # -- failure behaviour -----------------------------------------------------
 
 
@@ -255,3 +287,5 @@ def test_token_never_appears_in_error_messages() -> None:
     error = GitHubAuthError("GitHub authentication failed with status 403")
     assert TOKEN not in str(error)
     assert TOKEN not in repr(error)
+
+[executed on device: ai-server (72a24a98-37c5-4a0b-8ff9-5a0c8fd6a3b4)]

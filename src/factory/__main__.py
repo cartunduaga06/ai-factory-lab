@@ -206,7 +206,11 @@ def _run_runtime(config: FactoryConfig) -> int:
         return EXIT_INTAKE_ERROR
 
     _print_runtime_result(result)
-    return EXIT_OK if result.outcome in {"WAITING_HUMAN", "NO_ELIGIBLE_TASK"} else EXIT_INTAKE_ERROR
+    return (
+        EXIT_OK
+        if result.outcome in {"WAITING_HUMAN", "NO_ELIGIBLE_TASK", "SOURCE_INELIGIBLE"}
+        else EXIT_INTAKE_ERROR
+    )
 
 
 def _run_watch(config: FactoryConfig) -> int:
@@ -370,3 +374,5 @@ def _resolve_repository(config: FactoryConfig) -> Repository:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+
+[executed on device: ai-server (72a24a98-37c5-4a0b-8ff9-5a0c8fd6a3b4)]

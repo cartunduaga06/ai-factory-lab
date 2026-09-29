@@ -189,6 +189,10 @@ def _runtime_with(
             del repository
             return next(t for t in created if t.source == source)
 
+        def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+            del repository
+            return any(t.source == source for t in created)
+
     adapter = FakeAgentAdapter(kind=AgentKind.OTHER, status=RunStatus.SUCCEEDED)
     sink = FakePullRequestSink()
     runtime = FactoryRuntime(
@@ -266,3 +270,5 @@ def test_watch_processes_the_next_task_after_a_human_advances_the_first(
     assert len(runs.list_runs()) == 2
     assert sink.create_calls == 2
     assert {run.task_id for run in runs.list_runs()} != {first_task_id}
+
+[executed on device: ai-server (72a24a98-37c5-4a0b-8ff9-5a0c8fd6a3b4)]

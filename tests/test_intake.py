@@ -38,6 +38,9 @@ class FakeIssueSource(IssueSource):
                 return task
         raise KeyError(source)
 
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        return any(task.source == source for task in self._tasks)
+
 
 @pytest.fixture
 def repo(tmp_path: Path) -> SqliteTaskRepository:
@@ -161,3 +164,5 @@ def test_intake_does_not_transition_task_status(repo: SqliteTaskRepository) -> N
     assert summary.created == 1
     stored = repo.list()[0]
     assert stored.status is TaskStatus.DISCOVERED
+
+[executed on device: ai-server (72a24a98-37c5-4a0b-8ff9-5a0c8fd6a3b4)]
