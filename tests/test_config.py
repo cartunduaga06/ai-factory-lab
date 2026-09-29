@@ -87,6 +87,7 @@ def test_ecc_selection_is_explicit_and_closed() -> None:
         FactoryConfig.from_env({"FACTORY_CODEX_ECC_SKILL": "verification-loop"}).codex_ecc_skill
         == "verification-loop"
     )
+    assert FactoryConfig.from_env({"FACTORY_CODEX_ECC_SKILL": "auto"}).codex_ecc_skill == "auto"
     with pytest.raises(ValueError, match="FACTORY_CODEX_ECC_SKILL"):
         FactoryConfig.from_env({"FACTORY_CODEX_ECC_SKILL": "other"})
 

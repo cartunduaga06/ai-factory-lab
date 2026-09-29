@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "verification-loop",
+      "upstream_repository": "https://github.com/affaan-m/ECC",
+      "upstream_commit": "c9148d0bb239ed01a95724a5928b98cdf9c30658",
+      "source_path": "skills/verification-loop/SKILL.md",
+      "sha256": "73f62a80e10034274249b94ba611b7c2ade5b729578f168944d763d7bd503c2a",
+      "task_types": ["verification"],
+      "capabilities": ["code-guidance"],
+      "approval_status": "APPROVED"
+    }
+  ]
+}

@@ -60,7 +60,8 @@ def test_pinned_ecc_skill_loading_fails_closed(tmp_path: Path) -> None:
         load_skill(SKILL_NAME, path=changed)
 
 
-def test_ecc_codex_then_factory_gate_in_isolated_checkout(tmp_path: Path) -> None:
+@pytest.mark.parametrize("selection", [SKILL_NAME, "auto"])
+def test_ecc_codex_then_factory_gate_in_isolated_checkout(tmp_path: Path, selection: str) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     executable = _executable(
@@ -74,8 +75,11 @@ pathlib.Path(sys.argv[7]).write_text('Done')
 """,
     )
     workspace = _workspace(checkout)
-    adapter = CodexAdapter(executable=executable, ecc_skill=SKILL_NAME)
-    run = _collect(adapter, adapter.dispatch(_task(), workspace))
+    adapter = CodexAdapter(executable=executable, ecc_skill=selection)
+    task = _task()
+    if selection == "auto":
+        task.title = "Implement a feature [type:verification]"
+    run = _collect(adapter, adapter.dispatch(task, workspace))
     assert run.status is RunStatus.SUCCEEDED
     gate = LocalQualityGateRunner().run(
         QualityGateSpec(

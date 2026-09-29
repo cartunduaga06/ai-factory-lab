@@ -14,7 +14,11 @@ from factory.domain.enums import AgentKind, RunStatus, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.domain.operational import parse_scratch_artifact
 from factory.integrations.base import AgentAdapterBase
-from factory.integrations.codex.ecc_skill import load_skill
+from factory.integrations.codex.skill_registry import (
+    load_registered_skill,
+    load_registry,
+    select_skill,
+)
 from factory.integrations.openhands.execution import build_instruction
 
 DEFAULT_TIMEOUT_SECONDS = 1800.0
@@ -107,9 +111,19 @@ class CodexAdapter(AgentAdapterBase):
                 else:
                     stream.write(build_instruction(task))
                     if self._ecc_skill is not None:
-                        skill = load_skill(self._ecc_skill)
+                        records = load_registry()
+                        if self._ecc_skill == "auto":
+                            selected = select_skill(task, records)
+                        else:
+                            matches = [
+                                record for record in records if record.name == self._ecc_skill
+                            ]
+                            if len(matches) != 1 or matches[0].approval_status != "APPROVED":
+                                raise ValueError("unsupported ECC skill")
+                            selected = matches[0]
+                        skill = load_registered_skill(selected)
                         stream.write(
-                            "\n\nOptional review guidance from pinned ECC verification-loop. "
+                            f"\n\nOptional review guidance from pinned ECC {selected.name}. "
                             "Use only applicable checks. Factory quality gates and human "
                             "review remain authoritative. Do not enable hooks or deploy.\n\n"
                         )
