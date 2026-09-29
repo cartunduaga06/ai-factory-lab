@@ -13,13 +13,14 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from factory.domain.models import QualityGateSpec
 
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 DEFAULT_GITHUB_GIT_HOST = "github.com"
+DEFAULT_GITHUB_WRITE_USERNAME = "x-access-token"
 DEFAULT_WORKSPACE_ROOT = "./.workspaces"
 DEFAULT_OPENHANDS_WORKSPACE_ROOT = "./.workspaces"
 DEFAULT_DATABASE_PATH = "./factory.db"
@@ -241,7 +242,9 @@ class FactoryConfig:
     # Separate WRITE credential for Phase 5 publication (push + PR). Distinct from
     # the read-only intake token: the factory must not implicitly reuse a
     # read-scoped credential for writes.
-    github_write_token: str | None = None
+    github_write_token: str | None = field(default=None, repr=False)
+    # Non-secret HTTPS Basic Auth username for the dedicated write credential.
+    github_write_username: str = DEFAULT_GITHUB_WRITE_USERNAME
     # Explicit base branch a published PR targets. Defaults to ``main``.
     target_default_branch: str = DEFAULT_TARGET_BRANCH
     # Git host an authenticated HTTPS push may target. Injectable so a GitHub
@@ -271,6 +274,14 @@ class FactoryConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> FactoryConfig:
         source: Mapping[str, str] = env if env is not None else os.environ
+        write_username = (
+            _clean(source.get("GITHUB_WRITE_USERNAME")) or DEFAULT_GITHUB_WRITE_USERNAME
+        )
+        if any(
+            char.isspace() or ord(char) < 32 or ord(char) == 127 or char == ":"
+            for char in write_username
+        ):
+            raise ValueError("GITHUB_WRITE_USERNAME contains unsafe characters")
         engine = _clean(source.get("FACTORY_AGENT_ENGINE")) or AgentEngine.CODEX.value
         try:
             agent_engine = AgentEngine(engine)
@@ -302,6 +313,7 @@ class FactoryConfig:
             workspace_base_ref=_clean(source.get("FACTORY_WORKSPACE_BASE_REF")),
             quality_gates=parse_gate_specs(source.get("FACTORY_QUALITY_GATES")),
             github_write_token=_clean(source.get("GITHUB_WRITE_TOKEN")),
+            github_write_username=write_username,
             target_default_branch=(
                 _clean(source.get("FACTORY_TARGET_DEFAULT_BRANCH")) or DEFAULT_TARGET_BRANCH
             ),
@@ -350,6 +362,7 @@ class FactoryConfig:
                 {"name": spec.name, "required": spec.required} for spec in self.quality_gates
             ],
             "github_write_token": "***" if self.github_write_token else None,
+            "github_write_username": self.github_write_username,
             "target_default_branch": self.target_default_branch,
             "github_git_host": self.github_git_host,
             "run_poll_interval": self.run_poll_interval,

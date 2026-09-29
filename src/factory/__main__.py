@@ -311,6 +311,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         revision_inspector=GitWorkspaceRevisionInspector(),
         publisher=GitWorkspacePublisher(
             write_token=config.github_write_token,
+            write_username=config.github_write_username,
             allowed_git_host=config.github_git_host,
         ),
         pull_request_sink=GitHubPullRequestSink(write_client),

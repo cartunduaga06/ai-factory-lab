@@ -415,6 +415,9 @@ helper that contains no credential and reads it from a process environment
 variable; the helper is removed after the single push. The write token is never
 placed in a URL, argv, `.git/config`, a log or an exception, and it is never
 handed to quality-gate subprocesses.
+`GITHUB_WRITE_USERNAME` supplies the non-secret HTTPS username to that helper;
+it defaults to `x-access-token` when unset. The username comes from factory
+configuration, never from task or repository text.
 
 The push destination is pinned to what Git will **actually** push to. The
 publisher asks Git for its own resolution — `git remote get-url --push --all` —

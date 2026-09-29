@@ -293,6 +293,27 @@ def test_write_token_is_unset_by_default_and_masked_when_configured() -> None:
     redacted = config.redacted()
     assert redacted["github_write_token"] == "***"
     assert secret not in repr(redacted)
+    assert secret not in repr(config)
+
+
+def test_write_username_defaults_and_is_visible_when_configured() -> None:
+    for value in (None, "", "   "):
+        env = {} if value is None else {"GITHUB_WRITE_USERNAME": value}
+        config = FactoryConfig.from_env(env)
+        assert config.github_write_username == "x-access-token"
+
+    config = FactoryConfig.from_env({"GITHUB_WRITE_USERNAME": "  publication-user  "})
+    assert config.github_write_username == "publication-user"
+    assert config.redacted()["github_write_username"] == "publication-user"
+
+
+@pytest.mark.parametrize("value", ["bad\nname", "bad:name", "bad name"])
+def test_unsafe_write_username_is_rejected_without_echoing_value(value: str) -> None:
+    with pytest.raises(
+        ValueError, match="GITHUB_WRITE_USERNAME contains unsafe characters"
+    ) as caught:
+        FactoryConfig.from_env({"GITHUB_WRITE_USERNAME": value})
+    assert value not in str(caught.value)
 
 
 def test_target_default_branch_is_configurable() -> None:

@@ -100,12 +100,13 @@ _ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SY
 #: contains no credential; these are set only for the authenticated push.
 _USERNAME_ENV = "GIT_FACTORY_USERNAME"
 _PASSWORD_ENV = "GIT_FACTORY_PASSWORD"
+DEFAULT_WRITE_USERNAME = "x-access-token"
 
 #: Askpass helper. Contains no credential: it echoes the values of two process
 #: environment variables, so the token is never written to a file, a URL or argv.
 _ASKPASS_SCRIPT = f"""#!/bin/sh
 case "$1" in
-  *[Uu]sername*) printf '%s\\n' "${{{_USERNAME_ENV}:-x-access-token}}" ;;
+  *[Uu]sername*) printf '%s\\n' "${{{_USERNAME_ENV}}}" ;;
   *) printf '%s\\n' "${{{_PASSWORD_ENV}}}" ;;
 esac
 """
@@ -128,12 +129,19 @@ class GitWorkspacePublisher(WorkspacePublisher):
         *,
         remote: str = "origin",
         write_token: str | None = None,
+        write_username: str = DEFAULT_WRITE_USERNAME,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         allowed_git_host: str = DEFAULT_GIT_HOST,
         revision_inspector: WorkspaceRevisionInspector | None = None,
     ) -> None:
         self._remote = remote
         self._write_token = write_token
+        if not write_username or any(
+            char.isspace() or ord(char) < 32 or ord(char) == 127 or char == ":"
+            for char in write_username
+        ):
+            raise ValueError("write_username contains unsafe characters")
+        self._write_username = write_username
         self._timeout = timeout
         self._allowed_git_host = allowed_git_host.strip().lower().rstrip(".")
         self._revision_inspector = revision_inspector or GitWorkspaceRevisionInspector(
@@ -346,7 +354,7 @@ class GitWorkspacePublisher(WorkspacePublisher):
             env = self._env(
                 {
                     "GIT_ASKPASS": str(askpass.path),
-                    _USERNAME_ENV: "x-access-token",
+                    _USERNAME_ENV: self._write_username,
                     _PASSWORD_ENV: self._write_token or "",
                 }
             )

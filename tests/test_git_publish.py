@@ -613,6 +613,7 @@ class _PushRecorder:
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], dict[str, str]]] = []
         self.authenticated: list[tuple[list[str], dict[str, str]]] = []
+        self.helper_contents: list[str] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         real_execute = GitWorkspacePublisher._execute
@@ -627,6 +628,7 @@ class _PushRecorder:
             self.calls.append((list(args), dict(env)))
             if "push" in args and "GIT_ASKPASS" in env:
                 self.authenticated.append((list(args), dict(env)))
+                self.helper_contents.append(Path(env["GIT_ASKPASS"]).read_text(encoding="utf-8"))
                 return subprocess.CompletedProcess(["git", *args], 0, b"", b"")
             return real_execute(inner_self, args, workspace, env=env)
 
@@ -940,8 +942,37 @@ def test_safe_https_push_uses_remote_name_and_isolated_refspec(
     assert "https://" not in " ".join(args)
     # The credential travels only through the askpass environment.
     assert "GIT_ASKPASS" in env
+    assert env["GIT_FACTORY_USERNAME"] == "x-access-token"
     assert env["GIT_FACTORY_PASSWORD"] == SECRET
     assert "GITHUB_WRITE_TOKEN" not in env
+    assert SECRET not in repr(_publisher(write_token=SECRET))
+    assert SECRET not in recorder.helper_contents[0]
+    assert not Path(env["GIT_ASKPASS"]).exists()
+
+
+def test_configured_username_reaches_askpass_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, _, run = _network_setup(tmp_path, _SAFE_GITHUB_URL)
+    recorder = _PushRecorder()
+    recorder.install(monkeypatch)
+
+    publisher = _publisher(write_token=SECRET, write_username="publication-user")
+    _publish(publisher, _task(), run)
+
+    args, env = recorder.authenticated[0]
+    assert env["GIT_FACTORY_USERNAME"] == "publication-user"
+    assert SECRET not in " ".join(args)
+    assert SECRET not in recorder.helper_contents[0]
+    assert "publication-user" not in recorder.helper_contents[0]
+    assert SECRET not in repr(publisher)
+
+
+@pytest.mark.parametrize("username", ["", "bad\nname", "bad:name", "bad name"])
+def test_publisher_rejects_unsafe_username(username: str) -> None:
+    with pytest.raises(ValueError, match="write_username contains unsafe characters") as caught:
+        _publisher(write_token=SECRET, write_username=username)
+    assert SECRET not in str(caught.value)
 
 
 def test_local_bare_remote_still_works_without_a_token(
