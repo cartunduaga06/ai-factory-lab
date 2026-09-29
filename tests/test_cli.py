@@ -19,6 +19,8 @@ from factory.domain.models import AgentRun, FactoryTask, Repository, TaskSource
 from factory.domain.ports import IssueSource
 from factory.infrastructure.config import FactoryConfig
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
+from factory.integrations.codex import CodexAdapter
+from factory.integrations.openhands import OpenHandsAdapter
 from factory.orchestration.intake import IntakeSummary
 from factory.orchestration.runtime import RuntimeResult
 from factory.orchestration.watch import WatchOutcome
@@ -234,6 +236,31 @@ def _runtime_env(
         values["GITHUB_WRITE_TOKEN"] = write_token
     values.update(overrides)
     return values
+
+
+def test_default_runtime_selects_codex_without_openhands_configuration(tmp_path: Path) -> None:
+    config = FactoryConfig.from_env(_runtime_env(tmp_path))
+    assert isinstance(cli._build_agent_adapter(config), CodexAdapter)
+
+
+def test_explicit_openhands_selection_preserves_local_adapter(tmp_path: Path) -> None:
+    config = FactoryConfig.from_env(_runtime_env(tmp_path, FACTORY_AGENT_ENGINE="openhands"))
+    assert isinstance(cli._build_agent_adapter(config), OpenHandsAdapter)
+
+
+def test_explicit_openhands_never_falls_back_to_codex(tmp_path: Path) -> None:
+    env = _runtime_env(tmp_path, FACTORY_AGENT_ENGINE="openhands")
+    del env["OPENHANDS_BASE_URL"]
+    with pytest.raises(cli.ConfigurationError, match="OPENHANDS_BASE_URL"):
+        cli._build_agent_adapter(FactoryConfig.from_env(env))
+
+
+def test_invalid_engine_exits_with_config_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FACTORY_AGENT_ENGINE", "unknown")
+    assert cli.main(["run"]) == cli.EXIT_CONFIG_ERROR
+    assert "FACTORY_AGENT_ENGINE" in capsys.readouterr().out
 
 
 def test_run_without_write_token_fails_closed_before_provider_access(

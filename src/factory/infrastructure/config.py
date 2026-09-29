@@ -55,6 +55,11 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
+class AgentEngine(StrEnum):
+    CODEX = "codex"
+    OPENHANDS = "openhands"
+
+
 class LogFormat(StrEnum):
     TEXT = "text"
     JSON = "json"
@@ -220,6 +225,7 @@ class FactoryConfig:
     github: GitHubConfig
     openhands: AgentConfig
     codex: AgentConfig
+    agent_engine: AgentEngine
     database_url: str | None
     workspace_root: str
     openhands_workspace_root: str
@@ -265,6 +271,11 @@ class FactoryConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> FactoryConfig:
         source: Mapping[str, str] = env if env is not None else os.environ
+        engine = _clean(source.get("FACTORY_AGENT_ENGINE")) or AgentEngine.CODEX.value
+        try:
+            agent_engine = AgentEngine(engine)
+        except ValueError:
+            raise ValueError("FACTORY_AGENT_ENGINE must be codex or openhands") from None
         raw_env = (_clean(source.get("FACTORY_ENV")) or Environment.DEVELOPMENT.value).lower()
         try:
             environment = Environment(raw_env)
@@ -280,6 +291,7 @@ class FactoryConfig:
                 agent_profile_id=_clean(source.get("OPENHANDS_AGENT_PROFILE_ID")),
             ),
             codex=AgentConfig(api_key=_clean(source.get("CODEX_API_KEY"))),
+            agent_engine=agent_engine,
             database_url=_clean(source.get("DATABASE_URL")),
             workspace_root=_clean(source.get("FACTORY_WORKSPACE_ROOT")) or DEFAULT_WORKSPACE_ROOT,
             openhands_workspace_root=(
@@ -328,6 +340,7 @@ class FactoryConfig:
                 "session_api_key": "***" if self.openhands.session_api_key else None,
             },
             "codex": {"api_key": "***" if self.codex.api_key else None},
+            "agent_engine": self.agent_engine.value,
             "database_url": _redact_url(self.database_url),
             "workspace_root": self.workspace_root,
             "openhands_workspace_root": self.openhands_workspace_root,
@@ -398,6 +411,7 @@ __all__ = [
     "DEFAULT_WORKSPACE_ROOT",
     "DEFAULT_OPENHANDS_WORKSPACE_ROOT",
     "AgentConfig",
+    "AgentEngine",
     "DatabaseConfig",
     "DatabaseScheme",
     "Environment",

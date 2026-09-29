@@ -152,6 +152,26 @@ def test_active_run_resume_collects_same_run_without_dispatch(runtime_parts) -> 
     assert sink.create_calls == 1
 
 
+def test_engine_change_cannot_resume_run_with_another_adapter(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    adapter._status = RunStatus.PENDING  # type: ignore[attr-defined]
+    adapter._collect_status = RunStatus.RUNNING  # type: ignore[attr-defined]
+    runtime._timeout = 0  # type: ignore[attr-defined]
+    first = runtime.run_once()
+    collected = adapter.collected
+
+    adapter._kind = AgentKind.CODEX  # type: ignore[attr-defined]
+    second = runtime.run_once()
+
+    assert second.outcome == "ENGINE_MISMATCH"
+    assert second.run_id == first.run_id
+    assert adapter.collected == collected
+    assert len(adapter.dispatched) == 1
+    assert runs.find_active_run(first.task_id) is not None  # type: ignore[arg-type]
+    assert tasks.get(first.task_id).status is TaskStatus.RUNNING  # type: ignore[arg-type]
+    assert publisher.calls == sink.create_calls == 0
+
+
 def test_validated_run_resume_skips_agent_and_continues_to_publication(runtime_parts) -> None:
     runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
     runtime._intake.intake(runtime._intake_repository)  # type: ignore[attr-defined]

@@ -95,6 +95,7 @@ Two repositories are involved and must stay separate:
 │  GitHub: GitHubWriteClient · GitHubPullRequestSink (Phase 5)  │
 │  OpenHands: OpenHandsClient · OpenHandsExecution · status     │
 │  mapping · OpenHandsAdapter (AgentAdapter implementation)     │
+│  Codex: CodexAdapter (bounded local CLI execution)            │
 │  Workspaces: GitWorktreeWorkspaceProvisioner (git worktree)   │
 │  Workspaces: GitWorkspacePublisher (commit + secure push)     │
 │  Gates: LocalQualityGateRunner (argv, no shell, bounded)      │
@@ -150,6 +151,8 @@ src/factory/
 │   │   ├── issues.py        # GitHubIssueSource (IssueSource implementation)
 │   │   ├── write_client.py  # write-capable REST client, sanitized errors
 │   │   └── pull_requests.py # GitHubPullRequestSink (find/open only, never merge)
+│   ├── codex/
+│   │   └── adapter.py       # CodexAdapter (noninteractive CLI)
 │   └── openhands/
 │       ├── client.py        # Agent Server HTTP client, injectable transport
 │       ├── execution.py     # task -> conversation request + instruction
@@ -612,6 +615,24 @@ nothing and exits before the error is raised, so the resulting
 no engine text. The failed attempt is still recorded as a terminal `FAILED` run
 so it stays auditable.
 
+## Codex adapter (Issue #28)
+
+`FACTORY_AGENT_ENGINE=codex|openhands` selects exactly one adapter at runtime
+construction. The temporary default is `codex`; explicit `openhands` retains
+the local Agent Server path. The runtime checks a persisted run's `AgentKind`
+before collection, so changing the setting cannot move a run to another engine.
+
+`CodexAdapter` executes `codex exec` with `--sandbox workspace-write` and
+`--cd` set to the Factory-provisioned checkout. It sends the bounded task
+instruction on stdin, uses the service user's existing ChatGPT login through
+`HOME`/`CODEX_HOME`, and does not pass an API key. Dispatch returns a running
+record promptly; a worker writes a sanitized result beside the checkout for
+collection after a factory restart. A timeout kills the CLI process group.
+Nonzero exits, missing or malformed final messages, launch errors and timeouts
+produce `RunStatus.FAILED`; a zero exit with a valid final message produces
+`SUCCEEDED`. The adapter does not perform Factory's commit, push, PR or
+lifecycle steps.
+
 ## OpenHands adapter (Phase 3)
 
 OpenHands is the factory's first real *execution engine*. It stays on the
@@ -939,4 +960,4 @@ domain nor orchestration hard-codes a command.
 | 3 | ✅ OpenHands `AgentAdapter` (dispatch, collect, cancel) |
 | 4 | ✅ Isolated Git worktree workspace per run; quality-gate validation in `VALIDATING` |
 | 5 | ✅ Commit/push the isolated branch, open a PR, persist it, hand off at `WAITING_HUMAN` |
-| 6 | API / dashboard over the orchestrator; Codex adapter (not started) |
+| 6 | API / dashboard over the orchestrator; Codex CLI adapter added in Issue #28 |

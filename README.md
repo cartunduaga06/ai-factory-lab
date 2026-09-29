@@ -427,10 +427,14 @@ Present today:
 - **Durable PR persistence** (`SqlitePullRequestRepository`): one PR per run,
   enforced by a unique index and surviving a repository reopen.
 
+Also present: `CodexAdapter` runs the authenticated Codex CLI noninteractively
+in the factory workspace. `FACTORY_AGENT_ENGINE=codex|openhands` selects one
+engine (default `codex`); a stored run never changes engines. Codex runs in a
+bounded worker and leaves a durable result for collection before validation.
+
 Not present yet — deliberately deferred:
 
-- **Codex and other engines.** OpenHands is the only concrete engine; the
-  `AgentAdapter` seam still admits others.
+- **Other engines.** The `AgentAdapter` seam admits future engines.
 - **Any merge capability.** The factory stops at `WAITING_HUMAN`; merge,
   auto-merge and deploy are human actions and are absent from the code.
 - **A scheduler or daemon.** `factory watch` is a foreground loop an operator

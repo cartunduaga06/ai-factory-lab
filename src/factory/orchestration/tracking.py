@@ -132,6 +132,8 @@ class RunTrackingService:
         run = self._runs.get_run(run_id)
         if run is None:
             raise KeyError(run_id)
+        if run.adapter is not adapter.kind:
+            raise AgentCollectError(run.run_id, run.task_id)
         if run.is_terminal:
             self._reconcile_terminal(run)
             return self._result(run)

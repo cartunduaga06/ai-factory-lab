@@ -12,6 +12,7 @@ from factory.infrastructure.config import (
     DEFAULT_GITHUB_API_URL,
     DEFAULT_WATCH_IDLE_INTERVAL,
     DEFAULT_WORKSPACE_ROOT,
+    AgentEngine,
     DatabaseScheme,
     Environment,
     FactoryConfig,
@@ -28,6 +29,7 @@ def test_defaults_are_safe_with_empty_environment() -> None:
     assert config.github.api_url == DEFAULT_GITHUB_API_URL
     assert config.openhands.enabled is False
     assert config.codex.enabled is False
+    assert config.agent_engine is AgentEngine.CODEX
     assert config.database_url is None
     assert config.workspace_root == DEFAULT_WORKSPACE_ROOT
     assert config.logging.level == "INFO"
@@ -68,6 +70,15 @@ def test_real_values_are_loaded() -> None:
     assert config.openhands.enabled is True
     assert config.database_url == "sqlite+pysqlite:///./factory.db"
     assert config.logging.level == "DEBUG"
+
+
+def test_engine_selection_is_explicit_and_rejects_typos() -> None:
+    assert (
+        FactoryConfig.from_env({"FACTORY_AGENT_ENGINE": "openhands"}).agent_engine
+        is AgentEngine.OPENHANDS
+    )
+    with pytest.raises(ValueError, match="FACTORY_AGENT_ENGINE"):
+        FactoryConfig.from_env({"FACTORY_AGENT_ENGINE": "unknown"})
 
 
 def test_redacted_never_leaks_credentials() -> None:
