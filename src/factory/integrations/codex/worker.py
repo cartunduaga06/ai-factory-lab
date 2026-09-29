@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-import resource
+import selectors
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import BinaryIO, cast
 
 MAX_RESULT_BYTES = 16_384
 MAX_OUTPUT_BYTES = 1_048_576
 _POLL_SECONDS = 0.2
+_READ_BYTES = 65_536
 
 
 def run(
@@ -52,37 +54,34 @@ def run(
                 cwd=workspace,
                 env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
                 stdin=subprocess.PIPE,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 start_new_session=True,
-                preexec_fn=_limit_output,
             ) as process:
                 try:
-                    deadline = time.monotonic() + timeout
-                    pending_input: str | None = instruction
-                    while True:
-                        if cancel.exists():
-                            status = "CANCELLED"
-                            break
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        try:
-                            process.communicate(
-                                input=pending_input, timeout=min(_POLL_SECONDS, remaining)
-                            )
-                            break
-                        except subprocess.TimeoutExpired:
-                            pending_input = None
+                    status, output_exceeded = _drain_output(
+                        process,
+                        instruction.encode("utf-8"),
+                        stdout_file,
+                        stderr_file,
+                        cancel,
+                        timeout,
+                    )
                 finally:
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
-                    process.communicate()
+                    process.wait()
             exit_code = process.returncode
+            stdout_file.flush()
+            stderr_file.flush()
             stdout_bytes = stdout_path.stat().st_size
             stderr_bytes = stderr_path.stat().st_size
-        if status != "CANCELLED" and process.returncode == 0 and _valid_result(message):
+        if (
+            status != "CANCELLED"
+            and not output_exceeded
+            and process.returncode == 0
+            and _valid_result(message)
+        ):
             status = "SUCCEEDED"
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
         pass
@@ -106,8 +105,62 @@ def run(
         os.replace(temporary, result)
 
 
-def _limit_output() -> None:
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES))
+def _drain_output(
+    process: subprocess.Popen[bytes],
+    instruction: bytes,
+    stdout_file: BinaryIO,
+    stderr_file: BinaryIO,
+    cancel: Path,
+    timeout: float,
+) -> tuple[str, bool]:
+    """Capture bounded streams while feeding stdin and watching the run deadline."""
+    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    status = "FAILED"
+    output_exceeded = False
+    pending = memoryview(instruction)
+    deadline = time.monotonic() + timeout
+    with selectors.DefaultSelector() as selector:
+        for stream, target in ((process.stdout, stdout_file), (process.stderr, stderr_file)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, target)
+        if pending:
+            os.set_blocking(process.stdin.fileno(), False)
+            selector.register(process.stdin, selectors.EVENT_WRITE)
+        else:
+            process.stdin.close()
+        while selector.get_map() or process.poll() is None:
+            if cancel.exists():
+                status = "CANCELLED"
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for key, _ in selector.select(min(_POLL_SECONDS, remaining)):
+                stream = cast(BinaryIO, key.fileobj)
+                if stream is process.stdin:
+                    try:
+                        written = os.write(stream.fileno(), pending)
+                    except BrokenPipeError:
+                        written = len(pending)
+                    pending = pending[written:]
+                    if not pending:
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
+                chunk = os.read(stream.fileno(), _READ_BYTES)
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                target = key.data
+                allowed = MAX_OUTPUT_BYTES - target.tell()
+                target.write(chunk[:allowed])
+                if len(chunk) > allowed:
+                    output_exceeded = True
+                    break
+            if output_exceeded:
+                break
+    return status, output_exceeded
 
 
 def _valid_result(path: Path) -> bool:

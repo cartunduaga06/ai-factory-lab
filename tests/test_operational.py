@@ -270,6 +270,19 @@ def test_watch_codex_scratch_acceptance_without_pr(tmp_path: Path) -> None:
     assert publisher.calls == sink.create_calls == 0
 
 
+def test_oversized_operational_output_cannot_pass_acceptance(tmp_path: Path) -> None:
+    executable = Path(_fake_codex(tmp_path))
+    with executable.open("a") as stream:
+        stream.write("sys.stdout.buffer.write(b'x' * 1_048_577)\n")
+    task = _task()
+    runtime, tasks, runs, publisher, sink = _runtime(tmp_path, task, str(executable))
+    result = runtime.run_once()
+    assert result.task_status is TaskStatus.FAILED
+    assert tasks.get(task.task_id).status is TaskStatus.FAILED  # type: ignore[union-attr]
+    assert runs.list_runs(task.task_id)[0].gates == ()
+    assert publisher.calls == sink.create_calls == 0
+
+
 def test_new_operational_issue_runs_while_code_awaits_human(tmp_path: Path) -> None:
     operational = _task()
     operational.source = TaskSource("github", "example/control", 39)
