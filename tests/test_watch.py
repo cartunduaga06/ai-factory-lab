@@ -33,8 +33,8 @@ from tests.fake_workspace import (
 )
 
 
-def _result(outcome: str) -> RuntimeResult:
-    return RuntimeResult(None, None, None, None, None, None, None, outcome, IntakeSummary())
+def _result(outcome: str, task_status: TaskStatus | None = None) -> RuntimeResult:
+    return RuntimeResult(None, None, task_status, None, None, None, None, outcome, IntakeSummary())
 
 
 class ScriptedRuntime:
@@ -67,28 +67,45 @@ def test_idle_iteration_waits_then_retries() -> None:
     assert outcome.iterations == 3
     assert outcome.idle_waits == 2
     assert outcome.processed == 1
-    assert outcome.stopped is False
+    assert outcome.stopped is True
 
 
-def test_productive_iteration_does_not_wait() -> None:
+def test_waiting_human_stops_after_one_iteration_without_waiting() -> None:
     runtime = ScriptedRuntime(["WAITING_HUMAN", "WAITING_HUMAN"])
     sleeps: list[float] = []
     watcher = FactoryWatcher(
         runtime=runtime,  # type: ignore[arg-type]
         idle_interval=30.0,
-        max_iterations=2,
         sleep=sleeps.append,
     )
 
     outcome = watcher.run()
 
+    assert runtime.calls == 1
     assert sleeps == []
-    assert outcome.processed == 2
+    assert outcome.iterations == 1
+    assert outcome.processed == 1
     assert outcome.idle_waits == 0
+    assert outcome.stopped is True
+
+
+def test_waiting_human_task_status_stops_even_with_different_outcome() -> None:
+    class StatusRuntime:
+        calls = 0
+
+        def run_once(self) -> RuntimeResult:
+            self.calls += 1
+            return _result("PUBLISHED", TaskStatus.WAITING_HUMAN)
+
+    runtime = StatusRuntime()
+    outcome = FactoryWatcher(runtime=runtime, idle_interval=0.0).run()  # type: ignore[arg-type]
+
+    assert runtime.calls == 1
+    assert outcome.stopped is True
 
 
 def test_stop_request_ends_loop_between_iterations() -> None:
-    runtime = ScriptedRuntime(["WAITING_HUMAN", "WAITING_HUMAN"])
+    runtime = ScriptedRuntime(["TIMEOUT_RESUMABLE", "TIMEOUT_RESUMABLE"])
     stop_after_one = {"calls": 0}
 
     def should_stop() -> bool:
@@ -111,7 +128,7 @@ def test_stop_request_ends_loop_between_iterations() -> None:
 
 
 def test_already_stopped_runs_no_iteration() -> None:
-    runtime = ScriptedRuntime(["WAITING_HUMAN"])
+    runtime = ScriptedRuntime(["TIMEOUT_RESUMABLE"])
     watcher = FactoryWatcher(
         runtime=runtime,  # type: ignore[arg-type]
         idle_interval=0.0,
@@ -126,7 +143,7 @@ def test_already_stopped_runs_no_iteration() -> None:
 
 
 def test_max_iterations_bounds_loop() -> None:
-    runtime = ScriptedRuntime(["WAITING_HUMAN"])
+    runtime = ScriptedRuntime(["TIMEOUT_RESUMABLE"])
     watcher = FactoryWatcher(
         runtime=runtime,  # type: ignore[arg-type]
         idle_interval=0.0,
@@ -137,6 +154,7 @@ def test_max_iterations_bounds_loop() -> None:
 
     assert runtime.calls == 3
     assert outcome.iterations == 3
+    assert outcome.stopped is False
 
 
 def _runtime_with(
@@ -202,8 +220,9 @@ def test_watch_keeps_wip_at_one_while_a_task_awaits_human(tmp_path: Path) -> Non
 
     outcome = FactoryWatcher(runtime=runtime, idle_interval=0.0, max_iterations=3).run()
 
-    assert outcome.iterations == 3
-    assert outcome.idle_waits == 0  # every iteration had work (or reconciliation)
+    assert outcome.iterations == 1
+    assert outcome.idle_waits == 0
+    assert outcome.stopped is True
     assert len(adapter.dispatched) == 1
     assert len(runs.list_runs()) == 1
     assert sink.create_calls == 1
@@ -214,11 +233,12 @@ def test_watch_keeps_wip_at_one_while_a_task_awaits_human(tmp_path: Path) -> Non
 def test_watch_does_not_duplicate_work_already_waiting_human(tmp_path: Path) -> None:
     runtime, runs, adapter, sink = _runtime_with(tmp_path, [("only", 1)])
 
-    # Iterations 2 and 3 re-observe the same WAITING_HUMAN task; reconciliation
-    # must not dispatch again or open a second PR.
-    outcome = FactoryWatcher(runtime=runtime, idle_interval=0.0, max_iterations=3).run()
+    # A fresh watch invocation re-observes the same task without duplicating work.
+    first = FactoryWatcher(runtime=runtime, idle_interval=0.0).run()
+    outcome = FactoryWatcher(runtime=runtime, idle_interval=0.0).run()
 
-    assert outcome.iterations == 3
+    assert first.iterations == outcome.iterations == 1
+    assert outcome.stopped is True
     assert len(adapter.dispatched) == 1
     assert len(runs.list_runs()) == 1
     assert sink.create_calls == 1

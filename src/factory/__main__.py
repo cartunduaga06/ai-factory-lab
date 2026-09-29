@@ -210,7 +210,7 @@ def _run_runtime(config: FactoryConfig) -> int:
 
 
 def _run_watch(config: FactoryConfig) -> int:
-    """Drive the automatic worker until SIGINT/SIGTERM, WIP=1."""
+    """Drive the automatic worker until a signal or human gate, WIP=1."""
     try:
         runtime = _build_runtime(config)
     except (ConfigurationError, UnsupportedDatabaseError) as exc:
