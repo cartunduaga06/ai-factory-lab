@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 
 from factory.domain.models import FactoryTask
 
@@ -17,6 +18,49 @@ _BLOCK = re.compile(r"```factory-operational\s*\n(.*?)\n```", re.DOTALL)
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _PROOF_BYTES = b"factory-operational-proof\n"
+
+
+class OperationalCapability(StrEnum):
+    """Named host capabilities; naming a capability never grants it."""
+
+    SCRATCH = "scratch"
+    DATABASE_READONLY = "database_readonly"
+    DOCKER_INSPECT = "docker_inspect"
+    SERVICE_HEALTH = "service_health"
+    BACKUP = "backup"
+
+
+@dataclass(slots=True, frozen=True)
+class OperationalPolicy:
+    """Operator-owned allowlists. No issue declaration can change this policy."""
+
+    enabled: frozenset[OperationalCapability] = frozenset({OperationalCapability.SCRATCH})
+    hosts: frozenset[str] = frozenset()
+    paths: frozenset[str] = frozenset()
+    commands: frozenset[str] = frozenset()
+    targets: frozenset[str] = frozenset()
+
+    def permits(
+        self,
+        capability: OperationalCapability,
+        *,
+        host: str = "",
+        path: str = "",
+        command: str = "",
+        target: str = "",
+    ) -> bool:
+        """Require explicit policy for every host operation; backup stays gated."""
+        if capability is OperationalCapability.SCRATCH:
+            return capability in self.enabled and not any((host, path, command, target))
+        if capability is OperationalCapability.BACKUP or capability not in self.enabled:
+            return False
+        return (
+            bool(host and path and command and target)
+            and host in self.hosts
+            and path in self.paths
+            and command in self.commands
+            and target in self.targets
+        )
 
 
 @dataclass(slots=True, frozen=True)

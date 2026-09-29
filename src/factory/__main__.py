@@ -44,6 +44,7 @@ from factory.integrations.github import (
     GitHubPullRequestSink,
     GitHubWriteClient,
 )
+from factory.integrations.github.pr_state import GitHubPullRequestStateSource
 from factory.integrations.openhands import (
     OpenHandsAdapter,
     OpenHandsClient,
@@ -324,6 +325,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         ),
         pull_request_sink=GitHubPullRequestSink(write_client),
         pull_requests=pull_requests,
+        pull_request_state=GitHubPullRequestStateSource(read_client),
         base_branch=config.target_default_branch,
         operational_provisioner=operational_provisioner,
         operational_root=config.operational_scratch_root,

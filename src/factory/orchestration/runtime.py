@@ -8,11 +8,17 @@ from dataclasses import dataclass
 
 from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus, ValidationOutcome
 from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, QualityGateSpec, Repository
-from factory.domain.operational import parse_scratch_artifact
+from factory.domain.operational import (
+    OperationalCapability,
+    OperationalPolicy,
+    parse_scratch_artifact,
+)
 from factory.domain.ports import (
     OperationalAcceptance,
     PullRequestRepository,
     PullRequestSink,
+    PullRequestState,
+    PullRequestStateSource,
     QualityGateRunner,
     RunRepository,
     TaskRepository,
@@ -61,6 +67,8 @@ class FactoryRuntime:
         pull_request_sink: PullRequestSink,
         pull_requests: PullRequestRepository,
         base_branch: str,
+        pull_request_state: PullRequestStateSource | None = None,
+        operational_policy: OperationalPolicy | None = None,
         operational_provisioner: WorkspaceProvisioner | None = None,
         operational_root: str | None = None,
         operational_acceptance: OperationalAcceptance | None = None,
@@ -113,6 +121,9 @@ class FactoryRuntime:
             base_branch=base_branch,
             default_branch=base_branch,
         )
+        self._pull_requests = pull_requests
+        self._pull_request_state = pull_request_state
+        self._operational_policy = operational_policy or OperationalPolicy()
         self._poll_interval = max(0.0, poll_interval)
         self._timeout = max(0.0, timeout)
         self._sleep = sleep
@@ -121,6 +132,7 @@ class FactoryRuntime:
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
         intake = self._intake.intake(self._intake_repository)
+        self._reconcile_human_reviews()
         task = self._select_task()
         if task is None:
             return RuntimeResult(
@@ -172,6 +184,9 @@ class FactoryRuntime:
             task = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
         if task.status is TaskStatus.READY:
             if task.kind is TaskKind.OPERATIONAL:
+                if not self._operational_policy.permits(OperationalCapability.SCRATCH):
+                    blocked = self._block(task.task_id, "operational capability denied")
+                    return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
                 if self._operational_dispatch is None or self._adapter.kind is not AgentKind.CODEX:
                     blocked = self._block(task.task_id, "operational capability missing")
                     return self._result(
@@ -223,6 +238,25 @@ class FactoryRuntime:
 
         published = self._publication.publish(task.task_id, refresh.run.run_id)
         return self._result_from_publication(published, refresh.run, intake)
+
+    def _reconcile_human_reviews(self) -> None:
+        """Apply only provider-confirmed outcomes to durable human-review tasks."""
+        if self._pull_request_state is None:
+            return
+        for task in self._tasks.list(TaskStatus.WAITING_HUMAN):
+            if task.kind is not TaskKind.CODE:
+                continue
+            run = self._latest_run(task.task_id)
+            if run is None:
+                continue
+            pr = self._pull_requests.get_for_run(run.run_id)
+            if pr is None or pr.task_id != task.task_id or pr.run_id != run.run_id:
+                continue
+            state = self._pull_request_state.state(pr)
+            if state is PullRequestState.MERGED:
+                self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
+            elif state is PullRequestState.CLOSED:
+                self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
 
     def _select_task(self) -> FactoryTask | None:
         # Recovery states take precedence over new work; ordering within each

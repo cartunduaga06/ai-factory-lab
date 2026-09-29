@@ -16,11 +16,13 @@ from factory.domain.enums import (
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
+    PullRequest,
     QualityGate,
     Repository,
     TaskSource,
     Workspace,
 )
+from factory.domain.ports import PullRequestState, PullRequestStateSource
 from factory.infrastructure.persistence import (
     SqlitePullRequestRepository,
     SqliteRunRepository,
@@ -136,6 +138,53 @@ def test_run_happy_path_reaches_waiting_human(runtime_parts) -> None:
     assert len(adapter.dispatched) == 1
     assert publisher.calls == 1
     assert sink.create_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_state", "expected"),
+    [
+        (PullRequestState.MERGED, TaskStatus.DONE),
+        (PullRequestState.CLOSED, TaskStatus.CANCELLED),
+        (PullRequestState.OPEN, TaskStatus.WAITING_HUMAN),
+    ],
+)
+def test_human_review_reconciles_from_persisted_pr(
+    runtime_parts, provider_state: PullRequestState, expected: TaskStatus
+) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    first = runtime.run_once()
+    assert first.task_id is not None
+
+    class StateSource(PullRequestStateSource):
+        def state(self, pull_request: PullRequest) -> PullRequestState:
+            assert pull_request.number == first.pull_request_number
+            assert pull_request.run_id == first.run_id
+            return provider_state
+
+    runtime._pull_request_state = StateSource()
+    second = runtime.run_once()
+    assert tasks.get(first.task_id).status is expected  # type: ignore[union-attr]
+    assert second.outcome == (
+        "WAITING_HUMAN" if expected is TaskStatus.WAITING_HUMAN else "NO_ELIGIBLE_TASK"
+    )
+    assert publisher.calls == 1
+    assert sink.create_calls == 1
+    runtime.run_once()
+    assert tasks.get(first.task_id).status is expected  # type: ignore[union-attr]
+
+
+def test_human_review_read_failure_preserves_waiting_state(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    first = runtime.run_once()
+
+    class FailingSource(PullRequestStateSource):
+        def state(self, pull_request: PullRequest) -> PullRequestState:
+            raise ValueError("uncertain provider state")
+
+    runtime._pull_request_state = FailingSource()
+    with pytest.raises(ValueError, match="uncertain provider state"):
+        runtime.run_once()
+    assert tasks.get(first.task_id).status is TaskStatus.WAITING_HUMAN  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("change", ["closed", "label_removed"])
