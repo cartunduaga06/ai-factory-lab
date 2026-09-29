@@ -6,6 +6,8 @@ re-instantiation can be exercised for real. No test touches the network.
 
 from __future__ import annotations
 
+import gc
+import os
 from pathlib import Path
 
 import pytest
@@ -60,6 +62,40 @@ def test_repeated_initialization_is_idempotent(db_path: str) -> None:
     repository.initialize()
     repository.initialize()
     assert len(repository.list()) == 1
+
+
+def test_connections_close_after_each_operation(db_path: str) -> None:
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.is_dir():
+        pytest.skip("requires procfs to inspect open database descriptors")
+
+    repository = _repo(db_path)
+    repository.save(_task(1))
+
+    def database_fds() -> int:
+        count = 0
+        for fd in fd_dir.iterdir():
+            try:
+                count += os.readlink(fd) == db_path
+            except FileNotFoundError:
+                # procfs includes the descriptor used to enumerate itself.
+                continue
+        return count
+
+    gc.collect()
+    baseline = database_fds()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for _ in range(32):
+            assert len(repository.list()) == 1
+        with pytest.raises(KeyError):
+            repository.update(_task(2))
+        assert database_fds() == baseline
+    finally:
+        if was_enabled:
+            gc.enable()
+        gc.collect()
 
 
 def test_missing_parent_directory_is_created(tmp_path: Path) -> None:

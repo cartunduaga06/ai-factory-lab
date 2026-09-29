@@ -83,7 +83,9 @@ class FactoryRuntime:
         )
         self._operational_dispatch = (
             DispatchService(
-                tasks, runs, provisioner=operational_provisioner,
+                tasks,
+                runs,
+                provisioner=operational_provisioner,
                 workspace_root=operational_root,
             )
             if operational_provisioner is not None and operational_root is not None
@@ -213,7 +215,9 @@ class FactoryRuntime:
 
         if task.kind is TaskKind.OPERATIONAL:
             if current.status is not TaskStatus.VALIDATING:
-                return self._result(current, refresh.run, refresh, "OPERATIONAL_STATE_INVALID", intake)
+                return self._result(
+                    current, refresh.run, refresh, "OPERATIONAL_STATE_INVALID", intake
+                )
             current = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
             return self._result(current, refresh.run, refresh, "OPERATIONAL_DONE", intake)
 

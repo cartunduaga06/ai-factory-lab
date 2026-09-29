@@ -103,9 +103,7 @@ class ScratchAcceptance(OperationalAcceptance):
             digest_ok = False
         return (
             QualityGate("artifact_size", _status(size_ok), size_detail),
-            QualityGate(
-                "artifact_sha256", _status(digest_ok), digest_detail
-            ),
+            QualityGate("artifact_sha256", _status(digest_ok), digest_detail),
         )
 
 

@@ -95,10 +95,17 @@ def _task(*, digest: str | None = None, mode: str = "scratch_artifact") -> Facto
 
 
 def _runtime(
-    tmp_path: Path, task: FactoryTask, executable: str | None, *, github: bool = False,
+    tmp_path: Path,
+    task: FactoryTask,
+    executable: str | None,
+    *,
+    github: bool = False,
     code_capable: bool = True,
 ) -> tuple[
-    FactoryRuntime, SqliteTaskRepository, SqliteRunRepository, FakeWorkspacePublisher,
+    FactoryRuntime,
+    SqliteTaskRepository,
+    SqliteRunRepository,
+    FakeWorkspacePublisher,
     FakePullRequestSink,
 ]:
     database = str(tmp_path / "factory.db")
@@ -118,7 +125,8 @@ def _runtime(
         GitHubIssueSource(
             GitHubClient("test-token", "https://api.github.com", transport=IssueTransport(task))
         )
-        if github else IssueSource(task)
+        if github
+        else IssueSource(task)
     )
     runtime = FactoryRuntime(
         intake=IssueIntakeService(source, tasks),
@@ -161,7 +169,8 @@ def _fake_codex(tmp_path: Path, *, write: bool = True, corrupt: bool = False) ->
             "data = bytes.fromhex(payload)\n"
             + ("data = b'X' + data[1:]\n" if corrupt else "")
             + "pathlib.Path(name).write_bytes(data)\n"
-            if write else ""
+            if write
+            else ""
         )
         + "pathlib.Path(args[6]).write_text('complete')\n"
     )
@@ -217,8 +226,7 @@ def test_agent_exit_zero_without_artifact_blocks(tmp_path: Path) -> None:
     stored = tasks.get(task.task_id)
     assert stored is not None and stored.blocked_reason == "operational acceptance gates failed"
     assert any(
-        gate.status is QualityGateStatus.FAILED
-        for gate in runs.list_runs(task.task_id)[0].gates
+        gate.status is QualityGateStatus.FAILED for gate in runs.list_runs(task.task_id)[0].gates
     )
     assert publisher.calls == sink.create_calls == 0
 
@@ -351,7 +359,8 @@ def test_symlink_artifact_cannot_satisfy_gate(tmp_path: Path) -> None:
 
 def test_operational_only_runtime_refuses_code_dispatch(tmp_path: Path) -> None:
     task = FactoryTask(
-        "Code task", "example/control",
+        "Code task",
+        "example/control",
         source=TaskSource("github", "example/control", 37),
     )
     runtime, tasks, runs, publisher, sink = _runtime(

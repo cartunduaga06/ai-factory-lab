@@ -159,11 +159,16 @@ class CodexAdapter(AgentAdapterBase):
                 parsed = json.loads(content)
                 if not isinstance(parsed, dict):
                     raise ValueError("invalid worker result")
-                run.status = {
-                    "SUCCEEDED": RunStatus.SUCCEEDED,
-                    "FAILED": RunStatus.FAILED,
-                    "CANCELLED": RunStatus.CANCELLED,
-                }.get(parsed.get("status"), RunStatus.FAILED)
+                status = parsed.get("status")
+                run.status = (
+                    {
+                        "SUCCEEDED": RunStatus.SUCCEEDED,
+                        "FAILED": RunStatus.FAILED,
+                        "CANCELLED": RunStatus.CANCELLED,
+                    }.get(status, RunStatus.FAILED)
+                    if isinstance(status, str)
+                    else RunStatus.FAILED
+                )
                 if workspace.kind is TaskKind.OPERATIONAL:
                     code = parsed.get("exit_code")
                     out = parsed.get("stdout_bytes")

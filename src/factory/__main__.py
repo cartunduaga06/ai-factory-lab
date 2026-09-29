@@ -219,9 +219,8 @@ def _run_runtime(config: FactoryConfig) -> int:
     _print_runtime_result(result)
     return (
         EXIT_OK
-        if result.outcome in {
-            "WAITING_HUMAN", "OPERATIONAL_DONE", "NO_ELIGIBLE_TASK", "SOURCE_INELIGIBLE"
-        }
+        if result.outcome
+        in {"WAITING_HUMAN", "OPERATIONAL_DONE", "NO_ELIGIBLE_TASK", "SOURCE_INELIGIBLE"}
         else EXIT_INTAKE_ERROR
     )
 
@@ -330,7 +329,8 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         operational_root=config.operational_scratch_root,
         operational_acceptance=(
             ScratchAcceptance(operational_provisioner)
-            if operational_provisioner is not None else None
+            if operational_provisioner is not None
+            else None
         ),
         code_capable=(
             config.github.target_repo is not None

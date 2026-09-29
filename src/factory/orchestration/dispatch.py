@@ -47,8 +47,8 @@ from factory.domain.models import (
     AgentRun,
     FactoryTask,
     Workspace,
-    new_workspace,
     new_operational_workspace,
+    new_workspace,
 )
 from factory.domain.ports import RunRepository, TaskRepository, WorkspaceProvisioner
 from factory.orchestration.machine import InvalidTransitionError, TaskStateMachine
