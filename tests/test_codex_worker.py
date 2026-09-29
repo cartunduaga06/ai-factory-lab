@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Timer
 from time import monotonic
 
 import pytest
@@ -11,7 +12,14 @@ import pytest
 from factory.integrations.codex import worker
 
 
-def _execute(tmp_path: Path, body: str, *, kind: str = "CODE") -> dict[str, object]:
+def _execute(
+    tmp_path: Path,
+    body: str,
+    *,
+    kind: str = "CODE",
+    timeout: float = 3,
+    cancel_after: float | None = None,
+) -> dict[str, object]:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     state = tmp_path / "state"
@@ -20,7 +28,17 @@ def _execute(tmp_path: Path, body: str, *, kind: str = "CODE") -> dict[str, obje
     executable = tmp_path / "fake-codex"
     executable.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
     executable.chmod(0o755)
-    worker.run(str(executable), str(workspace), state, "test", 3, kind)
+    timer = Timer(cancel_after, lambda: (state / "test.cancel").touch()) if cancel_after else None
+    if timer:
+        timer.start()
+    try:
+        worker.run(str(executable), str(workspace), state, "test", timeout, kind)
+    finally:
+        if timer:
+            timer.cancel()
+            timer.join()
+    assert not (state / "test.stdout").exists()
+    assert not (state / "test.stderr").exists()
     return json.loads((state / "test.result").read_text(encoding="ascii"))
 
 
@@ -47,21 +65,72 @@ print('ok')
 
 
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
-def test_output_over_cap_kills_worker_and_fails_closed(tmp_path: Path, stream: str) -> None:
+def test_code_output_over_cap_is_drained_and_succeeds(tmp_path: Path, stream: str) -> None:
     descriptor = 1 if stream == "stdout" else 2
+    result = _execute(
+        tmp_path,
+        f"""import os, pathlib, sys
+pathlib.Path(sys.argv[-2]).write_text('Done')
+for _ in range(40):
+    os.write({descriptor}, b'x' * 65536)
+""",
+    )
+    assert result["status"] == "SUCCEEDED"
+    assert result["exit_code"] == 0
+    assert result[f"{stream}_bytes"] == worker.MAX_OUTPUT_BYTES
+
+
+def test_mixed_streams_over_cap_are_drained_independently(tmp_path: Path) -> None:
+    result = _execute(
+        tmp_path,
+        """import os, pathlib, sys
+pathlib.Path(sys.argv[-2]).write_text('Done')
+for _ in range(20):
+    os.write(1, b'o' * 65536)
+    os.write(2, b'e' * 65536)
+""",
+    )
+    assert result == {
+        "status": "SUCCEEDED",
+        "exit_code": 0,
+        "stdout_bytes": worker.MAX_OUTPUT_BYTES,
+        "stderr_bytes": worker.MAX_OUTPUT_BYTES,
+    }
+
+
+def test_operational_output_over_cap_fails_after_draining(tmp_path: Path) -> None:
+    result = _execute(
+        tmp_path,
+        f"""import os, pathlib, sys
+pathlib.Path(sys.argv[-2]).write_text('Done')
+os.write(2, b'x' * ({worker.MAX_OUTPUT_BYTES} + 1))
+""",
+        kind="OPERATIONAL",
+    )
+    assert result["status"] == "FAILED"
+    assert result["exit_code"] == 0
+    assert result["stderr_bytes"] == worker.MAX_OUTPUT_BYTES
+
+
+@pytest.mark.parametrize("cancel_after", [None, 0.1])
+def test_noisy_run_still_honors_timeout_and_cancel(
+    tmp_path: Path, cancel_after: float | None
+) -> None:
     started = monotonic()
     result = _execute(
         tmp_path,
         f"""import os, pathlib, sys, time
 pathlib.Path(sys.argv[-2]).write_text('Done')
-os.write({descriptor}, b'x' * ({worker.MAX_OUTPUT_BYTES} + 1))
+os.write(2, b'x' * ({worker.MAX_OUTPUT_BYTES} + 1))
 time.sleep(10)
 """,
+        timeout=0.2 if cancel_after is None else 3,
+        cancel_after=cancel_after,
     )
-    assert monotonic() - started < 3
-    assert result["status"] == "FAILED"
+    assert monotonic() - started < 2
+    assert result["status"] == ("CANCELLED" if cancel_after else "FAILED")
     assert result["exit_code"] == -9
-    assert result[f"{stream}_bytes"] == worker.MAX_OUTPUT_BYTES
+    assert result["stderr_bytes"] == worker.MAX_OUTPUT_BYTES
 
 
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])

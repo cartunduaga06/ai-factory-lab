@@ -166,7 +166,7 @@ print('complete')
 
 
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
-def test_oversized_output_fails_and_capture_is_bounded(tmp_path: Path, stream: str) -> None:
+def test_oversized_code_output_succeeds_and_capture_is_bounded(tmp_path: Path, stream: str) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     executable = _executable(
@@ -181,8 +181,8 @@ sys.{stream}.flush()
     workspace = _workspace(checkout)
     run = _collect(adapter, adapter.dispatch(_task(), workspace))
     evidence = json.loads((CodexAdapter._state_dir(workspace) / f"{run.run_id}.result").read_text())
-    assert run.status is RunStatus.FAILED
-    assert evidence["status"] == "FAILED"
+    assert run.status is RunStatus.SUCCEEDED
+    assert evidence["status"] == "SUCCEEDED"
     assert evidence[f"{stream}_bytes"] == MAX_OUTPUT_BYTES
 
 

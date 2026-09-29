@@ -78,7 +78,7 @@ def run(
             stderr_bytes = stderr_path.stat().st_size
         if (
             status != "CANCELLED"
-            and not output_exceeded
+            and (kind == "CODE" or not output_exceeded)
             and process.returncode == 0
             and _valid_result(message)
         ):
@@ -154,12 +154,12 @@ def _drain_output(
                     continue
                 target = key.data
                 allowed = MAX_OUTPUT_BYTES - target.tell()
-                target.write(chunk[:allowed])
+                if allowed:
+                    target.write(chunk[:allowed])
                 if len(chunk) > allowed:
                     output_exceeded = True
-                    break
-            if output_exceeded:
-                break
+                    # Keep draining both pipes so logging volume cannot stall
+                    # the child or shorten a CODE run.
     return status, output_exceeded
 
 
