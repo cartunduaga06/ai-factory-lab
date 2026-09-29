@@ -347,7 +347,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
 def _build_agent_adapter(config: FactoryConfig) -> AgentAdapter:
     """Select exactly the configured execution engine."""
     if config.agent_engine is AgentEngine.CODEX:
-        return CodexAdapter(timeout=config.run_timeout)
+        return CodexAdapter(timeout=config.run_timeout, ecc_skill=config.codex_ecc_skill)
     if config.agent_engine is AgentEngine.OPENHANDS:
         if config.openhands.base_url is None:
             raise ConfigurationError("OPENHANDS_BASE_URL is required for run")

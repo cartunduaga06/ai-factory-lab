@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic, sleep
 
 import pytest
 
-from factory.domain.enums import AgentKind, RunStatus, TaskKind
-from factory.domain.models import AgentRun, FactoryTask, Workspace
+from factory.domain.enums import AgentKind, RunStatus, TaskKind, ValidationOutcome
+from factory.domain.models import AgentRun, FactoryTask, QualityGateSpec, Workspace
 from factory.integrations.codex import CodexAdapter
+from factory.integrations.codex.ecc_skill import SKILL_NAME, load_skill
 from factory.integrations.codex.worker import MAX_OUTPUT_BYTES
+from factory.integrations.gates.local import LocalQualityGateRunner
 
 
 def _task() -> FactoryTask:
@@ -38,6 +41,73 @@ def _collect(adapter: CodexAdapter, run: AgentRun) -> AgentRun:
             return run
         sleep(0.01)
     pytest.fail("Codex worker did not finish")
+
+
+def test_pinned_ecc_skill_loading_fails_closed(tmp_path: Path) -> None:
+    assert "# Verification Loop Skill" in load_skill(SKILL_NAME)
+    with pytest.raises(ValueError, match="unsupported"):
+        load_skill("other")
+    changed = tmp_path / "SKILL.md"
+    changed.write_text(load_skill(SKILL_NAME) + "\nunsafe edit")
+    with pytest.raises(ValueError, match="digest mismatch"):
+        load_skill(SKILL_NAME, path=changed)
+    link = tmp_path / "linked-skill"
+    link.symlink_to(changed)
+    with pytest.raises(ValueError, match="regular file"):
+        load_skill(SKILL_NAME, path=link)
+    changed.unlink()
+    with pytest.raises(ValueError, match="unavailable"):
+        load_skill(SKILL_NAME, path=changed)
+
+
+def test_ecc_codex_then_factory_gate_in_isolated_checkout(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    executable = _executable(
+        tmp_path,
+        """import pathlib, sys
+instruction = sys.stdin.read()
+assert '# Verification Loop Skill' in instruction
+assert 'Factory quality gates and human review remain authoritative' in instruction
+pathlib.Path('result.txt').write_text('reviewed')
+pathlib.Path(sys.argv[7]).write_text('Done')
+""",
+    )
+    workspace = _workspace(checkout)
+    adapter = CodexAdapter(executable=executable, ecc_skill=SKILL_NAME)
+    run = _collect(adapter, adapter.dispatch(_task(), workspace))
+    assert run.status is RunStatus.SUCCEEDED
+    gate = LocalQualityGateRunner().run(
+        QualityGateSpec(
+            name="artifact",
+            argv=(
+                sys.executable,
+                "-c",
+                "from pathlib import Path; assert Path('result.txt').exists()",
+            ),
+        ),
+        workspace,
+    )
+    assert gate.is_green
+    failing_gate = LocalQualityGateRunner().run(
+        QualityGateSpec(
+            name="missing",
+            argv=(
+                sys.executable,
+                "-c",
+                "from pathlib import Path; assert Path('missing.txt').exists()",
+            ),
+        ),
+        workspace,
+    )
+    assert not failing_gate.is_green
+    run.gates = (gate, failing_gate)
+    assert run.validation_outcome is ValidationOutcome.GATES_FAILED
+
+
+def test_unavailable_ecc_skill_prevents_dispatch(tmp_path: Path) -> None:
+    run = CodexAdapter(ecc_skill="unknown").dispatch(_task(), _workspace(tmp_path))
+    assert run.status is RunStatus.FAILED
 
 
 def test_codex_uses_assigned_workspace_and_authenticated_home(tmp_path: Path) -> None:

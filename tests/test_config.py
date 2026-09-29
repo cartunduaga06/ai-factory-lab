@@ -81,6 +81,16 @@ def test_engine_selection_is_explicit_and_rejects_typos() -> None:
         FactoryConfig.from_env({"FACTORY_AGENT_ENGINE": "unknown"})
 
 
+def test_ecc_selection_is_explicit_and_closed() -> None:
+    assert FactoryConfig.from_env({}).codex_ecc_skill is None
+    assert (
+        FactoryConfig.from_env({"FACTORY_CODEX_ECC_SKILL": "verification-loop"}).codex_ecc_skill
+        == "verification-loop"
+    )
+    with pytest.raises(ValueError, match="FACTORY_CODEX_ECC_SKILL"):
+        FactoryConfig.from_env({"FACTORY_CODEX_ECC_SKILL": "other"})
+
+
 def test_redacted_never_leaks_credentials() -> None:
     config = FactoryConfig.from_env(
         {

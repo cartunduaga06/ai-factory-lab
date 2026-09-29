@@ -239,6 +239,7 @@ class FactoryConfig:
     # Declarative gate definitions supplied by the application layer. The factory
     # never invents a gate a repository did not define.
     quality_gates: tuple[QualityGateSpec, ...] = ()
+    codex_ecc_skill: str | None = None
     # Separate WRITE credential for Phase 5 publication (push + PR). Distinct from
     # the read-only intake token: the factory must not implicitly reuse a
     # read-scoped credential for writes.
@@ -288,6 +289,9 @@ class FactoryConfig:
             agent_engine = AgentEngine(engine)
         except ValueError:
             raise ValueError("FACTORY_AGENT_ENGINE must be codex or openhands") from None
+        ecc_skill = _clean(source.get("FACTORY_CODEX_ECC_SKILL"))
+        if ecc_skill not in (None, "verification-loop"):
+            raise ValueError("FACTORY_CODEX_ECC_SKILL must be verification-loop or unset")
         raw_env = (_clean(source.get("FACTORY_ENV")) or Environment.DEVELOPMENT.value).lower()
         try:
             environment = Environment(raw_env)
@@ -313,6 +317,7 @@ class FactoryConfig:
             source_checkout=_clean(source.get("FACTORY_SOURCE_CHECKOUT")),
             workspace_base_ref=_clean(source.get("FACTORY_WORKSPACE_BASE_REF")),
             quality_gates=parse_gate_specs(source.get("FACTORY_QUALITY_GATES")),
+            codex_ecc_skill=ecc_skill,
             github_write_token=_clean(source.get("GITHUB_WRITE_TOKEN")),
             github_write_username=write_username,
             target_default_branch=(
@@ -363,6 +368,7 @@ class FactoryConfig:
             "quality_gates": [
                 {"name": spec.name, "required": spec.required} for spec in self.quality_gates
             ],
+            "codex_ecc_skill": self.codex_ecc_skill,
             "github_write_token": "***" if self.github_write_token else None,
             "github_write_username": self.github_write_username,
             "target_default_branch": self.target_default_branch,
