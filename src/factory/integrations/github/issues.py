@@ -106,6 +106,15 @@ class GitHubIssueSource(IssueSource):
             )
         return self._map_issue(payload, repository.slug)
 
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        """Check the issue directly so closure and label changes are observed."""
+        if source.provider != GITHUB_PROVIDER or source.repository_slug != repository.slug:
+            return False
+        payload = self._client.get(f"/repos/{repository.slug}/issues/{source.issue_number}")
+        if not isinstance(payload, Mapping):
+            raise GitHubRequestError(0, "unexpected issue payload")
+        return payload.get("number") == source.issue_number and self._is_eligible(payload)
+
     # -- internals ---------------------------------------------------------
 
     def _fetch_page(self, slug: str, page: int) -> list[Any]:

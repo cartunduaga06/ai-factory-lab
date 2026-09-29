@@ -42,14 +42,21 @@ from tests.fake_workspace import (
 class FakeIssueSource:
     def __init__(self, task: FactoryTask) -> None:
         self.task = task
+        self.state = "open"
+        self.labels = ("factory-ready",)
 
     def list_open_tasks(self, repository: Repository) -> list[FactoryTask]:
-        del repository
-        return [self.task]
+        return [self.task] if self.is_eligible(repository, self.task.source) else []
 
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
         del repository, source
         return self.task
+
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        del repository
+        return (
+            self.state == "open" and "factory-ready" in self.labels and source == self.task.source
+        )
 
 
 @pytest.fixture
@@ -118,6 +125,51 @@ def test_retry_is_waiting_human_noop_and_does_not_duplicate_run_or_pr(runtime_pa
     assert publisher.calls == 1
     assert sink.create_calls == 1
     assert second.outcome == "WAITING_HUMAN"
+
+
+@pytest.mark.parametrize("change", ["closed", "label_removed"])
+@pytest.mark.parametrize("status", [TaskStatus.DISCOVERED, TaskStatus.READY])
+def test_stale_unstarted_task_is_cancelled_without_dispatch(
+    runtime_parts, change: str, status: TaskStatus
+) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)
+    task = tasks.list(TaskStatus.DISCOVERED)[0]
+    if status is TaskStatus.READY:
+        runtime._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
+    source = runtime._intake._source
+    if change == "closed":
+        source.state = "closed"
+    else:
+        source.labels = ()
+
+    first = runtime.run_once()
+    second = runtime.run_once()
+
+    assert first.outcome == second.outcome == "NO_ELIGIBLE_TASK"
+    assert tasks.get(task.task_id).status is TaskStatus.CANCELLED
+    assert [transition.to_status for transition in tasks.history(task.task_id)] == (
+        [TaskStatus.READY, TaskStatus.CANCELLED]
+        if status is TaskStatus.READY
+        else [TaskStatus.CANCELLED]
+    )
+    assert len(tasks.list()) == 1
+    assert runs.list_runs() == []
+    assert adapter.dispatched == []
+    assert publisher.calls == sink.create_calls == 0
+
+
+def test_still_eligible_persisted_task_dispatches_once(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, _, sink, _ = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)
+
+    first = runtime.run_once()
+    second = runtime.run_once()
+
+    assert first.outcome == second.outcome == "WAITING_HUMAN"
+    assert first.run_id == second.run_id
+    assert len(tasks.list()) == len(runs.list_runs()) == 1
+    assert len(adapter.dispatched) == sink.create_calls == 1
 
 
 def test_timeout_leaves_active_run_resumable(runtime_parts) -> None:

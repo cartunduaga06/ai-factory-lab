@@ -299,6 +299,15 @@ An issue is eligible when it is **open**, carries the `factory-ready` label, and
 is **not** a pull request. The factory observes GitHub only — intake never adds,
 removes or changes labels, comments, state or any other GitHub resource.
 
+Before dispatching a persisted `DISCOVERED` or `READY` task with no prior run,
+the runtime fetches its source Issue by structured identity and checks current
+eligibility. If the Issue was closed, lost the required label, or became a pull
+request, the task moves to `CANCELLED` through the lifecycle, retaining its task
+and transition history. Repeated invocations leave that task cancelled and can
+select the next eligible task. A source read error stops the invocation without
+dispatching or cancelling the task. Tasks with prior runs and tasks in active or
+human-review states continue through their existing recovery path.
+
 ### Structured source identity
 
 `TaskSource(provider, repository_slug, issue_number)` is the deterministic

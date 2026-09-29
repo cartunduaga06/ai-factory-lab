@@ -41,6 +41,9 @@ class FakeIssueSource(IssueSource):
                 return task
         raise KeyError(source)
 
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        return any(task.source == source for task in self._tasks)
+
 
 class ExplodingIssueSource(IssueSource):
     def list_open_tasks(self, repository: Repository) -> list[FactoryTask]:
@@ -48,6 +51,9 @@ class ExplodingIssueSource(IssueSource):
 
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
         raise KeyError(source)
+
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        raise RuntimeError("source unavailable")
 
 
 def _issue(number: int) -> FactoryTask:

@@ -220,6 +220,25 @@ def test_get_task_rejects_pull_request() -> None:
         _source(transport).get_task(REPO, TaskSource("github", "cartunduaga06/ai-factory-lab", 5))
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (_issue(5, labels=["factory-ready"]), True),
+        (_issue(5, labels=["factory-ready"], state="closed"), False),
+        (_issue(5, labels=["other"]), False),
+        (_issue(5, labels=["factory-ready"], is_pull_request=True), False),
+    ],
+)
+def test_direct_eligibility_check_observes_current_issue(
+    payload: dict[str, Any], expected: bool
+) -> None:
+    transport = FakeTransport([payload])
+    source = TaskSource("github", REPO.slug, 5)
+
+    assert _source(transport).is_eligible(REPO, source) is expected
+    assert transport.calls[0][0].endswith("/issues/5")
+
+
 # -- failure behaviour -----------------------------------------------------
 
 

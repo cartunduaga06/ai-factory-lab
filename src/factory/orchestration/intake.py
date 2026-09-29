@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from factory.domain.models import Repository
+from factory.domain.models import FactoryTask, Repository
 from factory.domain.ports import IssueSource, TaskRepository
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,12 @@ class IssueIntakeService:
     def __init__(self, source: IssueSource, repository: TaskRepository) -> None:
         self._source = source
         self._repository = repository
+
+    def is_eligible(self, repository: Repository, task: FactoryTask) -> bool:
+        """Read current eligibility for a persisted task's structured source."""
+        if task.source is None:
+            return False
+        return self._source.is_eligible(repository, task.source)
 
     def intake(self, repository: Repository) -> IntakeSummary:
         """Run one intake pass for ``repository``.

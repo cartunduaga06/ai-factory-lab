@@ -48,6 +48,10 @@ class IssueSource(ABC):
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
         """Fetch a single work item by its structured source identity."""
 
+    @abstractmethod
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        """Check current source eligibility; raise when it cannot be verified."""
+
 
 class TaskRepository(ABC):
     """Persistence boundary for tasks and their lifecycle history.

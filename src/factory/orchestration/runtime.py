@@ -157,8 +157,15 @@ class FactoryRuntime:
             TaskStatus.DISCOVERED,
         ):
             tasks = self._tasks.list(status)
-            if tasks:
-                return tasks[0]
+            for task in tasks:
+                if (
+                    status in (TaskStatus.READY, TaskStatus.DISCOVERED)
+                    and not self._runs.list_runs(task.task_id)
+                    and not self._intake.is_eligible(self._intake_repository, task)
+                ):
+                    self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
+                    continue
+                return task
         return None
 
     def _poll_until_terminal(self, run_id: str) -> RunRefresh | None:
