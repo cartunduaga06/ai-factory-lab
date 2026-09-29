@@ -259,7 +259,8 @@ Transition table (authoritative: `factory/orchestration/lifecycle.py`):
 | `VALIDATING` | `PR_OPEN`, `READY`, `BLOCKED`, `DONE`, `FAILED`, `CANCELLED` |
 
 | `PR_OPEN` | `WAITING_HUMAN`, `FAILED`, `CANCELLED` |
-| `WAITING_HUMAN` | `DONE`, `FAILED`, `CANCELLED` |
+| `WAITING_HUMAN` | `CHANGES_REQUESTED`, `DONE`, `FAILED`, `CANCELLED` |
+| `CHANGES_REQUESTED` | `READY`, `CANCELLED` |
 | `BLOCKED` | `READY`, `CANCELLED` |
 | `DONE` / `FAILED` / `CANCELLED` | — (terminal) |
 
@@ -274,6 +275,20 @@ base, and number match can advance it: a confirmed merge moves it to `DONE`,
 and a confirmed close without merge moves it to `CANCELLED`. Open or uncertain
 responses leave it at `WAITING_HUMAN`; read errors stop the pass before new work.
 The transition is durable and idempotent. The factory never merges or closes a PR.
+
+Human QA can request another code pass with
+`python -m factory request-changes --task-id <uuid> --feedback-file <path>`.
+The command verifies that the task is awaiting review, its persisted PR identity
+matches the reviewed run, and GitHub still reports that PR open. It rejects
+empty, oversized, control-character and credential-like feedback. SQLite stores
+each accepted request with its reviewed run and atomically records
+`WAITING_HUMAN → CHANGES_REQUESTED`; a repeated request cannot create another
+cycle. The next runtime pass advances to `READY`, dispatches Codex in the
+reviewed checkout, validates a new run, then verifies the same open PR before
+pushing the same branch. The task returns to `WAITING_HUMAN` for another human
+review. A failed rework run moves to `BLOCKED`; the existing `retry` command
+can resume it on the same reviewed checkout. No new PR is opened, and a failed
+or stale PR check prevents a push.
 
 Two deliberate choices:
 
@@ -631,8 +646,9 @@ and persist history. A missing history, a latest non-failed run, any active run,
 other states and repeated requests are refused clearly. Concurrent retries
 cannot duplicate recovery transitions.
 Retry performs no intake or dispatch and never alters historical runs or
-workspaces. The next dispatch creates a new workspace, branch and run identity;
-there is no automatic retry loop.
+workspaces. An ordinary retry creates a new workspace, branch and run identity;
+a QA rework retry keeps its reviewed checkout and branch. There is no automatic
+retry loop.
 
 ### Adapter boundary
 

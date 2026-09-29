@@ -182,6 +182,8 @@ class FactoryRuntime:
 
         if task.status is TaskStatus.DISCOVERED:
             task = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
+        if task.status is TaskStatus.CHANGES_REQUESTED:
+            task = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
         if task.status is TaskStatus.READY:
             if task.kind is TaskKind.OPERATIONAL:
                 if not self._operational_policy.permits(OperationalCapability.SCRATCH):
@@ -202,10 +204,23 @@ class FactoryRuntime:
                 if not self._code_capable:
                     blocked = self._block(task.task_id, "code capability missing")
                     return self._result(blocked, None, None, "CODE_CAPABILITY_MISSING", intake)
-                run = self._dispatch.dispatch(task.task_id, self._adapter)
+                feedback = self._tasks.latest_rework_feedback(task.task_id)
+                if feedback is not None and self._runs.list_runs(task.task_id):
+                    if self._adapter.kind is not AgentKind.CODEX:
+                        return self._result(
+                            task, self._latest_run(task.task_id), None, "ENGINE_MISMATCH", intake
+                        )
+                    run = self._dispatch.dispatch_rework(task.task_id, self._adapter, feedback)
+                else:
+                    run = self._dispatch.dispatch(task.task_id, self._adapter)
         else:
             run = self._runs.find_active_run(task.task_id)
             if run is None:
+                if (
+                    task.status is TaskStatus.CLAIMED
+                    and self._tasks.latest_rework_feedback(task.task_id) is not None
+                ):
+                    return self._result(task, None, None, "RESUMABLE_STATE_MISSING_RUN", intake)
                 run = self._latest_run(task.task_id)
             if run is None:
                 return self._result(task, None, None, "RESUMABLE_STATE_MISSING_RUN", intake)
@@ -250,7 +265,11 @@ class FactoryRuntime:
             if run is None:
                 continue
             pr = self._pull_requests.get_for_run(run.run_id)
-            if pr is None or pr.task_id != task.task_id or pr.run_id != run.run_id:
+            if pr is None and run.workspace is not None:
+                pr = self._pull_requests.find_by_branch(
+                    run.workspace.repository_slug, run.workspace.branch
+                )
+            if pr is None or pr.task_id != task.task_id:
                 continue
             state = self._pull_request_state.state(pr)
             if state is PullRequestState.MERGED:
@@ -262,6 +281,23 @@ class FactoryRuntime:
         # Recovery states take precedence over new work; ordering within each
         # state is the repository's stable created_at/task_id order. Human
         # review of a CODE PR does not occupy the separate scratch workflow.
+        requested = self._tasks.list(TaskStatus.CHANGES_REQUESTED)
+        if requested:
+            return requested[0]
+        for ready in self._tasks.list(TaskStatus.READY):
+            if self._runs.list_runs(ready.task_id) and self._tasks.latest_rework_feedback(
+                ready.task_id
+            ):
+                return ready
+        for status in (
+            TaskStatus.CLAIMED,
+            TaskStatus.RUNNING,
+            TaskStatus.VALIDATING,
+            TaskStatus.PR_OPEN,
+        ):
+            for candidate in self._tasks.list(status):
+                if self._tasks.latest_rework_feedback(candidate.task_id):
+                    return candidate
         waiting = self._tasks.list(TaskStatus.WAITING_HUMAN)
         if waiting:
             for status in (

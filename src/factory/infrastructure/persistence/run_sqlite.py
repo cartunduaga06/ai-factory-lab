@@ -12,7 +12,7 @@ Two contracts matter most here:
   (``uq_agent_runs_active_task``) allows at most one non-terminal run per task.
   That is the storage-level guard behind dispatch idempotency: two concurrent
   dispatchers cannot both persist an active run, even if both pass the
-  application-level check.
+        application-level check.
 """
 
 from __future__ import annotations
@@ -65,15 +65,21 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         The workspace insert and the run insert share one transaction, so a
         failure in either leaves both untouched. A task that already has an
         active run is refused by the partial unique index and surfaces as
-        :class:`~factory.domain.errors.DuplicateRunError`; a workspace already
-        claimed by another run is refused by the one-workspace-per-run index and
-        surfaces the same way, so no two runs share a working tree.
+        :class:`~factory.domain.errors.DuplicateRunError`; a workspace claimed
+        by another active run is refused by the workspace index. Completed runs
+        may share a checkout across sequential human QA cycles.
         """
         created_at = encode_datetime(datetime.now(UTC))
         try:
             with self._connect() as conn:
                 if run.workspace is not None:
                     self._ensure_workspace(conn, run.workspace)
+                    owner = conn.execute(
+                        f"SELECT task_id FROM {AGENT_RUNS_TABLE} WHERE workspace_id = ? LIMIT 1",
+                        (run.workspace.workspace_id,),
+                    ).fetchone()
+                    if owner is not None and owner["task_id"] != run.task_id:
+                        raise DuplicateRunError(run.task_id)
                 conn.execute(
                     f"""
                     INSERT INTO {AGENT_RUNS_TABLE} (

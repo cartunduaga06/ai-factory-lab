@@ -22,26 +22,25 @@ Design notes:
   run to its workspace. Two partial unique indexes guard the invariants:
   ``uq_agent_runs_active_task`` allows at most one *active* (non-terminal) run
   per task — the storage-level guard behind dispatch idempotency — and
-  ``uq_agent_runs_workspace`` allows at most one run per non-null workspace, the
-  storage-level guard behind the Phase 4 one-workspace-per-run isolation
-  invariant. Terminal statuses are excluded from the active-run index, so retries
-  after a finished run are still possible.
+  ``uq_agent_runs_workspace`` allows at most one active run per workspace.
+  Terminal runs may share the reviewed checkout across sequential QA cycles.
 * ``pull_requests`` records the PR the factory opened for a run. ``run_id`` is
   ``UNIQUE`` (one PR per run) and ``(repository_slug, head_branch)`` is
   ``UNIQUE`` (one active publication identity per branch), the storage-level
-  guards behind publication idempotency. Initialization only adds tables and
-  indexes: it never drops or rewrites existing data.
+  guards behind publication idempotency. Initialization migrates the old
+  workspace uniqueness index to its active-run form without rewriting rows.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
 WORKSPACES_TABLE = "workspaces"
 AGENT_RUNS_TABLE = "agent_runs"
 PULL_REQUESTS_TABLE = "pull_requests"
+QA_REWORK_TABLE = "qa_rework"
 
 #: Run statuses that count as "active" for the one-active-run-per-task guard.
 #: These must match the non-terminal members of
@@ -144,14 +143,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_{AGENT_RUNS_TABLE}_active_task
  WHERE status IN ({", ".join(repr(status) for status in ACTIVE_RUN_STATUSES)});
 """
 
-#: One workspace per run. This is the storage-level guard behind the Phase 4
-#: isolation invariant: no two runs may point at the same working tree, even if
-#: an application-level check is bypassed. Runs without a workspace are exempt
-#: (SQLite treats NULLs as distinct), so a run that never had one is unaffected.
+#: A reviewed checkout may be reused by sequential rework runs. Concurrent
+#: runs on that checkout are still forbidden at storage level.
 CREATE_AGENT_RUNS_WORKSPACE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS uq_{AGENT_RUNS_TABLE}_workspace
     ON {AGENT_RUNS_TABLE} (workspace_id)
- WHERE workspace_id IS NOT NULL;
+ WHERE workspace_id IS NOT NULL AND status IN
+       ({", ".join(repr(status) for status in ACTIVE_RUN_STATUSES)});
+"""
+
+CREATE_AGENT_RUNS_WORKSPACE_OWNER_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS trg_{AGENT_RUNS_TABLE}_workspace_owner
+BEFORE INSERT ON {AGENT_RUNS_TABLE}
+WHEN NEW.workspace_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM {AGENT_RUNS_TABLE}
+    WHERE workspace_id = NEW.workspace_id AND task_id != NEW.task_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'workspace owner mismatch');
+END;
 """
 
 #: Pull requests the factory opened. ``run_id`` is ``UNIQUE`` so a run can have at
@@ -188,6 +198,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_{PULL_REQUESTS_TABLE}_repository_branch
     ON {PULL_REQUESTS_TABLE} (repository_slug, head_branch);
 """
 
+CREATE_QA_REWORK = f"""
+CREATE TABLE IF NOT EXISTS {QA_REWORK_TABLE} (
+    request_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    reviewed_run_id TEXT NOT NULL UNIQUE,
+    feedback TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES {TASKS_TABLE} (task_id) ON DELETE CASCADE,
+    FOREIGN KEY (reviewed_run_id) REFERENCES {AGENT_RUNS_TABLE} (run_id)
+);
+"""
+
 #: Idempotent statements that bring an existing database up to date with the
 #: current schema. Applied tolerantly (a duplicate column is ignored), so an old
 #: Phase 4/5 database gains ``agent_runs.validated_revision`` without losing data,
@@ -206,12 +228,14 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_WORKSPACES,
     CREATE_AGENT_RUNS,
     CREATE_PULL_REQUESTS,
+    CREATE_QA_REWORK,
     CREATE_TASKS_STATUS_INDEX,
     CREATE_TASKS_CREATED_INDEX,
     CREATE_TRANSITIONS_TASK_INDEX,
     CREATE_AGENT_RUNS_TASK_INDEX,
     CREATE_AGENT_RUNS_ACTIVE_INDEX,
     CREATE_AGENT_RUNS_WORKSPACE_INDEX,
+    CREATE_AGENT_RUNS_WORKSPACE_OWNER_TRIGGER,
     CREATE_PULL_REQUESTS_RUN_INDEX,
     CREATE_PULL_REQUESTS_BRANCH_INDEX,
 )
@@ -226,6 +250,7 @@ __all__ = [
     "CREATE_WORKSPACES",
     "MIGRATION_STATEMENTS",
     "PULL_REQUESTS_TABLE",
+    "QA_REWORK_TABLE",
     "SCHEMA_STATEMENTS",
     "SCHEMA_VERSION",
     "TASKS_TABLE",

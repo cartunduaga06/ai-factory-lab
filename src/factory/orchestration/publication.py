@@ -124,6 +124,27 @@ class PublicationService:
         run = self._require_run(run_id, task_id)
         self._require_publishable(task, run)
 
+        rework = self._rework_pull_request(task, run)
+        if rework is not None:
+            if task.status is TaskStatus.VALIDATING:
+                if not _validated_revision(run):
+                    raise ValidatedRevisionMissingError(task.task_id, run.run_id)
+                workspace = run.workspace
+                assert workspace is not None
+                found = self._sink.find_open_pull_request(
+                    Repository(workspace.repository_slug, role=RepositoryRole.TARGET),
+                    workspace.branch,
+                    self._base_branch,
+                )
+                if found is None or found.number != rework.number or found.url != rework.url:
+                    raise PullRequestIdentityError(task.task_id, run.run_id)
+                self._require_provider_identity(task, run, found, workspace.branch)
+                revision = self._publisher.publish(task, run)
+                if revision.branch != rework.head_branch:
+                    raise PullRequestIdentityError(task.task_id, run.run_id)
+            status, opened = self._reconcile(task.task_id)
+            return PublicationResult(rework, status, opened)
+
         existing = self._existing_pull_request(task, run)
         if existing is not None:
             # A previous pass already published: recover it and reconcile the
@@ -219,6 +240,28 @@ class PublicationService:
             return None
         self._require_persisted_identity(task, run, persisted)
         return persisted
+
+    def _rework_pull_request(self, task: FactoryTask, run: AgentRun) -> PullRequest | None:
+        """Find the earlier review PR on this same task and branch."""
+        workspace = run.workspace
+        if workspace is None or self._pull_requests.get_for_run(run.run_id) is not None:
+            return None
+        prior = self._pull_requests.find_by_branch(workspace.repository_slug, workspace.branch)
+        if prior is None:
+            return None
+        if (
+            prior.task_id != task.task_id
+            or prior.repository_slug != task.target_repository
+            or prior.head_branch != workspace.branch
+            or prior.base_branch != self._base_branch
+            or prior.number is None
+            or prior.run_id is None
+        ):
+            raise PullRequestIdentityError(task.task_id, run.run_id)
+        runs = self._runs.list_runs(task.task_id)
+        if not any(previous.run_id == prior.run_id for previous in runs[:-1]):
+            raise PullRequestIdentityError(task.task_id, run.run_id)
+        return prior
 
     def _require_persisted_identity(
         self, task: FactoryTask, run: AgentRun, pull_request: PullRequest

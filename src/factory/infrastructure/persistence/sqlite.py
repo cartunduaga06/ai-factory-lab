@@ -30,7 +30,11 @@ from factory.domain.errors import DuplicateTaskError, TaskStateChangedError
 from factory.domain.models import FactoryTask, TaskSource, TaskTransition
 from factory.domain.ports import TaskRepository
 from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
-from factory.infrastructure.persistence.schema import TASKS_TABLE, TRANSITIONS_TABLE
+from factory.infrastructure.persistence.schema import (
+    QA_REWORK_TABLE,
+    TASKS_TABLE,
+    TRANSITIONS_TABLE,
+)
 from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 
 # SQLite's own error class never escapes this module: callers see only the
@@ -42,6 +46,52 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
 
     def __repr__(self) -> str:
         return f"SqliteTaskRepository(path={self._path!r})"
+
+    def request_rework(self, task_id: str, run_id: str, feedback: str) -> FactoryTask:
+        now = encode_datetime(datetime.now(UTC))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE {TASKS_TABLE} SET status = ?, updated_at = ? "
+                "WHERE task_id = ? AND status = ?",
+                (TaskStatus.CHANGES_REQUESTED.value, now, task_id, TaskStatus.WAITING_HUMAN.value),
+            )
+            if cursor.rowcount != 1:
+                row = conn.execute(
+                    f"SELECT status FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(task_id)
+                raise TaskStateChangedError(
+                    task_id, TaskStatus.WAITING_HUMAN, TaskStatus(row["status"])
+                )
+            conn.execute(
+                f"INSERT INTO {QA_REWORK_TABLE} "
+                "(request_id, task_id, reviewed_run_id, feedback, requested_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), task_id, run_id, feedback, now),
+            )
+            conn.execute(
+                f"INSERT INTO {TRANSITIONS_TABLE} "
+                "(transition_id, task_id, from_status, to_status, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()), task_id, TaskStatus.WAITING_HUMAN.value,
+                    TaskStatus.CHANGES_REQUESTED.value, now,
+                ),
+            )
+            row = conn.execute(
+                f"SELECT * FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        assert row is not None
+        return _row_to_task(row)
+
+    def latest_rework_feedback(self, task_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT feedback FROM {QA_REWORK_TABLE} WHERE task_id = ? "
+                "ORDER BY requested_at DESC, rowid DESC LIMIT 1", (task_id,)
+            ).fetchone()
+        return str(row["feedback"]) if row is not None else None
 
     # -- TaskRepository ----------------------------------------------------
 

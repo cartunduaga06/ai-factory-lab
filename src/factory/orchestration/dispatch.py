@@ -11,9 +11,8 @@ The sequence is deliberate:
 2. **Claim atomically.** ``READY -> CLAIMED`` goes through the same
    compare-and-swap used everywhere else, so two dispatchers cannot both claim
    the same task. The loser gets :class:`DispatchConflictError`.
-3. **Build a per-run workspace identity.** Branch and path derive from the
-   workspace's own generated id, so a retry of the same task never reuses
-   another attempt's workspace.
+3. **Build a workspace identity.** Ordinary retries create a new branch and
+   path; a human QA rework run resumes the reviewed checkout and branch.
 4. **Prepare the physical workspace.** The injected ``WorkspaceProvisioner``
    materialises the checkout. If it fails, the adapter is never called and no
    run is recorded.
@@ -31,6 +30,7 @@ There is no engine-specific branch anywhere in this module: only
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus
@@ -121,6 +121,30 @@ class DispatchService:
         claimed = self._claim(task)
         workspace = self._prepare_workspace(claimed)
         run = self._start_run(claimed, workspace, adapter)
+        self._advance_to_running(claimed)
+        return run
+
+    def dispatch_rework(self, task_id: str, adapter: AgentAdapter, feedback: str) -> AgentRun:
+        """Start a new run in the reviewed branch's existing checkout."""
+        task = self._require_task(task_id)
+        if task.status is not TaskStatus.READY or task.kind is not TaskKind.CODE:
+            raise TaskNotReadyError(task_id, task.status)
+        if self._runs.find_active_run(task_id) is not None:
+            raise DispatchConflictError(task_id)
+        history = self._runs.list_runs(task_id)
+        previous = history[-1] if history else None
+        if previous is None or previous.workspace is None or not previous.is_terminal:
+            raise WorkspaceProvisioningError(task_id)
+        claimed = self._claim(task)
+        workspace = self._provisioner.repair(claimed, previous.workspace)
+        instruction = replace(
+            claimed,
+            body=(
+                f"Human QA feedback for this rework:\n{feedback}\n\n"
+                f"Original task (first 3000 characters):\n{claimed.body[:3000]}"
+            ),
+        )
+        run = self._start_run(instruction, workspace, adapter)
         self._advance_to_running(claimed)
         return run
 

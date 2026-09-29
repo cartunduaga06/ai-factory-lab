@@ -40,11 +40,15 @@ class SqliteRepository:
         date — for example adding ``agent_runs.validated_revision`` — and are
         applied tolerantly, since a column that already exists (or a fresh
         database that was created with it) would otherwise raise a duplicate-column
-        error. No migration drops or rewrites existing data.
+        error. The workspace index is replaced by its active-run variant;
+        stored task and run rows are not rewritten.
         """
         if self._path != ":memory:":
             Path(self._path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            # Rework runs are sequential attempts on the same reviewed checkout.
+            # The active-task index still forbids concurrent writers.
+            conn.execute("DROP INDEX IF EXISTS uq_agent_runs_workspace")
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
             for statement in MIGRATION_STATEMENTS:
