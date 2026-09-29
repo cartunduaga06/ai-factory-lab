@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from factory.domain.enums import QualityGateStatus, RunStatus, TaskStatus, ValidationOutcome
+from factory.domain.enums import (
+    AgentKind,
+    QualityGateStatus,
+    RunStatus,
+    TaskStatus,
+    ValidationOutcome,
+)
 from factory.domain.errors import AgentCollectError
 from factory.domain.models import (
     AgentRun,
@@ -99,6 +105,14 @@ def _service(
         revision_inspector=revision_inspector or FakeRevisionInspector(),
         provisioner=FakeWorkspaceProvisioner(),
     )
+
+
+def test_run_cannot_be_collected_with_a_different_engine(db_path: str, tmp_path: Path) -> None:
+    task = _running_task(_tasks(db_path))
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    with pytest.raises(AgentCollectError):
+        _service(db_path).refresh(run.run_id, FakeAgentAdapter(kind=AgentKind.CODEX))
+    assert _runs(db_path).get_run(run.run_id).status is RunStatus.RUNNING  # type: ignore[union-attr]
 
 
 # -- non-terminal ----------------------------------------------------------

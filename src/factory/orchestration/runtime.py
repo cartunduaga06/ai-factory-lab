@@ -128,6 +128,9 @@ class FactoryRuntime:
             if run is None:
                 return self._result(task, None, None, "RESUMABLE_STATE_MISSING_RUN", intake)
 
+        if run.adapter is not self._adapter.kind:
+            return self._result(task, run, None, "ENGINE_MISMATCH", intake)
+
         refresh = self._poll_until_terminal(run.run_id)
         if refresh is None:
             current = self._tasks.get(task.task_id) or task

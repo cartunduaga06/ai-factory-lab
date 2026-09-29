@@ -27,14 +27,15 @@ from uuid import UUID
 from factory import __version__
 from factory.domain.enums import RepositoryRole
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
-from factory.domain.models import Repository
-from factory.infrastructure.config import FactoryConfig, UnsupportedDatabaseError
+from factory.domain.models import AgentAdapter, Repository
+from factory.infrastructure.config import AgentEngine, FactoryConfig, UnsupportedDatabaseError
 from factory.infrastructure.logging import configure_logging
 from factory.infrastructure.persistence import (
     SqlitePullRequestRepository,
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.integrations.codex import CodexAdapter
 from factory.integrations.gates import LocalQualityGateRunner
 from factory.integrations.github import (
     GitHubClient,
@@ -99,19 +100,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.show_config:
+    if not args.show_config and args.command is None:
+        parser.print_help()
+        return EXIT_OK
+    try:
         config = FactoryConfig.from_env()
+    except ValueError as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+
+    if args.show_config:
         print(json.dumps(config.redacted(), indent=2, sort_keys=True))
         return EXIT_OK
 
     if args.command == "intake":
-        return _run_intake(FactoryConfig.from_env())
+        return _run_intake(config)
     if args.command == "retry":
-        return _run_retry(FactoryConfig.from_env(), str(args.task_id))
+        return _run_retry(config, str(args.task_id))
     if args.command == "run":
-        return _run_runtime(FactoryConfig.from_env())
+        return _run_runtime(config)
     if args.command == "watch":
-        return _run_watch(FactoryConfig.from_env())
+        return _run_watch(config)
 
     parser.print_help()
     return EXIT_OK
@@ -265,10 +274,6 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         raise ConfigurationError("FACTORY_TARGET_REPO is required for run")
     if config.source_checkout is None:
         raise ConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
-    if config.openhands.base_url is None:
-        raise ConfigurationError("OPENHANDS_BASE_URL is required for run")
-    if config.openhands.agent_profile_id is None:
-        raise ConfigurationError("OPENHANDS_AGENT_PROFILE_ID is required for run")
     if config.github_write_token is None:
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
@@ -285,18 +290,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         source=GitHubIssueSource(read_client, target_repository=config.github.target_repo),
         repository=tasks,
     )
-    mapper = WorkspacePathMapper(config.workspace_root, config.openhands_workspace_root)
-    adapter = OpenHandsAdapter(
-        OpenHandsClient(
-            config.openhands.base_url,
-            session_api_key=config.openhands.session_api_key,
-        ),
-        OpenHandsExecution(
-            agent_profile_id=config.openhands.agent_profile_id,
-            shared_workspace_hook_command=(config.openhands_shared_workspace_hook_command),
-        ),
-        workspace_paths=mapper,
-    )
+    adapter = _build_agent_adapter(config)
     write_client = GitHubWriteClient(config.github_write_token, config.github.api_url)
     return FactoryRuntime(
         intake=intake,
@@ -321,6 +315,30 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         poll_interval=config.run_poll_interval,
         timeout=config.run_timeout,
     )
+
+
+def _build_agent_adapter(config: FactoryConfig) -> AgentAdapter:
+    """Select exactly the configured execution engine."""
+    if config.agent_engine is AgentEngine.CODEX:
+        return CodexAdapter(timeout=config.run_timeout)
+    if config.agent_engine is AgentEngine.OPENHANDS:
+        if config.openhands.base_url is None:
+            raise ConfigurationError("OPENHANDS_BASE_URL is required for run")
+        if config.openhands.agent_profile_id is None:
+            raise ConfigurationError("OPENHANDS_AGENT_PROFILE_ID is required for run")
+        mapper = WorkspacePathMapper(config.workspace_root, config.openhands_workspace_root)
+        return OpenHandsAdapter(
+            OpenHandsClient(
+                config.openhands.base_url,
+                session_api_key=config.openhands.session_api_key,
+            ),
+            OpenHandsExecution(
+                agent_profile_id=config.openhands.agent_profile_id,
+                shared_workspace_hook_command=config.openhands_shared_workspace_hook_command,
+            ),
+            workspace_paths=mapper,
+        )
+    raise ConfigurationError("unsupported agent engine")
 
 
 def _print_watch_outcome(outcome: WatchOutcome) -> None:
