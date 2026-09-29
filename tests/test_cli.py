@@ -20,6 +20,8 @@ from factory.domain.ports import IssueSource
 from factory.infrastructure.config import FactoryConfig
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
 from factory.orchestration.intake import IntakeSummary
+from factory.orchestration.runtime import RuntimeResult
+from factory.orchestration.watch import WatchOutcome
 
 TOKEN = "ghp_cli_secret_token_never_print"
 
@@ -211,7 +213,12 @@ def test_summary_dataclass_defaults_are_zero() -> None:
     assert (summary.discovered, summary.created, summary.existing, summary.errors) == (0, 0, 0, 0)
 
 
-def _runtime_env(tmp_path: Path, *, write_token: str | None = "write-secret") -> dict[str, str]:
+def _runtime_env(
+    tmp_path: Path,
+    *,
+    write_token: str | None = "write-secret",
+    **overrides: str,
+) -> dict[str, str]:
     values = {
         "GITHUB_TOKEN": TOKEN,
         "FACTORY_GITHUB_REPO": "cartunduaga06/ai-factory-lab",
@@ -225,6 +232,7 @@ def _runtime_env(tmp_path: Path, *, write_token: str | None = "write-secret") ->
     }
     if write_token is not None:
         values["GITHUB_WRITE_TOKEN"] = write_token
+    values.update(overrides)
     return values
 
 
@@ -351,3 +359,219 @@ def test_retry_cli_recovers_legacy_claim_without_processing_other_tasks(
     ]
     assert tasks.get(other.task_id) == other
     assert runs.list_runs() == [failed]
+
+
+# -- automatic worker (``factory watch``) ----------------------------------
+
+
+def _stub_runtime() -> object:
+    """A inert runtime stand-in: ``watch`` builds it but never dispatches here."""
+
+    class StubRuntime:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def run_once(self) -> RuntimeResult:
+            return RuntimeResult(
+                None, None, None, None, None, None, None, "NO_ELIGIBLE_TASK", IntakeSummary()
+            )
+
+    return StubRuntime
+
+
+def _install_fake_watcher(
+    monkeypatch: pytest.MonkeyPatch, *, max_iterations: int, seen: dict[str, object]
+) -> None:
+    """Patch ``FactoryWatcher`` with a bounded, sleep-free stand-in.
+
+    It still calls the injected runtime once per iteration, so the CLI wiring
+    (runtime build, signal handlers, output) is exercised without a real loop.
+    """
+
+    class FakeWatcher:
+        def __init__(
+            self,
+            *,
+            runtime: object,
+            idle_interval: float,
+            max_iterations: int | None = None,
+            sleep: object = None,
+            should_stop: object = None,
+        ) -> None:
+            seen["idle_interval"] = idle_interval
+            del max_iterations, sleep, should_stop
+            self._runtime = runtime
+
+        def run(self) -> WatchOutcome:
+            last: RuntimeResult | None = None
+            for _ in range(max_iterations):
+                last = self._runtime.run_once()  # type: ignore[attr-defined]
+            return WatchOutcome(
+                iterations=max_iterations,
+                processed=0,
+                idle_waits=max_iterations,
+                stopped=False,
+                last_result=last,
+            )
+
+    monkeypatch.setattr(cli, "FactoryWatcher", FakeWatcher)
+
+
+def test_watch_cli_builds_runtime_and_reports_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: dict[str, object] = {}
+    _install_fake_watcher(monkeypatch, max_iterations=2, seen=seen)
+    monkeypatch.setattr(cli, "FactoryRuntime", _stub_runtime())
+    for key, value in _runtime_env(tmp_path, FACTORY_WATCH_IDLE_INTERVAL="3").items():
+        monkeypatch.setenv(key, value)
+
+    code = cli.main(["watch"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_OK
+    assert "Iterations: 2" in captured.out
+    assert "Processed: 0" in captured.out
+    assert "Idle waits: 2" in captured.out
+    assert TOKEN not in captured.out
+    # The configured idle interval reaches the watcher.
+    assert seen["idle_interval"] == 3.0
+
+
+def test_watch_cli_fails_closed_without_write_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("GITHUB_WRITE_TOKEN", raising=False)
+    for key, value in _runtime_env(tmp_path, write_token=None).items():
+        monkeypatch.setenv(key, value)
+
+    code = cli.main(["watch"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_CONFIG_ERROR
+    assert "GITHUB_WRITE_TOKEN is required" in captured.out
+    assert TOKEN not in captured.out
+
+
+def test_watch_cli_does_not_echo_provider_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    provider_secret = "watch-provider-secret-must-not-escape"
+
+    class ExplodingWatcher:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def run(self) -> WatchOutcome:
+            raise RuntimeError(provider_secret)
+
+    monkeypatch.setattr(cli, "FactoryRuntime", _stub_runtime())
+    monkeypatch.setattr(cli, "FactoryWatcher", ExplodingWatcher)
+    for key, value in _runtime_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+
+    code = cli.main(["watch"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_INTAKE_ERROR
+    assert "watch failed" in captured.out
+    assert provider_secret not in captured.out
+    assert provider_secret not in captured.err
+
+
+def test_watch_cli_installs_and_restores_stop_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import signal
+
+    recorded: list[tuple[int, object]] = []
+    previous = {signal.SIGINT: "prev-int", signal.SIGTERM: "prev-term"}
+
+    def fake_signal(signum: int, handler: object) -> object:
+        recorded.append((signum, handler))
+        return previous[signum]
+
+    monkeypatch.setattr(cli.signal, "signal", fake_signal)
+    _install_fake_watcher(monkeypatch, max_iterations=1, seen={})
+    monkeypatch.setattr(cli, "FactoryRuntime", _stub_runtime())
+    for key, value in _runtime_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+
+    assert cli.main(["watch"]) == cli.EXIT_OK
+
+    installed = {signum for signum, handler in recorded if callable(handler)}
+    restored = [(signum, handler) for signum, handler in recorded if not callable(handler)]
+    assert installed == {signal.SIGINT, signal.SIGTERM}
+    assert (signal.SIGINT, "prev-int") in restored
+    assert (signal.SIGTERM, "prev-term") in restored
+
+
+def test_installed_stop_handler_requests_a_cooperative_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import signal
+    import threading
+
+    handlers: dict[int, object] = {}
+
+    def fake_signal(signum: int, handler: object) -> object:
+        handlers[signum] = handler
+        return signal.SIG_DFL
+
+    monkeypatch.setattr(cli.signal, "signal", fake_signal)
+    stop = threading.Event()
+    cli._install_stop_handlers(stop)
+
+    assert not stop.is_set()
+    handlers[signal.SIGINT](signal.SIGINT, None)  # type: ignore[operator]
+    assert stop.is_set()
+
+
+def test_run_remains_one_shot_and_does_not_construct_a_watcher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    class OneShotRuntime:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def run_once(self) -> RuntimeResult:
+            calls.append("run_once")
+            return RuntimeResult(
+                "task-1",
+                "run-1",
+                TaskStatus.WAITING_HUMAN,
+                "factory/task-1/run-1",
+                None,
+                7,
+                "https://example.invalid/pr/7",
+                "WAITING_HUMAN",
+                IntakeSummary(),
+            )
+
+    class ForbiddenWatcher:
+        def __init__(self, **kwargs: object) -> None:
+            raise AssertionError("watch must not be constructed by `factory run`")
+
+    monkeypatch.setattr(cli, "FactoryRuntime", OneShotRuntime)
+    monkeypatch.setattr(cli, "FactoryWatcher", ForbiddenWatcher)
+    for key, value in _runtime_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+
+    code = cli.main(["run"])
+    out = capsys.readouterr().out
+
+    assert code == cli.EXIT_OK
+    assert calls == ["run_once"]
+    assert "Outcome: WAITING_HUMAN" in out

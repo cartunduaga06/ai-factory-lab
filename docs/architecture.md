@@ -134,6 +134,8 @@ src/factory/
 │   ├── dispatch.py          # DispatchService (claim + workspace + run)
 │   ├── tracking.py          # RunTrackingService (collect → validate → lifecycle)
 │   ├── publication.py       # PublicationService (publish → PR → WAITING_HUMAN)
+│   ├── runtime.py           # FactoryRuntime (one-shot: intake → … → WAITING_HUMAN)
+│   ├── watch.py             # FactoryWatcher (sequential one-task loop, WIP=1)
 │   └── transitions.py       # TaskLifecycleService (state machine + persistence)
 ├── integrations/
 │   ├── base.py              # AgentAdapterBase; re-exports the domain ports
@@ -484,6 +486,44 @@ PR, persist it and move a task to `WAITING_HUMAN`; it may **never** merge a PR,
 enable auto-merge, push to main, or deploy after a PR. There is deliberately no
 merge operation in `PullRequestSink`, `GitHubWriteClient` or the domain — an
 automatic merge is not merely discouraged, it is unreachable.
+
+## Automatic worker (Phase 6)
+
+`factory watch` is a thin loop over the one-shot runtime, not a second pipeline:
+
+```
+python -m factory watch
+      ↓
+FactoryWatcher.run()                 (orchestration)
+      ↓  per iteration (WIP = 1)
+FactoryRuntime.run_once()            (reused, unchanged)
+      ↓  NO_ELIGIBLE_TASK
+sleep(FACTORY_WATCH_IDLE_INTERVAL)   (injected; default 60s)
+      ↓  otherwise
+next iteration
+      ↓  SIGINT / SIGTERM
+stop observed between iterations → clean exit
+```
+
+Design intent:
+
+- **Reuse, not re-implementation.** The watcher holds a ``FactoryRuntime`` and
+  calls it. It contains no intake, dispatch, tracking or publication logic, so
+  the phase boundaries and safety guards are exactly those of ``factory run``.
+- **WIP = 1 by construction.** One runtime invocation runs at a time, and the
+  runtime itself completes at most one task. Because recovery states are
+  selected before new work, a ``WAITING_HUMAN`` task remains the single in-flight
+  task until a human advances it.
+- **Cooperative stop.** The CLI installs ``SIGINT``/``SIGTERM`` handlers that only
+  set a flag; the loop checks it between iterations, so a signal cannot interrupt
+  an in-flight task or corrupt persisted state. Previous handlers are restored on
+  exit.
+- **Injected seams.** ``sleep`` and ``should_stop`` are constructor arguments, so
+  the loop is deterministic and offline under test — no wall-clock or signal
+  dependence in the tests.
+
+The worker never merges, deploys or mutates an Issue. Its terminal state is
+``WAITING_HUMAN``, same as the one-shot runtime.
 
 ## Configuration model
 

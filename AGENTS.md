@@ -77,7 +77,13 @@ python -m factory --show-config   # redacted config dump
 ```
 
 `python -m factory intake` runs one manual GitHub intake pass (read-only) and
-persists eligible issues. There is no daemon or scheduler.
+persists eligible issues. `python -m factory run` runs at most one task through
+the existing phases and stops at `WAITING_HUMAN`. `python -m factory watch` is
+the automatic worker: it calls the same one-shot runtime sequentially (WIP=1),
+waits `FACTORY_WATCH_IDLE_INTERVAL` seconds when there is no eligible work, and
+stops cleanly on `SIGINT`/`SIGTERM`. Neither mode merges, deploys or mutates an
+Issue; there is still no scheduler — `watch` is a foreground loop an operator or
+a service manager supervises.
 
 All four checks must pass before a change is proposed. Python 3.11+.
 

@@ -20,11 +20,13 @@ from factory.orchestration.publication import (
 )
 from factory.orchestration.tracking import RunRefresh, RunTrackingService
 from factory.orchestration.transitions import TaskLifecycleService
+from factory.orchestration.watch import FactoryWatcher, WatchOutcome
 
 __all__ = [
     "TERMINAL_STATES",
     "TRANSITIONS",
     "DispatchService",
+    "FactoryWatcher",
     "IntakeSummary",
     "InvalidTransitionError",
     "IssueIntakeService",
@@ -34,6 +36,7 @@ __all__ = [
     "RunTrackingService",
     "TaskLifecycleService",
     "TaskStateMachine",
+    "WatchOutcome",
     "branch_for",
     "build_pull_request_body",
     "can_transition",
