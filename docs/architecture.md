@@ -311,6 +311,16 @@ enforces `UNIQUE(source_provider, source_repository, source_issue_number)` as a
 defense-in-depth guarantee: a concurrent writer that slips past the check still
 cannot create a duplicate.
 
+Before a persisted `DISCOVERED` or unstarted `READY` task advances toward
+dispatch, the runtime asks its `IssueSource` to recheck that structured source
+against current eligibility rules. A readable closed, unlabelled, or pull request
+payload moves the task to `CANCELLED` with a durable transition record; it creates
+no run or workspace. Any source read failure, including HTTP 404, stops the
+invocation without changing the task or its transition history and without
+dispatching it: a 404 can also mean the token lacks access to a private repository.
+Tasks with recovery history, active runs, and human-review states retain their
+existing recovery behavior.
+
 ### Transition persistence
 
 `TaskLifecycleService.transition()` retrieves the task, validates the requested

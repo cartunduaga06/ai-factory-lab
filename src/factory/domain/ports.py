@@ -48,6 +48,15 @@ class IssueSource(ABC):
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
         """Fetch a single work item by its structured source identity."""
 
+    @abstractmethod
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        """Return whether the current work item still meets source intake rules.
+
+        Return ``False`` only when a readable item definitively fails those
+        rules. Any source read failure, including a missing/404 response, must
+        propagate so the caller does not dispatch or cancel uncertain work.
+        """
+
 
 class TaskRepository(ABC):
     """Persistence boundary for tasks and their lifecycle history.

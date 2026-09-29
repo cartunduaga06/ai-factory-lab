@@ -38,6 +38,9 @@ class FakeIssueSource(IssueSource):
                 return task
         raise KeyError(source)
 
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        return any(task.source == source for task in self._tasks)
+
 
 @pytest.fixture
 def repo(tmp_path: Path) -> SqliteTaskRepository:

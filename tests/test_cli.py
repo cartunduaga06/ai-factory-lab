@@ -39,6 +39,9 @@ class FakeIssueSource(IssueSource):
                 return task
         raise KeyError(source)
 
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        return any(task.source == source for task in self._tasks)
+
 
 class ExplodingIssueSource(IssueSource):
     def list_open_tasks(self, repository: Repository) -> list[FactoryTask]:
@@ -46,6 +49,9 @@ class ExplodingIssueSource(IssueSource):
 
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
         raise KeyError(source)
+
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        raise RuntimeError(f"boom while using token {TOKEN}")
 
 
 def _issue(number: int) -> FactoryTask:
@@ -575,3 +581,39 @@ def test_run_remains_one_shot_and_does_not_construct_a_watcher(
     assert code == cli.EXIT_OK
     assert calls == ["run_once"]
     assert "Outcome: WAITING_HUMAN" in out
+
+
+def test_run_reports_ineligible_source_as_success_without_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class StaleSourceRuntime:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def run_once(self) -> RuntimeResult:
+            return RuntimeResult(
+                "task-1",
+                None,
+                TaskStatus.CANCELLED,
+                None,
+                None,
+                None,
+                None,
+                "SOURCE_INELIGIBLE",
+                IntakeSummary(),
+            )
+
+    monkeypatch.setattr(cli, "FactoryRuntime", StaleSourceRuntime)
+    for key, value in _runtime_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+
+    code = cli.main(["run"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_OK
+    assert "Task status: CANCELLED" in captured.out
+    assert "Outcome: SOURCE_INELIGIBLE" in captured.out
+    assert TOKEN not in captured.out + captured.err
+    assert "write-secret" not in captured.out + captured.err

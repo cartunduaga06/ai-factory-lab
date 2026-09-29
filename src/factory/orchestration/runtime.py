@@ -117,6 +117,17 @@ class FactoryRuntime:
             published = self._publication.publish(task.task_id, run.run_id)
             return self._result_from_publication(published, run, intake)
 
+        if (
+            self._is_unstarted(task)
+            and task.source is not None
+            and not self._intake.is_eligible(
+                Repository(task.source.repository_slug, role=self._intake_repository.role),
+                task.source,
+            )
+        ):
+            cancelled = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
+            return self._result(cancelled, None, None, "SOURCE_INELIGIBLE", intake)
+
         if task.status is TaskStatus.DISCOVERED:
             task = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
         if task.status is TaskStatus.READY:
@@ -157,6 +168,16 @@ class FactoryRuntime:
             if tasks:
                 return tasks[0]
         return None
+
+    def _is_unstarted(self, task: FactoryTask) -> bool:
+        if task.status not in {TaskStatus.DISCOVERED, TaskStatus.READY}:
+            return False
+        if self._runs.list_runs(task.task_id):
+            return False
+        return all(
+            transition.to_status is TaskStatus.READY
+            for transition in self._tasks.history(task.task_id)
+        )
 
     def _poll_until_terminal(self, run_id: str) -> RunRefresh | None:
         deadline = self._monotonic() + self._timeout

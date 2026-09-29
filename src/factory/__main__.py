@@ -206,7 +206,11 @@ def _run_runtime(config: FactoryConfig) -> int:
         return EXIT_INTAKE_ERROR
 
     _print_runtime_result(result)
-    return EXIT_OK if result.outcome in {"WAITING_HUMAN", "NO_ELIGIBLE_TASK"} else EXIT_INTAKE_ERROR
+    return (
+        EXIT_OK
+        if result.outcome in {"WAITING_HUMAN", "NO_ELIGIBLE_TASK", "SOURCE_INELIGIBLE"}
+        else EXIT_INTAKE_ERROR
+    )
 
 
 def _run_watch(config: FactoryConfig) -> int:
