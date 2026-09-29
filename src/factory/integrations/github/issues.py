@@ -97,14 +97,42 @@ class GitHubIssueSource(IssueSource):
         Raises:
             GitHubRequestError: if the item is a pull request or malformed.
         """
-        payload = self._client.get(f"/repos/{repository.slug}/issues/{source.issue_number}")
-        if not isinstance(payload, Mapping):
-            raise GitHubRequestError(0, "unexpected issue payload")
+        payload = self._fetch_issue(repository, source)
         if "pull_request" in payload:
             raise GitHubRequestError(
                 0, f"#{source.issue_number} in {repository.slug} is a pull request, not an issue"
             )
         return self._map_issue(payload, repository.slug)
+
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        """Recheck a readable issue; propagate read or malformed-payload failures."""
+        payload = self._fetch_issue(repository, source)
+        if "pull_request" in payload:
+            return False
+        state = payload.get("state")
+        if state == "closed":
+            return False
+        if state != "open":
+            raise GitHubRequestError(0, "unexpected issue state")
+        labels = payload.get("labels")
+        if not isinstance(labels, list) or any(
+            not (
+                isinstance(label, str)
+                and bool(label)
+                or isinstance(label, Mapping)
+                and isinstance(label.get("name"), str)
+                and bool(label["name"])
+            )
+            for label in labels
+        ):
+            raise GitHubRequestError(0, "unexpected issue labels")
+        return self._eligibility_label in self._label_names(payload)
+
+    def _fetch_issue(self, repository: Repository, source: TaskSource) -> Mapping[str, Any]:
+        payload = self._client.get(f"/repos/{repository.slug}/issues/{source.issue_number}")
+        if not isinstance(payload, Mapping):
+            raise GitHubRequestError(0, "unexpected issue payload")
+        return payload
 
     # -- internals ---------------------------------------------------------
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from factory.domain.models import Repository
+from factory.domain.models import Repository, TaskSource
 from factory.domain.ports import IssueSource, TaskRepository
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,10 @@ class IssueIntakeService:
     def __init__(self, source: IssueSource, repository: TaskRepository) -> None:
         self._source = source
         self._repository = repository
+
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        """Recheck one persisted source under the same rules as discovery."""
+        return self._source.is_eligible(repository, source)
 
     def intake(self, repository: Repository) -> IntakeSummary:
         """Run one intake pass for ``repository``.

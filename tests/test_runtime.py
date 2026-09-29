@@ -26,6 +26,7 @@ from factory.infrastructure.persistence import (
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.integrations.github.client import GitHubRequestError
 from factory.integrations.openhands import WorkspacePathError, WorkspacePathMapper
 from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.runtime import FactoryRuntime
@@ -42,14 +43,44 @@ from tests.fake_workspace import (
 class FakeIssueSource:
     def __init__(self, task: FactoryTask) -> None:
         self.task = task
+        self.state = "open"
+        self.labels = {"factory-ready"}
+        self.eligibility_checks = 0
+        self.eligibility_error: Exception | None = None
 
     def list_open_tasks(self, repository: Repository) -> list[FactoryTask]:
         del repository
-        return [self.task]
+        return [self.task] if self.state == "open" and "factory-ready" in self.labels else []
 
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
         del repository, source
         return self.task
+
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        del repository
+        self.eligibility_checks += 1
+        if self.eligibility_error is not None:
+            raise self.eligibility_error
+        return (
+            source == self.task.source and self.state == "open" and "factory-ready" in self.labels
+        )
+
+
+class RepositoryAwareIssueSource:
+    def __init__(self, new_task: FactoryTask, eligibility: dict[str, bool]) -> None:
+        self.new_task = new_task
+        self.eligibility = eligibility
+        self.checks: list[tuple[Repository, TaskSource]] = []
+
+    def list_open_tasks(self, repository: Repository) -> list[FactoryTask]:
+        return [self.new_task] if self.eligibility[repository.slug] else []
+
+    def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:
+        raise NotImplementedError
+
+    def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+        self.checks.append((repository, source))
+        return self.eligibility[repository.slug]
 
 
 @pytest.fixture
@@ -107,10 +138,152 @@ def test_run_happy_path_reaches_waiting_human(runtime_parts) -> None:
     assert sink.create_calls == 1
 
 
+@pytest.mark.parametrize("change", ["closed", "label_removed"])
+@pytest.mark.parametrize("initial_status", [TaskStatus.DISCOVERED, TaskStatus.READY])
+def test_stale_unstarted_task_is_cancelled_without_dispatch(
+    runtime_parts, tmp_path: Path, change: str, initial_status: TaskStatus
+) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)
+    task = tasks.list(TaskStatus.DISCOVERED)[0]
+    if initial_status is TaskStatus.READY:
+        runtime._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
+    source = runtime._intake._source
+    assert isinstance(source, FakeIssueSource)
+    if change == "closed":
+        source.state = "closed"
+    else:
+        source.labels.remove("factory-ready")
+
+    first = runtime.run_once()
+    restarted_tasks = SqliteTaskRepository(tasks.path)
+    restarted_runs = SqliteRunRepository(tasks.path)
+    restarted = FactoryRuntime(
+        intake=IssueIntakeService(source, restarted_tasks),
+        intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
+        tasks=restarted_tasks,
+        runs=restarted_runs,
+        adapter=adapter,
+        provisioner=FakeWorkspaceProvisioner(),
+        workspace_root=str(tmp_path / "restart-workspaces"),
+        gate_specs=specs("tests"),
+        gate_runner=FakeQualityGateRunner(),
+        revision_inspector=FakeRevisionInspector(),
+        publisher=publisher,
+        pull_request_sink=sink,
+        pull_requests=SqlitePullRequestRepository(tasks.path),
+        base_branch="main",
+    )
+    second = restarted.run_once()
+    stored = SqliteTaskRepository(tasks.path).get(task.task_id)
+
+    assert first.outcome == "SOURCE_INELIGIBLE"
+    assert first.task_status is TaskStatus.CANCELLED
+    assert second.outcome == "NO_ELIGIBLE_TASK"
+    assert stored is not None and stored.status is TaskStatus.CANCELLED
+    assert [(t.from_status, t.to_status) for t in tasks.history(task.task_id)] == (
+        [(TaskStatus.DISCOVERED, TaskStatus.READY)] if initial_status is TaskStatus.READY else []
+    ) + [(initial_status, TaskStatus.CANCELLED)]
+    assert len(tasks.list()) == 1
+    assert runs.list_runs(task.task_id) == []
+    assert adapter.dispatched == []
+    assert publisher.calls == sink.create_calls == 0
+    assert not Path(runtime._dispatch._workspace_root).exists()
+    assert not (tmp_path / "restart-workspaces").exists()
+
+
+def test_eligible_persisted_discovered_task_dispatches_normally(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, _, _, _ = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)
+    task = tasks.list(TaskStatus.DISCOVERED)[0]
+
+    result = runtime.run_once()
+
+    assert result.outcome == "WAITING_HUMAN"
+    assert len(adapter.dispatched) == 1
+    assert len(runs.list_runs(task.task_id)) == 1
+    assert [(t.from_status, t.to_status) for t in tasks.history(task.task_id)][:2] == [
+        (TaskStatus.DISCOVERED, TaskStatus.READY),
+        (TaskStatus.READY, TaskStatus.CLAIMED),
+    ]
+
+
+@pytest.mark.parametrize(("old_eligible", "new_eligible"), [(True, False), (False, True)])
+def test_persisted_task_rechecks_its_source_repository_after_intake_migration(
+    runtime_parts, old_eligible: bool, new_eligible: bool
+) -> None:
+    runtime, tasks, runs, adapter, _, _, _ = runtime_parts
+    old_source = TaskSource("github", "old-owner/old-repo", 8)
+    old_task = tasks.save(
+        FactoryTask(
+            title="Persisted issue",
+            body="from the former control repository",
+            target_repository="example/target",
+            source=old_source,
+        )
+    )
+    new_task = FactoryTask(
+        title="Unrelated issue with the same number",
+        body="from the current control repository",
+        target_repository="example/target",
+        source=TaskSource("github", "new-owner/new-repo", 8),
+    )
+    source = RepositoryAwareIssueSource(
+        new_task,
+        {old_source.repository_slug: old_eligible, new_task.source.repository_slug: new_eligible},
+    )
+    runtime._intake = IssueIntakeService(source, tasks)
+    runtime._intake_repository = Repository("new-owner/new-repo", role=RepositoryRole.CONTROL_PLANE)
+
+    result = runtime.run_once()
+
+    assert source.checks == [
+        (Repository(old_source.repository_slug, role=RepositoryRole.CONTROL_PLANE), old_source)
+    ]
+    assert result.task_id == old_task.task_id
+    assert result.outcome == ("WAITING_HUMAN" if old_eligible else "SOURCE_INELIGIBLE")
+    assert tasks.get(old_task.task_id).status is (
+        TaskStatus.WAITING_HUMAN if old_eligible else TaskStatus.CANCELLED
+    )
+    assert len(runs.list_runs(old_task.task_id)) == (1 if old_eligible else 0)
+    assert len(adapter.dispatched) == (1 if old_eligible else 0)
+    assert (tasks.find_by_source(new_task.source) is not None) is new_eligible
+
+
+@pytest.mark.parametrize("initial_status", [TaskStatus.DISCOVERED, TaskStatus.READY])
+@pytest.mark.parametrize("http_status", [404, 500])
+def test_source_read_failure_leaves_unstarted_task_untouched(
+    runtime_parts, initial_status: TaskStatus, http_status: int
+) -> None:
+    runtime, tasks, runs, adapter, _, _, _ = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)
+    task = tasks.list(TaskStatus.DISCOVERED)[0]
+    if initial_status is TaskStatus.READY:
+        runtime._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
+    before = tasks.get(task.task_id)
+    history = tasks.history(task.task_id)
+    source = runtime._intake._source
+    assert isinstance(source, FakeIssueSource)
+    source.eligibility_error = GitHubRequestError(http_status, "source read failed")
+
+    with pytest.raises(GitHubRequestError) as error:
+        runtime.run_once()
+
+    assert error.value.status == http_status
+    assert tasks.get(task.task_id) == before
+    assert tasks.history(task.task_id) == history
+    assert runs.list_runs(task.task_id) == []
+    assert adapter.dispatched == []
+    assert not Path(runtime._dispatch._workspace_root).exists()
+
+
 def test_retry_is_waiting_human_noop_and_does_not_duplicate_run_or_pr(runtime_parts) -> None:
     runtime, _, _, adapter, publisher, sink, _ = runtime_parts
 
     first = runtime.run_once()
+    source = runtime._intake._source
+    assert isinstance(source, FakeIssueSource)
+    source.state = "closed"
     second = runtime.run_once()
 
     assert first.run_id == second.run_id
@@ -118,6 +291,7 @@ def test_retry_is_waiting_human_noop_and_does_not_duplicate_run_or_pr(runtime_pa
     assert publisher.calls == 1
     assert sink.create_calls == 1
     assert second.outcome == "WAITING_HUMAN"
+    assert source.eligibility_checks == 1
 
 
 def test_timeout_leaves_active_run_resumable(runtime_parts) -> None:
@@ -139,6 +313,9 @@ def test_active_run_resume_collects_same_run_without_dispatch(runtime_parts) -> 
     runtime._timeout = 0  # type: ignore[attr-defined]
 
     first = runtime.run_once()
+    source = runtime._intake._source
+    assert isinstance(source, FakeIssueSource)
+    source.labels.remove("factory-ready")
     adapter._collect_status = RunStatus.SUCCEEDED  # type: ignore[attr-defined]
     second = runtime.run_once()
 
@@ -150,6 +327,30 @@ def test_active_run_resume_collects_same_run_without_dispatch(runtime_parts) -> 
     assert tasks.get(first.task_id).status is TaskStatus.WAITING_HUMAN  # type: ignore[arg-type]
     assert publisher.calls == 1
     assert sink.create_calls == 1
+    assert source.eligibility_checks == 1
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_ready_recovery_is_not_cancelled_when_source_changes(runtime_parts, claimed: bool) -> None:
+    runtime, tasks, runs, adapter, _, _, _ = runtime_parts
+    runtime._intake.intake(runtime._intake_repository)
+    task = tasks.list(TaskStatus.DISCOVERED)[0]
+    transitions = [TaskStatus.READY]
+    if claimed:
+        transitions.append(TaskStatus.CLAIMED)
+    transitions.extend((TaskStatus.BLOCKED, TaskStatus.READY))
+    for target in transitions:
+        runtime._dispatch.lifecycle.transition(task.task_id, target)
+    source = runtime._intake._source
+    assert isinstance(source, FakeIssueSource)
+    source.state = "closed"
+
+    result = runtime.run_once()
+
+    assert result.outcome == "WAITING_HUMAN"
+    assert source.eligibility_checks == 0
+    assert len(adapter.dispatched) == 1
+    assert len(runs.list_runs(task.task_id)) == 1
 
 
 def test_engine_change_cannot_resume_run_with_another_adapter(runtime_parts) -> None:

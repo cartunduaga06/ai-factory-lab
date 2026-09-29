@@ -189,6 +189,10 @@ def _runtime_with(
             del repository
             return next(t for t in created if t.source == source)
 
+        def is_eligible(self, repository: Repository, source: TaskSource) -> bool:
+            del repository
+            return any(t.source == source for t in created)
+
     adapter = FakeAgentAdapter(kind=AgentKind.OTHER, status=RunStatus.SUCCEEDED)
     sink = FakePullRequestSink()
     runtime = FactoryRuntime(
