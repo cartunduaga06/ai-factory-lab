@@ -249,6 +249,14 @@ def test_default_runtime_selects_codex_without_openhands_configuration(tmp_path:
     assert isinstance(cli._build_agent_adapter(config), CodexAdapter)
 
 
+def test_runtime_passes_configured_write_username_to_publisher(tmp_path: Path) -> None:
+    config = FactoryConfig.from_env(
+        _runtime_env(tmp_path, GITHUB_WRITE_USERNAME="publication-user")
+    )
+    runtime = cli._build_runtime(config)
+    assert runtime._publication._publisher._write_username == "publication-user"
+
+
 def test_explicit_openhands_selection_preserves_local_adapter(tmp_path: Path) -> None:
     config = FactoryConfig.from_env(_runtime_env(tmp_path, FACTORY_AGENT_ENGINE="openhands"))
     assert isinstance(cli._build_agent_adapter(config), OpenHandsAdapter)

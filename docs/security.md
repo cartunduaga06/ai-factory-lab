@@ -239,6 +239,9 @@ the easiest thing to get wrong. Every one of these is enforced in code:
   credential but has none fails rather than falling back to the read credential.
   OpenHands/LLM credentials remain separate again, and the write token is never
   handed to quality-gate subprocesses.
+  `GITHUB_WRITE_USERNAME` is a non-secret factory-configured HTTPS username for
+  the askpass helper; it defaults to `x-access-token` when unset and is never
+  inferred from task or repository text.
 - **Write credentials travel over TLS only, to a pinned destination.** The write
   token is never sent over a plaintext transport. The factory validates the
   *effective* push destination — what Git itself resolves, including
