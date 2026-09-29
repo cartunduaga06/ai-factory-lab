@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic, sleep
 
 import pytest
 
-from factory.domain.enums import AgentKind, RunStatus
+from factory.domain.enums import AgentKind, RunStatus, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.integrations.codex import CodexAdapter
 
@@ -51,6 +52,7 @@ args = sys.argv[1:]
 assert args[:4] == ['exec', '--sandbox', 'workspace-write', '--cd']
 assert args[4] == os.getcwd()
 assert args[5] == '--output-last-message' and args[-1] == '-'
+assert '--skip-git-repo-check' not in args
 assert 'Implement a feature' in sys.stdin.read()
 assert os.environ['HOME'] == '/test/chatgpt-home'
 assert os.environ['CODEX_HOME'] == '/test/codex-home'
@@ -88,6 +90,29 @@ def test_exit_or_missing_result_fails(tmp_path: Path, body: str) -> None:
     adapter = CodexAdapter(executable=_executable(tmp_path, body))
     run = _collect(adapter, adapter.dispatch(_task(), _workspace(checkout)))
     assert run.status is RunStatus.FAILED
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_worker_records_actual_exit_code_even_without_message(
+    tmp_path: Path, exit_code: int
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    executable = _executable(
+        tmp_path,
+        f"import sys\nsys.stderr.write('diagnostic\\n')\nsys.exit({exit_code})\n",
+    )
+    adapter = CodexAdapter(executable=executable)
+    run = _collect(adapter, adapter.dispatch(_task(), _workspace(checkout)))
+    result = CodexAdapter._state_dir(_workspace(checkout)) / f"{run.run_id}.result"
+    evidence = json.loads(result.read_text())
+    assert run.status is RunStatus.FAILED
+    assert evidence == {
+        "status": "FAILED",
+        "exit_code": exit_code,
+        "stdout_bytes": 0,
+        "stderr_bytes": len("diagnostic\n"),
+    }
 
 
 @pytest.mark.parametrize("payload", ["", " ", "x" * 16_385])
@@ -143,6 +168,21 @@ def test_missing_or_malformed_worker_result_fails_closed(tmp_path: Path) -> None
     assert CodexAdapter().collect(run).status is RunStatus.FAILED
 
 
+def test_inflight_code_worker_result_from_previous_format_is_accepted(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path / "checkout")
+    state = CodexAdapter._state_dir(workspace)
+    state.mkdir()
+    run = AgentRun(
+        task_id=_task().task_id,
+        adapter=AgentKind.CODEX,
+        status=RunStatus.RUNNING,
+        workspace=workspace,
+        started_at=datetime.now(UTC),
+    )
+    (state / f"{run.run_id}.result").write_bytes(b"SUCCEEDED")
+    assert CodexAdapter().collect(run).status is RunStatus.SUCCEEDED
+
+
 def test_collect_rejects_other_engine(tmp_path: Path) -> None:
     run = CodexAdapter(executable="missing").dispatch(_task(), _workspace(tmp_path))
     run.adapter = AgentKind.OPENHANDS
@@ -153,6 +193,14 @@ def test_collect_rejects_other_engine(tmp_path: Path) -> None:
 def test_invalid_workspace_fails_closed(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
     run = CodexAdapter(executable="codex").dispatch(_task(), _workspace(missing))
+    assert run.status is RunStatus.FAILED
+
+
+def test_code_task_cannot_use_operational_workspace(tmp_path: Path) -> None:
+    workspace = Workspace(
+        repository_slug="owner/repo", path=str(tmp_path), branch="", kind=TaskKind.OPERATIONAL
+    )
+    run = CodexAdapter(executable="codex").dispatch(_task(), workspace)
     assert run.status is RunStatus.FAILED
 
 

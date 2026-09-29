@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from factory.domain.enums import AgentKind, RunStatus, TaskStatus
+from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus
 from factory.domain.errors import (
     AgentDispatchError,
     DispatchConflictError,
@@ -47,6 +47,7 @@ from factory.domain.models import (
     AgentRun,
     FactoryTask,
     Workspace,
+    new_operational_workspace,
     new_workspace,
 )
 from factory.domain.ports import RunRepository, TaskRepository, WorkspaceProvisioner
@@ -151,7 +152,11 @@ class DispatchService:
         history the factory relies on the existing ``BLOCKED``/``CANCELLED``
         paths for recovery. No run is recorded and the adapter is never invoked.
         """
-        workspace = new_workspace(task, self._workspace_root)
+        workspace = (
+            new_operational_workspace(task, self._workspace_root)
+            if task.kind is TaskKind.OPERATIONAL
+            else new_workspace(task, self._workspace_root)
+        )
         try:
             return self._provisioner.prepare(task, workspace)
         except WorkspaceProvisioningError:

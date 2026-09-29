@@ -10,6 +10,8 @@ re-instantiating it.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from factory.infrastructure.persistence.schema import (
@@ -53,12 +55,17 @@ class SqliteRepository:
                     # initialization). Nothing to migrate; leave the data alone.
                     continue
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self._path)
-        conn.row_factory = sqlite3.Row
-        # Enforce the foreign keys from transitions/runs to their parents.
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            # Enforce the foreign keys from transitions/runs to their parents.
+            conn.execute("PRAGMA foreign_keys = ON")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
 
 __all__ = ["SqliteRepository"]

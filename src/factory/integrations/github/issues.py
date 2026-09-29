@@ -23,7 +23,9 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from factory.domain.enums import TaskKind
 from factory.domain.models import FactoryTask, Repository, TaskSource
+from factory.domain.operational import canonical_scratch_body
 from factory.domain.ports import IssueSource
 from factory.integrations.github.client import (
     GitHubClient,
@@ -172,12 +174,23 @@ class GitHubIssueSource(IssueSource):
             repository_slug=source_slug,
             issue_number=number,
         )
+        labels = self._label_names(item)
+        kind = TaskKind.OPERATIONAL if "factory-operational" in labels else TaskKind.CODE
+        body_text = body if isinstance(body, str) else ""
+        if kind is TaskKind.OPERATIONAL:
+            try:
+                body_text = canonical_scratch_body(body_text)
+            except ValueError:
+                # Invalid declarations are persisted as empty, then blocked by
+                # policy before dispatch. Raw issue prose is never stored.
+                body_text = ""
         return FactoryTask(
             title=title,
             target_repository=self._target_repository or source_slug,
             source=source,
-            body=body if isinstance(body, str) else "",
-            labels=self._label_names(item),
+            body=body_text,
+            labels=labels,
+            kind=kind,
         )
 
     @staticmethod

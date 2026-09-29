@@ -35,7 +35,7 @@ Design notes:
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS {TASKS_TABLE} (
     source_issue_number  INTEGER,
     status               TEXT NOT NULL,
     labels               TEXT NOT NULL DEFAULT '[]',
+    kind                 TEXT NOT NULL DEFAULT 'CODE',
+    blocked_reason       TEXT,
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL,
     CONSTRAINT uq_tasks_source
@@ -84,6 +86,7 @@ CREATE TABLE IF NOT EXISTS {WORKSPACES_TABLE} (
     repository_slug  TEXT NOT NULL,
     branch           TEXT NOT NULL,
     path             TEXT NOT NULL,
+    kind             TEXT NOT NULL DEFAULT 'CODE',
     created_at       TEXT NOT NULL
 );
 """
@@ -189,7 +192,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_{PULL_REQUESTS_TABLE}_repository_branch
 #: current schema. Applied tolerantly (a duplicate column is ignored), so an old
 #: Phase 4/5 database gains ``agent_runs.validated_revision`` without losing data,
 #: and a fresh database (which already has it) is unaffected.
-MIGRATION_STATEMENTS: tuple[str, ...] = (MIGRATE_AGENT_RUNS_VALIDATED_REVISION,)
+MIGRATION_STATEMENTS: tuple[str, ...] = (
+    MIGRATE_AGENT_RUNS_VALIDATED_REVISION,
+    f"ALTER TABLE {TASKS_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
+    f"ALTER TABLE {TASKS_TABLE} ADD COLUMN blocked_reason TEXT;",
+    f"ALTER TABLE {WORKSPACES_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
+)
 
 #: Statements applied, in order, by :func:`initialize_schema`.
 SCHEMA_STATEMENTS: tuple[str, ...] = (

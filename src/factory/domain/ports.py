@@ -250,6 +250,14 @@ class WorkspaceProvisioner(ABC):
         """
 
 
+class OperationalAcceptance(ABC):
+    """Verify task-specific host evidence without trusting an agent's exit code."""
+
+    @abstractmethod
+    def validate(self, task: FactoryTask, run: AgentRun) -> tuple[QualityGate, ...]:
+        """Return required, sanitized acceptance gates for an operational run."""
+
+
 class QualityGateRunner(ABC):
     """Executes a declarative quality gate inside a run's workspace.
 
@@ -397,6 +405,7 @@ class PullRequestRepository(ABC):
 
 __all__ = [
     "IssueSource",
+    "OperationalAcceptance",
     "PullRequestRepository",
     "PullRequestSink",
     "QualityGateRunner",

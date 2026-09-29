@@ -256,11 +256,17 @@ Transition table (authoritative: `factory/orchestration/lifecycle.py`):
 | `READY` | `CLAIMED`, `BLOCKED`, `CANCELLED` |
 | `CLAIMED` | `RUNNING`, `BLOCKED`, `CANCELLED` |
 | `RUNNING` | `VALIDATING`, `BLOCKED`, `FAILED`, `CANCELLED` |
-| `VALIDATING` | `PR_OPEN`, `READY`, `FAILED`, `CANCELLED` |
+| `VALIDATING` | `PR_OPEN`, `READY`, `BLOCKED`, `DONE`, `FAILED`, `CANCELLED` |
+
 | `PR_OPEN` | `WAITING_HUMAN`, `FAILED`, `CANCELLED` |
 | `WAITING_HUMAN` | `DONE`, `FAILED`, `CANCELLED` |
 | `BLOCKED` | `READY`, `CANCELLED` |
 | `DONE` / `FAILED` / `CANCELLED` | — (terminal) |
+
+`VALIDATING → DONE` is reserved for accepted `OPERATIONAL` scratch tasks;
+`VALIDATING → BLOCKED` records failed operational acceptance. `CODE` tasks
+continue through `PR_OPEN → WAITING_HUMAN`. The operational declaration,
+capability and gates are described in [operational-scratch.md](operational-scratch.md).
 
 Two deliberate choices:
 
@@ -323,6 +329,13 @@ invocation without changing the task or its transition history and without
 dispatching it: a 404 can also mean the token lacks access to a private repository.
 Tasks with recovery history, active runs, and human-review states retain their
 existing recovery behavior.
+
+Intake persists a new eligible issue as `DISCOVERED` without a transition row.
+When the runtime selects it, it rechecks eligibility, records `DISCOVERED → READY`
+through `TaskLifecycleService`, then dispatch claims `READY → CLAIMED`. A CODE
+task in `WAITING_HUMAN` continues to hold later CODE tasks, while an OPERATIONAL
+scratch task can be selected and completed during that human review. The runtime
+still processes only one task per invocation.
 
 ### Transition persistence
 
@@ -528,10 +541,10 @@ Design intent:
 - **Reuse, not re-implementation.** The watcher holds a ``FactoryRuntime`` and
   calls it. It contains no intake, dispatch, tracking or publication logic, so
   the phase boundaries and safety guards are exactly those of ``factory run``.
-- **WIP = 1 by construction.** One runtime invocation runs at a time, and the
-  runtime itself completes at most one task. Because recovery states are
-  selected before new work, a ``WAITING_HUMAN`` task remains the single in-flight
-  task until a human advances it.
+- **WIP = 1 for active execution.** One runtime invocation runs at a time, and
+  the runtime itself completes at most one task. A CODE task at
+  ``WAITING_HUMAN`` holds later CODE tasks until human review, but a separate
+  OPERATIONAL scratch task may run while that review is pending.
 - **Cooperative stop.** The CLI installs ``SIGINT``/``SIGTERM`` handlers that only
   set a flag; the loop checks it between iterations, so a signal cannot interrupt
   an in-flight task or corrupt persisted state. Previous handlers are restored on

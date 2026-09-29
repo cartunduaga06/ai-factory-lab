@@ -25,7 +25,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from factory.domain.enums import TaskStatus
+from factory.domain.enums import TaskKind, TaskStatus
 from factory.domain.errors import DuplicateTaskError, TaskStateChangedError
 from factory.domain.models import FactoryTask, TaskSource, TaskTransition
 from factory.domain.ports import TaskRepository
@@ -54,8 +54,8 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                     INSERT INTO {TASKS_TABLE} (
                         task_id, title, body, target_repository,
                         source_provider, source_repository, source_issue_number,
-                        status, labels, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        status, labels, kind, blocked_reason, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.task_id,
@@ -67,6 +67,8 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                         source.issue_number if source else None,
                         task.status.value,
                         _encode_labels(task.labels),
+                        task.kind.value,
+                        task.blocked_reason,
                         encode_datetime(task.created_at),
                         encode_datetime(task.updated_at),
                     ),
@@ -85,8 +87,9 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                 UPDATE {TASKS_TABLE}
                    SET title = ?, body = ?, target_repository = ?,
                        source_provider = ?, source_repository = ?,
-                       source_issue_number = ?, status = ?, labels = ?, updated_at = ?
-                 WHERE task_id = ?
+                       source_issue_number = ?, status = ?, labels = ?, kind = ?,
+                       blocked_reason = ?, updated_at = ?
+                 WHERE task_id = ? AND kind = ?
                 """,
                 (
                     task.title,
@@ -97,8 +100,11 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                     source.issue_number if source else None,
                     task.status.value,
                     _encode_labels(task.labels),
+                    task.kind.value,
+                    task.blocked_reason,
                     encode_datetime(task.updated_at),
                     task.task_id,
+                    task.kind.value,
                 ),
             )
             if cursor.rowcount == 0:
@@ -239,6 +245,8 @@ def _row_to_task(row: sqlite3.Row) -> FactoryTask:
         body=row["body"],
         status=TaskStatus(row["status"]),
         labels=_decode_labels(row["labels"]),
+        kind=TaskKind(row["kind"]),
+        blocked_reason=row["blocked_reason"],
         created_at=decode_datetime(row["created_at"]),
         updated_at=decode_datetime(row["updated_at"]),
     )

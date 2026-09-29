@@ -6,9 +6,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from factory.domain.enums import RunStatus, TaskStatus, ValidationOutcome
+from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus, ValidationOutcome
 from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, QualityGateSpec, Repository
+from factory.domain.operational import parse_scratch_artifact
 from factory.domain.ports import (
+    OperationalAcceptance,
     PullRequestRepository,
     PullRequestSink,
     QualityGateRunner,
@@ -40,7 +42,7 @@ class RuntimeResult:
 
 
 class FactoryRuntime:
-    """Drive at most one task through intake, execution and publication."""
+    """Drive at most one task through intake, execution and mode-specific acceptance."""
 
     def __init__(
         self,
@@ -59,6 +61,10 @@ class FactoryRuntime:
         pull_request_sink: PullRequestSink,
         pull_requests: PullRequestRepository,
         base_branch: str,
+        operational_provisioner: WorkspaceProvisioner | None = None,
+        operational_root: str | None = None,
+        operational_acceptance: OperationalAcceptance | None = None,
+        code_capable: bool = True,
         poll_interval: float = 5.0,
         timeout: float = 1800.0,
         sleep: Callable[[float], None] = time.sleep,
@@ -75,6 +81,17 @@ class FactoryRuntime:
             provisioner=provisioner,
             workspace_root=workspace_root,
         )
+        self._operational_dispatch = (
+            DispatchService(
+                tasks,
+                runs,
+                provisioner=operational_provisioner,
+                workspace_root=operational_root,
+            )
+            if operational_provisioner is not None and operational_root is not None
+            else None
+        )
+        self._code_capable = code_capable
         self._tracking = RunTrackingService(
             tasks,
             runs,
@@ -85,6 +102,7 @@ class FactoryRuntime:
             pull_requests=pull_requests,
             pull_request_sink=pull_request_sink,
             base_branch=base_branch,
+            operational_acceptance=operational_acceptance,
         )
         self._publication = PublicationService(
             tasks,
@@ -109,6 +127,10 @@ class FactoryRuntime:
                 None, None, None, None, None, None, None, "NO_ELIGIBLE_TASK", intake
             )
         if task.status is TaskStatus.WAITING_HUMAN:
+            if not self._code_capable:
+                return self._result(
+                    task, self._latest_run(task.task_id), None, "CODE_CAPABILITY_MISSING", intake
+                )
             run = self._latest_run(task.task_id)
             if run is None:
                 return self._result(task, None, None, "WAITING_HUMAN", intake)
@@ -116,6 +138,15 @@ class FactoryRuntime:
             # durable state; it does not commit, push or create a second PR.
             published = self._publication.publish(task.task_id, run.run_id)
             return self._result_from_publication(published, run, intake)
+
+        if (
+            task.kind is TaskKind.CODE
+            and not self._code_capable
+            and task.status not in {TaskStatus.DISCOVERED, TaskStatus.READY}
+        ):
+            return self._result(
+                task, self._latest_run(task.task_id), None, "CODE_CAPABILITY_MISSING", intake
+            )
 
         if (
             self._is_unstarted(task)
@@ -128,10 +159,35 @@ class FactoryRuntime:
             cancelled = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
             return self._result(cancelled, None, None, "SOURCE_INELIGIBLE", intake)
 
+        if task.kind is TaskKind.OPERATIONAL and self._is_unstarted(task) and task.source:
+            current_source = self._intake.get_task(
+                Repository(task.source.repository_slug, role=self._intake_repository.role),
+                task.source,
+            )
+            if current_source.kind is not TaskKind.OPERATIONAL or current_source.body != task.body:
+                cancelled = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
+                return self._result(cancelled, None, None, "SOURCE_DECLARATION_CHANGED", intake)
+
         if task.status is TaskStatus.DISCOVERED:
             task = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
         if task.status is TaskStatus.READY:
-            run = self._dispatch.dispatch(task.task_id, self._adapter)
+            if task.kind is TaskKind.OPERATIONAL:
+                if self._operational_dispatch is None or self._adapter.kind is not AgentKind.CODEX:
+                    blocked = self._block(task.task_id, "operational capability missing")
+                    return self._result(
+                        blocked, None, None, "OPERATIONAL_CAPABILITY_MISSING", intake
+                    )
+                try:
+                    parse_scratch_artifact(task)
+                except ValueError:
+                    blocked = self._block(task.task_id, "operational policy rejected declaration")
+                    return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
+                run = self._operational_dispatch.dispatch(task.task_id, self._adapter)
+            else:
+                if not self._code_capable:
+                    blocked = self._block(task.task_id, "code capability missing")
+                    return self._result(blocked, None, None, "CODE_CAPABILITY_MISSING", intake)
+                run = self._dispatch.dispatch(task.task_id, self._adapter)
         else:
             run = self._runs.find_active_run(task.task_id)
             if run is None:
@@ -148,18 +204,51 @@ class FactoryRuntime:
             return self._result(current, run, None, "TIMEOUT_RESUMABLE", intake)
         current = self._tasks.get(task.task_id) or task
         if refresh.run.status is not RunStatus.SUCCEEDED:
+            if task.kind is TaskKind.OPERATIONAL and current.status is TaskStatus.FAILED:
+                current.blocked_reason = "operational agent execution failed"
+                current = self._tasks.update(current)
             return self._result(current, refresh.run, refresh, "AGENT_NOT_SUCCESSFUL", intake)
         if refresh.outcome is not ValidationOutcome.READY_FOR_NEXT_PHASE:
+            if task.kind is TaskKind.OPERATIONAL and current.status is TaskStatus.VALIDATING:
+                current = self._block(task.task_id, "operational acceptance gates failed")
             return self._result(current, refresh.run, refresh, "QUALITY_GATES_FAILED", intake)
+
+        if task.kind is TaskKind.OPERATIONAL:
+            if current.status is not TaskStatus.VALIDATING:
+                return self._result(
+                    current, refresh.run, refresh, "OPERATIONAL_STATE_INVALID", intake
+                )
+            current = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
+            return self._result(current, refresh.run, refresh, "OPERATIONAL_DONE", intake)
 
         published = self._publication.publish(task.task_id, refresh.run.run_id)
         return self._result_from_publication(published, refresh.run, intake)
 
     def _select_task(self) -> FactoryTask | None:
         # Recovery states take precedence over new work; ordering within each
-        # state is the repository's stable created_at/task_id order.
+        # state is the repository's stable created_at/task_id order. Human
+        # review of a CODE PR does not occupy the separate scratch workflow.
+        waiting = self._tasks.list(TaskStatus.WAITING_HUMAN)
+        if waiting:
+            for status in (
+                TaskStatus.VALIDATING,
+                TaskStatus.RUNNING,
+                TaskStatus.CLAIMED,
+                TaskStatus.READY,
+                TaskStatus.DISCOVERED,
+            ):
+                operational = next(
+                    (
+                        task
+                        for task in self._tasks.list(status)
+                        if task.kind is TaskKind.OPERATIONAL
+                    ),
+                    None,
+                )
+                if operational is not None:
+                    return operational
+            return waiting[0]
         for status in (
-            TaskStatus.WAITING_HUMAN,
             TaskStatus.PR_OPEN,
             TaskStatus.VALIDATING,
             TaskStatus.RUNNING,
@@ -171,6 +260,11 @@ class FactoryRuntime:
             if tasks:
                 return tasks[0]
         return None
+
+    def _block(self, task_id: str, reason: str) -> FactoryTask:
+        blocked = self._dispatch.lifecycle.transition(task_id, TaskStatus.BLOCKED)
+        blocked.blocked_reason = reason
+        return self._tasks.update(blocked)
 
     def _is_unstarted(self, task: FactoryTask) -> bool:
         if task.status not in {TaskStatus.DISCOVERED, TaskStatus.READY}:
@@ -209,7 +303,7 @@ class FactoryRuntime:
             task_id=task.task_id,
             run_id=run.run_id if run is not None else None,
             task_status=task.status,
-            branch=workspace.branch if workspace is not None else None,
+            branch=(workspace.branch or None) if workspace is not None else None,
             validation=refresh.outcome
             if refresh is not None
             else (run.validation_outcome if run is not None else None),

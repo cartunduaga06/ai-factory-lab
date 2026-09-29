@@ -41,6 +41,13 @@ class RunStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class TaskKind(StrEnum):
+    """Explicit execution contract selected at intake."""
+
+    CODE = "CODE"
+    OPERATIONAL = "OPERATIONAL"
+
+
 class QualityGateStatus(StrEnum):
     """Outcome of a quality gate evaluated against an agent run."""
 
