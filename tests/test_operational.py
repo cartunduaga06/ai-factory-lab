@@ -160,6 +160,8 @@ def _fake_codex(tmp_path: Path, *, write: bool = True, corrupt: bool = False) ->
         "import pathlib, sys\n"
         "args = sys.argv[1:]\n"
         "assert args[:4] == ['exec', '--sandbox', 'workspace-write', '--cd']\n"
+        "assert args[5] == '--skip-git-repo-check'\n"
+        "assert args[6] == '--output-last-message' and args[-1] == '-'\n"
         "instruction = sys.stdin.read()\n"
         "assert 'File name: proof.txt' in instruction\n"
         "assert 'Scratch proof' not in instruction\n"
@@ -172,7 +174,7 @@ def _fake_codex(tmp_path: Path, *, write: bool = True, corrupt: bool = False) ->
             if write
             else ""
         )
-        + "pathlib.Path(args[6]).write_text('complete')\n"
+        + "pathlib.Path(args[7]).write_text('complete')\n"
     )
     executable.chmod(0o755)
     return str(executable)

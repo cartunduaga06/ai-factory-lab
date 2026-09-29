@@ -16,7 +16,9 @@ MAX_OUTPUT_BYTES = 1_048_576
 _POLL_SECONDS = 0.2
 
 
-def run(executable: str, workspace: str, state_dir: Path, run_id: str, timeout: float) -> None:
+def run(
+    executable: str, workspace: str, state_dir: Path, run_id: str, timeout: float, kind: str
+) -> None:
     """Execute Codex and atomically record a sanitized terminal status."""
     prompt = state_dir / f"{run_id}.prompt"
     message = state_dir / f"{run_id}.message"
@@ -29,6 +31,8 @@ def run(executable: str, workspace: str, state_dir: Path, run_id: str, timeout: 
     stdout_bytes = 0
     stderr_bytes = 0
     try:
+        if kind not in ("CODE", "OPERATIONAL"):
+            raise ValueError("invalid Codex task kind")
         instruction = prompt.read_text(encoding="utf-8")
         prompt.unlink()
         command = [
@@ -38,10 +42,10 @@ def run(executable: str, workspace: str, state_dir: Path, run_id: str, timeout: 
             "workspace-write",
             "--cd",
             workspace,
-            "--output-last-message",
-            str(message),
-            "-",
         ]
+        if kind == "OPERATIONAL":
+            command.append("--skip-git-repo-check")
+        command.extend(("--output-last-message", str(message), "-"))
         with stdout_path.open("xb") as stdout_file, stderr_path.open("xb") as stderr_file:
             with subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                 command,
@@ -116,4 +120,4 @@ def _valid_result(path: Path) -> bool:
 
 
 if __name__ == "__main__":
-    run(sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4], float(sys.argv[5]))
+    run(sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4], float(sys.argv[5]), sys.argv[6])

@@ -74,6 +74,8 @@ class CodexAdapter(AgentAdapterBase):
             checkout = Path(workspace.path).resolve(strict=True)
             if not checkout.is_dir():
                 raise OSError("Codex workspace is not a directory")
+            if workspace.kind is not task.kind:
+                raise ValueError("Codex task and workspace kinds differ")
             state_dir = self._state_dir(workspace)
             state_dir.mkdir(mode=0o700, exist_ok=True)
             if (
@@ -116,6 +118,7 @@ class CodexAdapter(AgentAdapterBase):
                     str(state_dir),
                     run.run_id,
                     str(self._timeout),
+                    task.kind.value,
                 ],
                 cwd=factory_source,
                 env=environment,
