@@ -92,7 +92,14 @@ class AgentServerFiles:
             parsed = json.loads(body)
             code = parsed["exit_code"]
             stdout = parsed["stdout"]
-            if not isinstance(code, int) or not isinstance(stdout, str):
+            if not isinstance(code, int):
+                raise ValueError
+            # The Agent Server reports an empty stdout as JSON ``null`` rather than
+            # ``""``. Normalize that one documented shape to an empty string; any
+            # other non-string stdout is still refused.
+            if stdout is None:
+                stdout = ""
+            elif not isinstance(stdout, str):
                 raise ValueError
             return BashResult(code, stdout)
         except (ValueError, KeyError, TypeError):

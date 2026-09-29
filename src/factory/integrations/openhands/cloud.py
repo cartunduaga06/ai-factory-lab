@@ -73,6 +73,11 @@ DEFAULT_SANDBOX_POLL_SECONDS = 5.0
 #: Separator between the sandbox id and the conversation id in ``provider_ref``.
 #: Both are opaque identifiers that cannot contain a colon.
 PROVIDER_REF_SEPARATOR = ":"
+
+#: A stable sandbox directory used as the working directory for commands that
+#: delete or replace the repository checkout. It is never removed by the factory,
+#: so a bash session can always resolve its current working directory.
+SAFE_BASH_CWD = "/"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 
@@ -587,8 +592,8 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
         return AgentServerFiles(sandbox.agent_server_url, sandbox.session_api_key)
 
     @staticmethod
-    def _require_bash(files: CloudFileClient, command: str) -> str:
-        result = files.bash(command)
+    def _require_bash(files: CloudFileClient, command: str, *, cwd: str | None = None) -> str:
+        result = files.bash(command, cwd=cwd)
         if result.exit_code != 0:
             raise OpenHandsCloudError("sandbox Git verification failed")
         return result.stdout.strip()
@@ -620,7 +625,12 @@ class OpenHandsCloudAdapter(AgentAdapterBase):
                 f'test "$(git -C {quoted_dir} rev-parse HEAD)" = {shlex.quote(base_sha)} && '
                 f'test "$(git -C {quoted_dir} rev-parse --abbrev-ref HEAD)" = {quoted_branch}'
             )
-            self._require_bash(files, command)
+            # The bash session persists between calls and may already have the
+            # target directory as its current working directory. Removing that
+            # directory from within it leaves the shell unable to resolve its CWD,
+            # so the destructive preparation runs from a stable directory the
+            # command never deletes.
+            self._require_bash(files, command, cwd=SAFE_BASH_CWD)
         finally:
             self._remove_temp(files, input_path)
 
@@ -682,6 +692,7 @@ __all__ = [
     "DEFAULT_SANDBOX_POLL_SECONDS",
     "DEFAULT_SANDBOX_READY_ATTEMPTS",
     "PROVIDER_REF_SEPARATOR",
+    "SAFE_BASH_CWD",
     "SANDBOXES_PATH",
     "CloudControlClient",
     "CloudConversationPayload",

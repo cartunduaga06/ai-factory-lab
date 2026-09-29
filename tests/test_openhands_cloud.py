@@ -73,6 +73,7 @@ class BundleProvider:
 class Files:
     exit_codes: list[int] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
+    cwds: list[str | None] = field(default_factory=list)
     uploads: list[tuple[str, bytes]] = field(default_factory=list)
     downloads: list[str] = field(default_factory=list)
     result: bytes = b"result binary bundle"
@@ -86,6 +87,7 @@ class Files:
 
     def bash(self, command: str, *, cwd: str | None = None) -> BashResult:
         self.commands.append(command)
+        self.cwds.append(cwd)
         code = self.exit_codes.pop(0) if self.exit_codes else 0
         return BashResult(code, "untrusted remote output")
 
@@ -181,6 +183,21 @@ def test_preflight_fails_closed_on_remote_mismatch() -> None:
         adapter(control, conversation, files).dispatch(task(), workspace())
     assert not conversation.requests
     assert control.last.method == "DELETE"
+
+
+def test_repository_preparation_runs_from_a_safe_working_directory() -> None:
+    """The command that replaces the checkout must not run inside that checkout.
+
+    The bash session persists between calls, so removing the working directory
+    from within it leaves the shell unable to resolve its CWD. The replacement
+    command must therefore run from a stable directory it never deletes.
+    """
+    _, _, _, files = dispatched()
+    repository_command = next(command for command in files.commands if "git clone" in command)
+    index = files.commands.index(repository_command)
+    assert "/workspace/project" in repository_command  # it does replace the checkout
+    assert files.cwds[index] == "/"
+    assert files.cwds[index] != "/workspace/project"
 
 
 def test_collect_transfers_verified_result_bundle() -> None:

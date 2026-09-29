@@ -36,3 +36,36 @@ def test_upload_accepts_explicit_success(monkeypatch: pytest.MonkeyPatch) -> Non
     AgentServerFiles("https://sandbox.invalid", "private-session-key").upload(
         "/tmp/input.bundle", b"binary\x00data"
     )
+
+
+def _bash_response(monkeypatch: pytest.MonkeyPatch, payload: bytes) -> None:
+    def open_request(request: urllib.request.Request, *, timeout: float) -> io.BytesIO:
+        assert request.full_url.endswith("/api/bash/execute_bash_command")
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_request)
+
+
+def test_bash_normalizes_null_stdout_to_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful command with no output reports ``stdout: null`` on the wire."""
+    _bash_response(monkeypatch, b'{"exit_code":0,"stdout":null,"stderr":null}')
+    result = AgentServerFiles("https://sandbox.invalid", "private-session-key").bash("true")
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"exit_code":"0","stdout":null}',  # non-integer exit code
+        b'{"exit_code":0,"stdout":123}',  # non-string, non-null stdout
+        b'{"stdout":"done"}',  # missing exit code
+        b"invalid",  # not JSON
+    ],
+)
+def test_bash_still_fails_closed_on_invalid_payloads(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes
+) -> None:
+    _bash_response(monkeypatch, payload)
+    with pytest.raises(CloudFileError, match="command response invalid"):
+        AgentServerFiles("https://sandbox.invalid", "private-session-key").bash("true")
