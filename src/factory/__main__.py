@@ -5,11 +5,12 @@ Available commands:
 * ``--show-config`` / ``--version`` — Phase 1 configuration sanity check.
 * ``intake`` — one read-only issue intake pass.
 * ``retry --task-id`` — explicitly recover one task without dispatch.
-* ``run`` — one bounded, resumable task through the existing Phases 2A–5.
+* ``run`` — one bounded, resumable code or scratch operational task.
 * ``watch`` — the automatic worker: sequential ``run`` iterations, WIP=1.
 
 Neither ``run`` nor ``watch`` merges, deploys or mutates an Issue. Both stop at
-``WAITING_HUMAN``. ``watch`` is the only mode that loops; it reuses
+``WAITING_HUMAN`` for code tasks and ``DONE`` for accepted scratch tasks.
+``watch`` is the only mode that loops; it reuses
 ``FactoryRuntime.run_once`` rather than re-implementing any phase.
 """
 
@@ -49,6 +50,7 @@ from factory.integrations.openhands import (
     OpenHandsExecution,
     WorkspacePathMapper,
 )
+from factory.integrations.operational import ScratchAcceptance, ScratchWorkspaceProvisioner
 from factory.integrations.workspace import (
     GitWorkspacePublisher,
     GitWorkspaceRevisionInspector,
@@ -83,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser(
         "run",
-        help="Run at most one factory-ready task through WAITING_HUMAN.",
+        help="Run at most one factory-ready task through its acceptance state.",
     )
     subparsers.add_parser(
         "watch",
@@ -217,7 +219,9 @@ def _run_runtime(config: FactoryConfig) -> int:
     _print_runtime_result(result)
     return (
         EXIT_OK
-        if result.outcome in {"WAITING_HUMAN", "NO_ELIGIBLE_TASK", "SOURCE_INELIGIBLE"}
+        if result.outcome in {
+            "WAITING_HUMAN", "OPERATIONAL_DONE", "NO_ELIGIBLE_TASK", "SOURCE_INELIGIBLE"
+        }
         else EXIT_INTAKE_ERROR
     )
 
@@ -274,11 +278,11 @@ def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
 def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     """Validate the run prerequisites and build the production runtime graph."""
     repository = _resolve_repository(config)
-    if config.github.target_repo is None:
+    if config.github.target_repo is None and config.operational_scratch_root is None:
         raise ConfigurationError("FACTORY_TARGET_REPO is required for run")
-    if config.source_checkout is None:
+    if config.source_checkout is None and config.operational_scratch_root is None:
         raise ConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
-    if config.github_write_token is None:
+    if config.github_write_token is None and config.operational_scratch_root is None:
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
     database = config.database
@@ -295,7 +299,12 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         repository=tasks,
     )
     adapter = _build_agent_adapter(config)
-    write_client = GitHubWriteClient(config.github_write_token, config.github.api_url)
+    write_client = GitHubWriteClient(config.github_write_token or "", config.github.api_url)
+    operational_provisioner = (
+        ScratchWorkspaceProvisioner(config.operational_scratch_root)
+        if config.operational_scratch_root is not None
+        else None
+    )
     return FactoryRuntime(
         intake=intake,
         intake_repository=repository,
@@ -303,7 +312,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         runs=runs,
         adapter=adapter,
         provisioner=GitWorktreeWorkspaceProvisioner(
-            config.source_checkout, base_ref=config.workspace_base_ref
+            config.source_checkout or "", base_ref=config.workspace_base_ref
         ),
         workspace_root=config.workspace_root,
         gate_specs=config.quality_gates,
@@ -317,6 +326,17 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         pull_request_sink=GitHubPullRequestSink(write_client),
         pull_requests=pull_requests,
         base_branch=config.target_default_branch,
+        operational_provisioner=operational_provisioner,
+        operational_root=config.operational_scratch_root,
+        operational_acceptance=(
+            ScratchAcceptance(operational_provisioner)
+            if operational_provisioner is not None else None
+        ),
+        code_capable=(
+            config.github.target_repo is not None
+            and config.source_checkout is not None
+            and config.github_write_token is not None
+        ),
         poll_interval=config.run_poll_interval,
         timeout=config.run_timeout,
     )

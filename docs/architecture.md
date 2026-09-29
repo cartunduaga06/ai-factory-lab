@@ -256,11 +256,17 @@ Transition table (authoritative: `factory/orchestration/lifecycle.py`):
 | `READY` | `CLAIMED`, `BLOCKED`, `CANCELLED` |
 | `CLAIMED` | `RUNNING`, `BLOCKED`, `CANCELLED` |
 | `RUNNING` | `VALIDATING`, `BLOCKED`, `FAILED`, `CANCELLED` |
-| `VALIDATING` | `PR_OPEN`, `READY`, `FAILED`, `CANCELLED` |
+| `VALIDATING` | `PR_OPEN`, `READY`, `BLOCKED`, `DONE`, `FAILED`, `CANCELLED` |
+
 | `PR_OPEN` | `WAITING_HUMAN`, `FAILED`, `CANCELLED` |
 | `WAITING_HUMAN` | `DONE`, `FAILED`, `CANCELLED` |
 | `BLOCKED` | `READY`, `CANCELLED` |
 | `DONE` / `FAILED` / `CANCELLED` | — (terminal) |
+
+`VALIDATING → DONE` is reserved for accepted `OPERATIONAL` scratch tasks;
+`VALIDATING → BLOCKED` records failed operational acceptance. `CODE` tasks
+continue through `PR_OPEN → WAITING_HUMAN`. The operational declaration,
+capability and gates are described in [operational-scratch.md](operational-scratch.md).
 
 Two deliberate choices:
 

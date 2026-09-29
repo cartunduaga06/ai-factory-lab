@@ -143,6 +143,21 @@ def test_missing_or_malformed_worker_result_fails_closed(tmp_path: Path) -> None
     assert CodexAdapter().collect(run).status is RunStatus.FAILED
 
 
+def test_inflight_code_worker_result_from_previous_format_is_accepted(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path / "checkout")
+    state = CodexAdapter._state_dir(workspace)
+    state.mkdir()
+    run = AgentRun(
+        task_id=_task().task_id,
+        adapter=AgentKind.CODEX,
+        status=RunStatus.RUNNING,
+        workspace=workspace,
+        started_at=datetime.now(UTC),
+    )
+    (state / f"{run.run_id}.result").write_bytes(b"SUCCEEDED")
+    assert CodexAdapter().collect(run).status is RunStatus.SUCCEEDED
+
+
 def test_collect_rejects_other_engine(tmp_path: Path) -> None:
     run = CodexAdapter(executable="missing").dispatch(_task(), _workspace(tmp_path))
     run.adapter = AgentKind.OPENHANDS

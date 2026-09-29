@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from factory.domain.enums import RepositoryRole
+from factory.domain.enums import RepositoryRole, TaskKind
 from factory.domain.models import Repository, TaskSource
 from factory.integrations.github.client import (
     GitHubAuthError,
@@ -84,6 +84,14 @@ def test_eligible_issue_is_mapped_into_factory_task() -> None:
     assert task.source == TaskSource("github", "cartunduaga06/ai-factory-lab", 10)
     assert task.external_ref == "cartunduaga06/ai-factory-lab#10"
     assert task.status.value == "DISCOVERED"
+    assert task.kind is TaskKind.CODE
+
+
+def test_operational_label_explicitly_classifies_issue() -> None:
+    transport = FakeTransport([[_issue(36, labels=["factory-ready", "factory-operational"])]])
+    tasks = _source(transport).list_open_tasks(REPO)
+    assert len(tasks) == 1
+    assert tasks[0].kind is TaskKind.OPERATIONAL
 
 
 def test_additional_labels_are_preserved() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -9,8 +10,9 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from factory.domain.enums import AgentKind, RunStatus
+from factory.domain.enums import AgentKind, RunStatus, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
+from factory.domain.operational import parse_scratch_artifact
 from factory.integrations.base import AgentAdapterBase
 from factory.integrations.openhands.execution import build_instruction
 
@@ -84,7 +86,21 @@ class CodexAdapter(AgentAdapterBase):
             prompt = state_dir / f"{run.run_id}.prompt"
             descriptor = os.open(prompt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(build_instruction(task))
+                if task.kind is TaskKind.OPERATIONAL:
+                    if workspace.kind is not TaskKind.OPERATIONAL:
+                        raise ValueError("operational workspace required")
+                    declaration = parse_scratch_artifact(task)
+                    stream.write(
+                        "Create exactly one file in the current scratch directory. "
+                        "Use the file name and hexadecimal bytes below. Do not read or "
+                        "modify any other path. Do not use sudo, network, or Git. "
+                        "Do not print file contents or environment values.\n"
+                        f"File name: {declaration.name}\n"
+                        f"Bytes (hex): {declaration.payload_hex}\n"
+                        "Reply only with a short completion status.\n"
+                    )
+                else:
+                    stream.write(build_instruction(task))
             environment = self._env()
             # Import the worker from trusted factory code. Python puts its cwd
             # first on sys.path for -m, so never start it in the target checkout.
@@ -112,6 +128,8 @@ class CodexAdapter(AgentAdapterBase):
             if prompt is not None:
                 prompt.unlink(missing_ok=True)
             run.status = RunStatus.FAILED
+            if task.kind is TaskKind.OPERATIONAL:
+                run.summary = "action=scratch_artifact; dispatch_failed"
             run.finished_at = datetime.now(UTC)
         return run
 
@@ -126,16 +144,47 @@ class CodexAdapter(AgentAdapterBase):
         try:
             if result.exists():
                 content = result.read_bytes()
-                run.status = {
+                if len(content) > 512:
+                    raise ValueError("oversized worker result")
+                legacy = {
                     b"SUCCEEDED": RunStatus.SUCCEEDED,
                     b"FAILED": RunStatus.FAILED,
                     b"CANCELLED": RunStatus.CANCELLED,
-                }.get(content, RunStatus.FAILED)
+                }
+                if workspace.kind is TaskKind.CODE and content in legacy:
+                    run.status = legacy[content]
+                    if run.is_terminal:
+                        run.finished_at = datetime.now(UTC)
+                    return run
+                parsed = json.loads(content)
+                if not isinstance(parsed, dict):
+                    raise ValueError("invalid worker result")
+                run.status = {
+                    "SUCCEEDED": RunStatus.SUCCEEDED,
+                    "FAILED": RunStatus.FAILED,
+                    "CANCELLED": RunStatus.CANCELLED,
+                }.get(parsed.get("status"), RunStatus.FAILED)
+                if workspace.kind is TaskKind.OPERATIONAL:
+                    code = parsed.get("exit_code")
+                    out = parsed.get("stdout_bytes")
+                    err = parsed.get("stderr_bytes")
+                    if not (
+                        (code is None or type(code) is int)
+                        and type(out) is int
+                        and type(err) is int
+                        and 0 <= out <= 1_048_576
+                        and 0 <= err <= 1_048_576
+                    ):
+                        raise ValueError("invalid worker evidence")
+                    run.summary = (
+                        f"action=scratch_artifact; exit_code={code}; "
+                        f"stdout_bytes={out}; stderr_bytes={err}"
+                    )
             elif run.started_at is None or datetime.now(UTC) >= run.started_at + timedelta(
                 seconds=self._timeout + _COLLECTION_GRACE_SECONDS
             ):
                 run.status = RunStatus.FAILED
-        except OSError:
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
             run.status = RunStatus.FAILED
         if run.is_terminal:
             run.finished_at = datetime.now(UTC)

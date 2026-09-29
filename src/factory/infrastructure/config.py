@@ -261,6 +261,7 @@ class FactoryConfig:
     # (exit 2) when the shared permission policy cannot be enforced. It is a
     # command local to the OpenHands container, not a factory process argument.
     openhands_shared_workspace_hook_command: str | None = None
+    operational_scratch_root: str | None = None
 
     @property
     def database(self) -> DatabaseConfig:
@@ -330,6 +331,7 @@ class FactoryConfig:
             openhands_shared_workspace_hook_command=_clean(
                 source.get("OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND")
             ),
+            operational_scratch_root=_clean(source.get("FACTORY_OPERATIONAL_SCRATCH_ROOT")),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -371,6 +373,7 @@ class FactoryConfig:
             "openhands_shared_workspace_hook_command": (
                 self.openhands_shared_workspace_hook_command
             ),
+            "operational_scratch_root": self.operational_scratch_root,
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
 

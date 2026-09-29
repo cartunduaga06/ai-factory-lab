@@ -22,7 +22,7 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus
+from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskKind
 from factory.domain.errors import DuplicateRunError, FactoryError, PersistenceError
 from factory.domain.models import AgentRun, QualityGate, Workspace
 from factory.domain.ports import RunRepository
@@ -191,14 +191,15 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         conn.execute(
             f"""
             INSERT INTO {WORKSPACES_TABLE} (
-                workspace_id, repository_slug, branch, path, created_at
-            ) VALUES (?, ?, ?, ?, ?)
+                workspace_id, repository_slug, branch, path, kind, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace.workspace_id,
                 workspace.repository_slug,
                 workspace.branch,
                 workspace.path,
+                workspace.kind.value,
                 encode_datetime(workspace.created_at),
             ),
         )
@@ -302,6 +303,7 @@ def _row_to_workspace(row: sqlite3.Row) -> Workspace:
         repository_slug=row["repository_slug"],
         branch=row["branch"],
         path=row["path"],
+        kind=TaskKind(row["kind"]),
         created_at=decode_datetime(row["created_at"]),
     )
 

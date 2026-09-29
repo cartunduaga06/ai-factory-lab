@@ -22,6 +22,7 @@ from factory.domain.enums import (
     QualityGateStatus,
     RepositoryRole,
     RunStatus,
+    TaskKind,
     TaskStatus,
     ValidationOutcome,
 )
@@ -137,11 +138,14 @@ class Workspace:
     repository_slug: str = ""
     branch: str = ""
     path: str = ""
+    kind: TaskKind = TaskKind.CODE
     created_at: datetime = field(default_factory=_utcnow)
 
     def __post_init__(self) -> None:
-        if not self.branch:
+        if not self.branch and self.kind is TaskKind.CODE:
             raise ValueError("workspace must be created on an isolated branch")
+        if self.kind is TaskKind.OPERATIONAL and not self.path:
+            raise ValueError("operational workspace must have a path")
 
 
 def new_workspace(task: FactoryTask, workspace_root: str) -> Workspace:
@@ -164,6 +168,18 @@ def new_workspace(task: FactoryTask, workspace_root: str) -> Workspace:
         repository_slug=task.target_repository,
         branch=f"factory/{task.task_id}/{workspace_id}",
         path=f"{root}/{workspace_id}",
+    )
+
+
+def new_operational_workspace(task: FactoryTask, workspace_root: str) -> Workspace:
+    """Build an isolated, branchless scratch workspace for an operational run."""
+    workspace_id = _new_id()
+    return Workspace(
+        workspace_id=workspace_id,
+        repository_slug=task.target_repository,
+        branch="",
+        path=f"{workspace_root.rstrip('/')}/{workspace_id}",
+        kind=TaskKind.OPERATIONAL,
     )
 
 
@@ -241,6 +257,8 @@ class FactoryTask:
     body: str = ""
     status: TaskStatus = TaskStatus.DISCOVERED
     labels: tuple[str, ...] = ()
+    kind: TaskKind = TaskKind.CODE
+    blocked_reason: str | None = None
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -421,5 +439,6 @@ __all__ = [
     "TaskSource",
     "TaskTransition",
     "Workspace",
+    "new_operational_workspace",
     "new_workspace",
 ]

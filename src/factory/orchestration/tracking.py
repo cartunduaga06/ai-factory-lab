@@ -30,6 +30,7 @@ from factory.domain.enums import (
     QualityGateStatus,
     RepositoryRole,
     RunStatus,
+    TaskKind,
     TaskStatus,
     ValidationOutcome,
 )
@@ -37,12 +38,14 @@ from factory.domain.errors import AgentCollectError, FactoryError, WorkspaceRevi
 from factory.domain.models import (
     AgentAdapter,
     AgentRun,
+    FactoryTask,
     QualityGate,
     QualityGateSpec,
     Repository,
     Workspace,
 )
 from factory.domain.ports import (
+    OperationalAcceptance,
     PullRequestRepository,
     PullRequestSink,
     QualityGateRunner,
@@ -98,6 +101,7 @@ class RunTrackingService:
         pull_requests: PullRequestRepository | None = None,
         pull_request_sink: PullRequestSink | None = None,
         base_branch: str = "main",
+        operational_acceptance: OperationalAcceptance | None = None,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
@@ -108,6 +112,7 @@ class RunTrackingService:
         self._pull_requests = pull_requests
         self._pull_request_sink = pull_request_sink
         self._base_branch = base_branch
+        self._operational_acceptance = operational_acceptance
         self._lifecycle = TaskLifecycleService(tasks)
 
     def refresh(self, run_id: str, adapter: AgentAdapter) -> RunRefresh:
@@ -156,7 +161,11 @@ class RunTrackingService:
             raise AgentCollectError(run.run_id, run.task_id)
 
         if run.status is RunStatus.SUCCEEDED:
-            run.gates, run.validated_revision = self._validate_revision(run)
+            task = self._tasks.get(run.task_id)
+            if task is not None and task.kind is TaskKind.OPERATIONAL:
+                run.gates = self._validate_operational(task, run)
+            else:
+                run.gates, run.validated_revision = self._validate_revision(run)
 
         self._runs.update_run(run)
         self._drive_task(run)
@@ -191,7 +200,11 @@ class RunTrackingService:
             (not run.gates and self._gate_specs and run.validated_revision is None)
             or self._can_revalidate(run)
         ):
-            run.gates, run.validated_revision = self._validate_revision(run)
+            task = self._tasks.get(run.task_id)
+            if task is not None and task.kind is TaskKind.OPERATIONAL:
+                run.gates = self._validate_operational(task, run)
+            else:
+                run.gates, run.validated_revision = self._validate_revision(run)
             self._runs.update_run(run)
         self._drive_task(run)
 
@@ -237,6 +250,18 @@ class RunTrackingService:
         return bool(runs) and runs[-1].run_id == run.run_id
 
     # -- internals ---------------------------------------------------------
+
+    def _validate_operational(self, task: FactoryTask, run: AgentRun) -> tuple[QualityGate, ...]:
+        validator = self._operational_acceptance
+        if validator is None:
+            return (QualityGate("operational_capability", QualityGateStatus.FAILED, "missing"),)
+        try:
+            gates = validator.validate(task, run)
+            if gates and any(gate.required for gate in gates):
+                return gates
+        except Exception:  # noqa: BLE001 - no provider or filesystem detail is persisted
+            pass
+        return (QualityGate("operational_acceptance", QualityGateStatus.FAILED, "unavailable"),)
 
     def _validate_revision(self, run: AgentRun) -> tuple[tuple[QualityGate, ...], str | None]:
         """Run the gates against the workspace and bind a validated revision.

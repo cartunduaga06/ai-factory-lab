@@ -31,7 +31,8 @@ TRANSITIONS: MappingProxyType[TaskStatus, frozenset[TaskStatus]] = MappingProxyT
             {TaskStatus.VALIDATING, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED}
         ),
         TaskStatus.VALIDATING: frozenset(
-            {TaskStatus.PR_OPEN, TaskStatus.READY, TaskStatus.FAILED, TaskStatus.CANCELLED}
+            {TaskStatus.PR_OPEN, TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.DONE,
+             TaskStatus.FAILED, TaskStatus.CANCELLED}
         ),
         TaskStatus.PR_OPEN: frozenset(
             {TaskStatus.WAITING_HUMAN, TaskStatus.FAILED, TaskStatus.CANCELLED}

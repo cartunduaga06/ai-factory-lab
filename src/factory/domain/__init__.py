@@ -10,6 +10,7 @@ from factory.domain.enums import (
     QualityGateStatus,
     RepositoryRole,
     RunStatus,
+    TaskKind,
     TaskStatus,
 )
 from factory.domain.errors import (
@@ -35,7 +36,7 @@ from factory.domain.models import (
     TaskTransition,
     Workspace,
 )
-from factory.domain.ports import IssueSource, RunRepository, TaskRepository
+from factory.domain.ports import IssueSource, OperationalAcceptance, RunRepository, TaskRepository
 
 __all__ = [
     "AgentAdapter",
@@ -49,6 +50,7 @@ __all__ = [
     "FactoryError",
     "FactoryTask",
     "IssueSource",
+    "OperationalAcceptance",
     "PersistenceError",
     "PullRequest",
     "QualityGate",
@@ -58,6 +60,7 @@ __all__ = [
     "RunRepository",
     "RunStatus",
     "TaskNotReadyError",
+    "TaskKind",
     "TaskRepository",
     "TaskSource",
     "TaskSourceError",
