@@ -431,6 +431,7 @@ Also present: `CodexAdapter` runs the authenticated Codex CLI noninteractively
 in the factory workspace. `FACTORY_AGENT_ENGINE=codex|openhands` selects one
 engine (default `codex`); a stored run never changes engines. Codex runs in a
 bounded worker and leaves a durable result for collection before validation.
+The opt-in pinned ECC verification skill is documented in [docs/ecc-spike.md](docs/ecc-spike.md).
 
 Not present yet — deliberately deferred:
 

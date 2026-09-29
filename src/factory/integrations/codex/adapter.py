@@ -14,6 +14,7 @@ from factory.domain.enums import AgentKind, RunStatus, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.domain.operational import parse_scratch_artifact
 from factory.integrations.base import AgentAdapterBase
+from factory.integrations.codex.ecc_skill import load_skill
 from factory.integrations.openhands.execution import build_instruction
 
 DEFAULT_TIMEOUT_SECONDS = 1800.0
@@ -44,12 +45,14 @@ class CodexAdapter(AgentAdapterBase):
         executable: str = "codex",
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         environment: Mapping[str, str] | None = None,
+        ecc_skill: str | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("Codex timeout must be positive")
         self._executable = executable
         self._timeout = timeout
         self._environment = environment
+        self._ecc_skill = ecc_skill
 
     @property
     def kind(self) -> AgentKind:
@@ -103,6 +106,14 @@ class CodexAdapter(AgentAdapterBase):
                     )
                 else:
                     stream.write(build_instruction(task))
+                    if self._ecc_skill is not None:
+                        skill = load_skill(self._ecc_skill)
+                        stream.write(
+                            "\n\nOptional review guidance from pinned ECC verification-loop. "
+                            "Use only applicable checks. Factory quality gates and human "
+                            "review remain authoritative. Do not enable hooks or deploy.\n\n"
+                        )
+                        stream.write(skill)
             environment = self._env()
             # Import the worker from trusted factory code. Python puts its cwd
             # first on sys.path for -m, so never start it in the target checkout.
