@@ -499,8 +499,10 @@ FactoryWatcher.run()                 (orchestration)
 FactoryRuntime.run_once()            (reused, unchanged)
       ↓  NO_ELIGIBLE_TASK
 sleep(FACTORY_WATCH_IDLE_INTERVAL)   (injected; default 60s)
-      ↓  otherwise
+      ↓  other non-terminal outcome
 next iteration
+      ↓  WAITING_HUMAN
+stop after current iteration → human review
       ↓  SIGINT / SIGTERM
 stop observed between iterations → clean exit
 ```

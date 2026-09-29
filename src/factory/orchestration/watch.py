@@ -11,8 +11,7 @@ Boundaries are deliberate:
   state, so restarting or re-invoking cannot duplicate a task, run, branch or
   Pull Request.
 * The loop never merges, deploys or mutates an Issue. A task that reaches
-  ``WAITING_HUMAN`` is handed back to a human and is not re-dispatched — the
-  runtime reconciles it idempotently rather than opening a second PR.
+  ``WAITING_HUMAN`` is handed back to a human and the watcher exits.
 * Stopping is cooperative. A stop request is observed after the current
   invocation returns, so a signal never interrupts a half-finished task or
   corrupts persisted state.
@@ -24,11 +23,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from factory.domain.enums import TaskStatus
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 
-# Outcomes that mean no eligible work was available for this iteration. The
-# worker waits before checking again; every other outcome made progress and an
-# immediate next iteration is safe.
+# No eligible work means the worker waits before checking again.
 IDLE_OUTCOMES = frozenset({"NO_ELIGIBLE_TASK"})
 
 
@@ -39,7 +37,8 @@ class WatchOutcome:
     Carries only counters and the last runtime result (already secret-free), so
     it is safe to log or return from the CLI. ``processed`` counts non-idle
     iterations (a task was advanced or reconciled); ``idle_waits`` counts the
-    iterations that found no eligible task.
+    iterations that found no eligible task. ``stopped`` means a stop request or
+    a human gate ended the loop.
     """
 
     iterations: int
@@ -53,7 +52,7 @@ class FactoryWatcher:
     """Run ``FactoryRuntime.run_once`` sequentially until told to stop.
 
     ``max_iterations`` bounds the loop for tests and for an operator who wants a
-    finite number of passes; ``None`` means run until a stop signal arrives. The
+    finite number of passes; ``None`` means run until a stop signal or human gate. The
     ``sleep`` and ``should_stop`` seams are injected so the loop is deterministic
     under test and never depends on wall-clock time.
     """
@@ -74,7 +73,7 @@ class FactoryWatcher:
         self._should_stop = should_stop
 
     def run(self) -> WatchOutcome:
-        """Drive sequential iterations until a stop signal or the bound is hit."""
+        """Drive sequential iterations until a stop request, human gate, or bound."""
         iterations = 0
         processed = 0
         idle_waits = 0
@@ -91,9 +90,13 @@ class FactoryWatcher:
             iterations += 1
             if result.outcome in IDLE_OUTCOMES:
                 idle_waits += 1
-                self._sleep(self._idle_interval)
             else:
                 processed += 1
+            if result.outcome == "WAITING_HUMAN" or result.task_status is TaskStatus.WAITING_HUMAN:
+                stopped = True
+                break
+            if result.outcome in IDLE_OUTCOMES:
+                self._sleep(self._idle_interval)
 
         return WatchOutcome(
             iterations=iterations,

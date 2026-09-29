@@ -148,12 +148,13 @@ python -m factory watch
 * **Idle wait.** When an iteration finds no eligible task
   (`NO_ELIGIBLE_TASK`), the worker sleeps `FACTORY_WATCH_IDLE_INTERVAL` seconds
   (default `60`) and checks again. It never spins against the GitHub API.
+  When a task reaches `WAITING_HUMAN`, the watcher exits after that iteration.
 * **Clean stop.** `SIGINT` (Ctrl+C) and `SIGTERM` only set a stop flag, which the
   loop observes *between* iterations. A signal never interrupts an in-flight
   task or corrupts persisted state, and the previous signal handlers are
   restored before the process exits.
 * **Idempotent by construction.** The runtime reconciles by persisted state, so a
-  restart or a repeated iteration re-observes the same task/run/branch/PR rather
+  restart re-observes the same task/run/branch/PR rather
   than creating a duplicate.
 * **No auto-merge, no deploy.** The worker stops at `WAITING_HUMAN` exactly as
   `factory run` does.
