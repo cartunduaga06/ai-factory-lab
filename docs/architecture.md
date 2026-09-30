@@ -301,7 +301,9 @@ or stale PR check prevents a push.
 Two deliberate choices:
 
 - **`VALIDATING → READY`** is the retry edge: a failed gate sends the task back
-  for another run instead of opening a bad PR.
+  for another run in the same checkout and branch instead of opening a bad PR.
+  The next one-shot pass gives the agent bounded gate names as QA feedback;
+  validation runs again after that agent completes. This preserves WIP=1.
 - **`BLOCKED`** is the only non-terminal failure state, because a blocker (missing
   information, a dependency) is usually removable. It re-enters at `READY`.
 
@@ -1006,7 +1008,11 @@ come from `QualityGateSpec` as an **argv tuple**, and execution is
 
 Which gates exist is supplied by the application layer through
 `FACTORY_QUALITY_GATES` (a JSON array of `{name, argv, required}`); neither the
-domain nor orchestration hard-codes a command.
+domain nor orchestration hard-codes a command. This profile belongs to the
+configured target repository. `FACTORY_TASK_QUALITY_GATES` may add checks keyed
+by source issue reference. The example profile configures pytest, Ruff check,
+Ruff format check and mypy as required checks. Gate statuses and allowlisted
+execution details are persisted on each run and shown in Control Tower.
 
 ## Planned evolution
 

@@ -23,7 +23,8 @@ also stays ``VALIDATING``. Phase 4 never dispatches a correction on its own.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -97,6 +98,7 @@ class RunTrackingService:
         runs: RunRepository,
         *,
         gate_specs: Sequence[QualityGateSpec] = (),
+        task_gate_specs: Mapping[str, Sequence[QualityGateSpec]] | None = None,
         gate_runner: QualityGateRunner | None = None,
         revision_inspector: WorkspaceRevisionInspector | None = None,
         provisioner: WorkspaceProvisioner | None = None,
@@ -109,6 +111,9 @@ class RunTrackingService:
         self._tasks = tasks
         self._runs = runs
         self._gate_specs = tuple(gate_specs)
+        self._task_gate_specs = {
+            ref: tuple(specs) for ref, specs in (task_gate_specs or {}).items()
+        }
         self._gate_runner = gate_runner
         self._revision_inspector = revision_inspector
         self._provisioner = provisioner
@@ -206,7 +211,7 @@ class RunTrackingService:
         if not self._is_latest_run(run):
             return
         if run.status is RunStatus.SUCCEEDED and (
-            (not run.gates and self._gate_specs and run.validated_revision is None)
+            (not run.gates and self._specs_for(run) and run.validated_revision is None)
             or self._can_revalidate(run)
         ):
             task = self._tasks.get(run.task_id)
@@ -358,7 +363,8 @@ class RunTrackingService:
         A run without a workspace cannot be validated, so its gates are recorded
         as failed — never as a silent pass.
         """
-        if not self._gate_specs:
+        specs = self._specs_for(run)
+        if not specs:
             return ()
         workspace = run.workspace
         if workspace is None or self._gate_runner is None:
@@ -369,15 +375,31 @@ class RunTrackingService:
                     detail="no_workspace",
                     required=spec.required,
                 )
-                for spec in self._gate_specs
+                for spec in specs
             )
-        return tuple(self._run_gate(spec, workspace) for spec in self._gate_specs)
+        return tuple(self._run_gate(spec, workspace) for spec in specs)
+
+    def _specs_for(self, run: AgentRun) -> tuple[QualityGateSpec, ...]:
+        task = self._tasks.get(run.task_id)
+        ref = task.source.external_ref if task is not None and task.source is not None else None
+        specific = self._task_gate_specs.get(ref, ()) if ref is not None else ()
+        return (*self._gate_specs, *specific)
 
     def _run_gate(self, spec: QualityGateSpec, workspace: Workspace) -> QualityGate:
         runner = self._gate_runner
         assert runner is not None  # guarded by _evaluate_gates
         try:
-            return runner.run(spec, workspace)
+            result = runner.run(spec, workspace)
+            # The runner is an adapter boundary. A malformed result cannot
+            # remove a configured required gate or make it optional.
+            if result.name != spec.name or result.required != spec.required:
+                return QualityGate(
+                    spec.name, QualityGateStatus.FAILED, "runner_mismatch", spec.required
+                )
+            detail = result.detail or ""
+            if not re.fullmatch(r"(?:exit_code=-?\d{1,3}|timeout|spawn_error)", detail):
+                detail = "redacted"
+            return QualityGate(spec.name, result.status, detail, spec.required)
         except FactoryError:
             raise
         except Exception:  # noqa: BLE001 - normalize an unexpected runner failure
@@ -402,9 +424,9 @@ class RunTrackingService:
         target = _TERMINAL_TASK_TARGET.get(run.status)
         if target is None:
             return
-        if (
-            run.status is RunStatus.FAILED
-            and self._tasks.latest_rework_feedback(run.task_id) is not None
+        if run.status is RunStatus.FAILED and (
+            self._tasks.latest_rework_feedback(run.task_id) is not None
+            or self._follows_failed_gates(run)
         ):
             target = TaskStatus.BLOCKED
         task = self._tasks.get(run.task_id)
@@ -417,6 +439,17 @@ class RunTrackingService:
             # example it was already recovered). Leave it alone; the recorded
             # run status remains the source of truth for what happened.
             return
+
+    def _follows_failed_gates(self, run: AgentRun) -> bool:
+        """Keep an unsuccessful automatic QA correction recoverable."""
+        history = self._runs.list_runs(run.task_id)
+        if len(history) < 2 or history[-1].run_id != run.run_id:
+            return False
+        previous = history[-2]
+        return (
+            previous.validation_outcome is ValidationOutcome.GATES_FAILED
+            and previous.workspace == run.workspace
+        )
 
     def _result(self, run: AgentRun) -> RunRefresh:
         task = self._tasks.get(run.task_id)

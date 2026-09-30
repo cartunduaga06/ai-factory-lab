@@ -94,6 +94,7 @@ def _service(
     db_path: str,
     *,
     gate_specs: tuple[QualityGateSpec, ...] = (),
+    task_gate_specs: dict[str, tuple[QualityGateSpec, ...]] | None = None,
     runner: FakeQualityGateRunner | None = None,
     revision_inspector: FakeRevisionInspector | None = None,
 ) -> RunTrackingService:
@@ -101,6 +102,7 @@ def _service(
         _tasks(db_path),
         _runs(db_path),
         gate_specs=gate_specs,
+        task_gate_specs=task_gate_specs,
         gate_runner=runner,
         revision_inspector=revision_inspector or FakeRevisionInspector(),
         provisioner=FakeWorkspaceProvisioner(),
@@ -197,6 +199,66 @@ def test_green_required_gate_reports_ready_for_next_phase(db_path: str, tmp_path
     # It stops at VALIDATING: PR_OPEN belongs to a later phase.
     assert tasks.get(task.task_id).status is TaskStatus.VALIDATING
     assert runner.calls == [("tests", run.workspace.path)]  # type: ignore[union-attr]
+
+
+def test_task_specific_gate_runs_alongside_repository_gates(db_path: str, tmp_path: Path) -> None:
+    task = _running_task(_tasks(db_path))
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner()
+    result = _service(
+        db_path,
+        gate_specs=specs("tests", "ruff_check", "ruff_format", "mypy"),
+        task_gate_specs={task.source.external_ref: specs("acceptance")},  # type: ignore[union-attr]
+        runner=runner,
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
+    assert result.outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+    assert [gate.name for gate in result.run.gates] == [
+        "tests",
+        "ruff_check",
+        "ruff_format",
+        "mypy",
+        "acceptance",
+    ]
+    assert len(runner.calls) == 5
+
+
+@pytest.mark.parametrize(
+    "failed_gate", ["pytest", "ruff_check", "ruff_format", "mypy", "acceptance"]
+)
+def test_every_configured_required_gate_blocks_when_it_fails(
+    db_path: str, tmp_path: Path, failed_gate: str
+) -> None:
+    task = _running_task(_tasks(db_path))
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+    runner = FakeQualityGateRunner({failed_gate: QualityGateStatus.FAILED})
+    result = _service(
+        db_path,
+        gate_specs=specs("pytest", "ruff_check", "ruff_format", "mypy"),
+        task_gate_specs={task.source.external_ref: specs("acceptance")},  # type: ignore[union-attr]
+        runner=runner,
+    ).refresh(run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED))
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+    assert result.run.validated_revision is None
+    assert len(result.run.gates) == 5
+    assert [gate.name for gate in result.run.gates if gate.is_blocking] == [failed_gate]
+
+
+def test_runner_cannot_silently_make_required_gate_optional(db_path: str, tmp_path: Path) -> None:
+    task = _running_task(_tasks(db_path))
+    run = _run_with_workspace(_runs(db_path), task, tmp_path)
+
+    class WeakeningRunner(FakeQualityGateRunner):
+        def run(self, spec: QualityGateSpec, workspace: Workspace) -> QualityGate:
+            del spec, workspace
+            return QualityGate("tests", QualityGateStatus.PASSED, required=False)
+
+    result = _service(db_path, gate_specs=specs("tests"), runner=WeakeningRunner()).refresh(
+        run.run_id, FakeAgentAdapter(collect_status=RunStatus.SUCCEEDED)
+    )
+    assert result.outcome is ValidationOutcome.GATES_FAILED
+    assert result.run.gates == (
+        QualityGate("tests", QualityGateStatus.FAILED, "runner_mismatch", True),
+    )
 
 
 def test_failed_required_gate_keeps_task_validating(db_path: str, tmp_path: Path) -> None:

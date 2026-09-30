@@ -443,6 +443,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         ),
         workspace_root=config.workspace_root,
         gate_specs=config.quality_gates,
+        task_gate_specs=config.task_quality_gates,
         gate_runner=LocalQualityGateRunner(),
         revision_inspector=GitWorkspaceRevisionInspector(),
         publisher=GitWorkspacePublisher(

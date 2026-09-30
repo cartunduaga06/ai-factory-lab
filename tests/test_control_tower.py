@@ -9,8 +9,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from factory.domain.enums import AgentKind, RunStatus, TaskStatus
-from factory.domain.models import AgentRun, FactoryTask, PullRequest, StatusSnapshot, TaskSource
+from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskStatus
+from factory.domain.models import (
+    AgentRun,
+    FactoryTask,
+    PullRequest,
+    QualityGate,
+    StatusSnapshot,
+    TaskSource,
+)
 from factory.infrastructure.config import FactoryConfig
 from factory.infrastructure.persistence import (
     SqlitePullRequestRepository,
@@ -100,6 +107,43 @@ class ControlTowerTests(unittest.TestCase):
         self.assertIn('name="viewport"', page)
         self.assertIn("&lt;script&gt;", page)
         self.assertNotIn("<img src=x>", page)
+
+    def test_gate_evidence_is_persisted_and_sanitized_in_control_tower(self) -> None:
+        task = self._task(TaskStatus.READY)
+        run = self._run(task)
+        run.status = RunStatus.SUCCEEDED
+        run.gates = (
+            QualityGate("ruff_check", QualityGateStatus.FAILED, "exit_code=1"),
+            QualityGate("mypy", QualityGateStatus.PASSED, "secret=ghp_private"),
+        )
+        self.runs.update_run(run)
+        snapshot = self.service.for_task(task.task_id)
+        self.assertEqual(self.service.current().phase, "READY")
+        self.assertEqual(snapshot.action, "QA rework queued")
+        self.assertEqual(snapshot.evidence, "1 required check(s) did not pass")
+        page = render_status(snapshot)
+        self.assertEqual(
+            snapshot.gates,
+            ("ruff_check: FAILED (required) (exit_code=1)", "mypy: PASSED (required)"),
+        )
+        self.assertIn("ruff_check: FAILED", page)
+        self.assertNotIn("ghp_private", page)
+
+    def test_previous_gate_results_remain_visible_after_correction(self) -> None:
+        task = self._task(TaskStatus.WAITING_HUMAN)
+        prior = self._run(task)
+        prior.status = RunStatus.SUCCEEDED
+        prior.gates = (QualityGate("ruff_check", QualityGateStatus.FAILED, "exit_code=1"),)
+        self.runs.update_run(prior)
+        latest = self._run(task)
+        latest.status = RunStatus.SUCCEEDED
+        latest.gates = (QualityGate("ruff_check", QualityGateStatus.PASSED, "exit_code=0"),)
+        self.runs.update_run(latest)
+        snapshot = self.service.for_task(task.task_id)
+        self.assertEqual(snapshot.gates, ("ruff_check: PASSED (required) (exit_code=0)",))
+        self.assertEqual(len(snapshot.previous_gates), 1)
+        self.assertIn("ruff_check: FAILED", snapshot.previous_gates[0])
+        self.assertIn("Previous gate results", render_status(snapshot))
 
     def test_successful_collection_persists_heartbeat_without_event(self) -> None:
         task = self._task(TaskStatus.RUNNING)

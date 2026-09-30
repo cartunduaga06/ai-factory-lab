@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -62,6 +63,7 @@ class FactoryRuntime:
         provisioner: WorkspaceProvisioner,
         workspace_root: str,
         gate_specs: tuple[QualityGateSpec, ...],
+        task_gate_specs: Mapping[str, Sequence[QualityGateSpec]] | None = None,
         gate_runner: QualityGateRunner,
         revision_inspector: WorkspaceRevisionInspector,
         publisher: WorkspacePublisher,
@@ -107,6 +109,7 @@ class FactoryRuntime:
             tasks,
             runs,
             gate_specs=gate_specs,
+            task_gate_specs=task_gate_specs,
             gate_runner=gate_runner,
             revision_inspector=revision_inspector,
             provisioner=provisioner,
@@ -217,12 +220,30 @@ class FactoryRuntime:
                     blocked = self._block(task.task_id, "code capability missing")
                     return self._result(blocked, None, None, "CODE_CAPABILITY_MISSING", intake)
                 feedback = self._tasks.latest_rework_feedback(task.task_id)
-                if feedback is not None and self._runs.list_runs(task.task_id):
-                    if self._adapter.kind is not AgentKind.CODEX:
-                        return self._result(
-                            task, self._latest_run(task.task_id), None, "ENGINE_MISMATCH", intake
-                        )
-                    run = self._dispatch.dispatch_rework(task.task_id, self._adapter, feedback)
+                history = self._runs.list_runs(task.task_id)
+                previous = history[-1] if history else None
+                gate_source = previous
+                if (
+                    previous is not None
+                    and previous.status is RunStatus.FAILED
+                    and len(history) > 1
+                    and history[-2].workspace == previous.workspace
+                ):
+                    gate_source = history[-2]
+                gate_feedback = (
+                    self._gate_feedback(gate_source)
+                    if gate_source is not None
+                    and gate_source.validation_outcome is ValidationOutcome.GATES_FAILED
+                    else None
+                )
+                if (feedback is not None or gate_feedback is not None) and previous is not None:
+                    if feedback is not None and self._adapter.kind is not AgentKind.CODEX:
+                        return self._result(task, previous, None, "ENGINE_MISMATCH", intake)
+                    run = self._dispatch.dispatch_rework(
+                        task.task_id,
+                        self._adapter,
+                        "\n".join(part for part in (feedback, gate_feedback) if part),
+                    )
                 else:
                     run = self._dispatch.dispatch(task.task_id, self._adapter)
         else:
@@ -253,6 +274,8 @@ class FactoryRuntime:
         if refresh.outcome is not ValidationOutcome.READY_FOR_NEXT_PHASE:
             if task.kind is TaskKind.OPERATIONAL and current.status is TaskStatus.VALIDATING:
                 current = self._block(task.task_id, "operational acceptance gates failed")
+            elif task.kind is TaskKind.CODE and current.status is TaskStatus.VALIDATING:
+                current = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
             return self._result(current, refresh.run, refresh, "QUALITY_GATES_FAILED", intake)
 
         if task.kind is TaskKind.OPERATIONAL:
@@ -301,8 +324,19 @@ class FactoryRuntime:
         if requested:
             return requested[0]
         for ready in self._tasks.list(TaskStatus.READY):
-            if self._runs.list_runs(ready.task_id) and self._tasks.latest_rework_feedback(
-                ready.task_id
+            history = self._runs.list_runs(ready.task_id)
+            previous = history[-1] if history else None
+            gate_rework = previous is not None and (
+                previous.validation_outcome is ValidationOutcome.GATES_FAILED
+                or (
+                    previous.status is RunStatus.FAILED
+                    and len(history) > 1
+                    and history[-2].workspace == previous.workspace
+                    and history[-2].validation_outcome is ValidationOutcome.GATES_FAILED
+                )
+            )
+            if previous is not None and (
+                self._tasks.latest_rework_feedback(ready.task_id) or gate_rework
             ):
                 return ready
         for status in (
@@ -383,6 +417,17 @@ class FactoryRuntime:
     def _latest_run(self, task_id: str) -> AgentRun | None:
         runs = self._runs.list_runs(task_id)
         return runs[-1] if runs else None
+
+    @staticmethod
+    def _gate_feedback(run: AgentRun) -> str:
+        """Give the coding agent bounded, allowlisted QA results for correction."""
+        failed = [
+            gate.name if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", gate.name) else "check"
+            for gate in run.gates
+            if gate.is_blocking
+        ]
+        names = ", ".join(failed[:20])
+        return f"Factory quality gates failed: {names}. Fix the failures and rerun validation."
 
     @staticmethod
     def _result(

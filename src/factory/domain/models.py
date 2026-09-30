@@ -373,6 +373,8 @@ class StatusSnapshot:
     pr_url: str | None = None
     action: str | None = None
     evidence: str | None = None
+    gates: tuple[str, ...] = ()
+    previous_gates: tuple[str, ...] = ()
     history: tuple[str, ...] = ()
 
 

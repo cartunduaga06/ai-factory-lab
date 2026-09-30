@@ -188,9 +188,11 @@ in code:
   environment values, paths and tokens, and the factory cannot know which of them
   is sensitive, so none of it is stored in MVP 0.1.
 - **Which gates exist is configuration, not code.** Gate commands come from the
-  application layer (`FACTORY_QUALITY_GATES`). The factory never invents a gate,
-  and a malformed definition is refused rather than silently ignored — a typo
-  cannot disable validation.
+  application layer (`FACTORY_QUALITY_GATES`, with optional additions from
+  `FACTORY_TASK_QUALITY_GATES`). The factory never invents a gate, and a malformed
+  definition is refused rather than silently ignored — a typo cannot disable
+  validation. A runner result that changes the name or required flag is recorded
+  as a failed required check.
 - **Validation cannot skip the gate.** A required gate is green only when it
   `PASSED`; `PENDING`, `FAILED` and `SKIPPED` are all not green. An unevaluated
   requirement is never treated as satisfied.
