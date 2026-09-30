@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from factory.domain.context import ContextPack
 from factory.domain.enums import AgentKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.domain.ports import IssueSource, PullRequestSink
@@ -29,7 +30,9 @@ class AgentAdapterBase(ABC):
         """Which engine this adapter drives."""
 
     @abstractmethod
-    def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    def dispatch(
+        self, task: FactoryTask, workspace: Workspace, context_pack: ContextPack | None = None
+    ) -> AgentRun:
         """Start work on ``task`` inside ``workspace``."""
 
     @abstractmethod

@@ -28,8 +28,11 @@ from factory.infrastructure.persistence import (
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.infrastructure.persistence.audit import SqliteAuditEventStore
+from factory.integrations.context.repository import RepositoryContextSource
 from factory.integrations.github.client import GitHubRequestError
 from factory.integrations.openhands import WorkspacePathError, WorkspacePathMapper
+from factory.orchestration.context import ContextPackBuilder
 from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.recovery import RecoveryPolicy
 from factory.orchestration.retry import RetryService
@@ -141,6 +144,69 @@ def test_run_happy_path_reaches_waiting_human(runtime_parts) -> None:
     assert len(adapter.dispatched) == 1
     assert publisher.calls == 1
     assert sink.create_calls == 1
+
+
+@pytest.mark.parametrize("failure", ["missing", "invalid", "over_budget"])
+def test_required_context_blocks_durably_without_dispatch(tmp_path: Path, failure: str) -> None:
+    db = str(tmp_path / "factory.db")
+    tasks, runs, prs = (
+        SqliteTaskRepository(db),
+        SqliteRunRepository(db),
+        SqlitePullRequestRepository(db),
+    )
+    tasks.initialize()
+    runs.initialize()
+    prs.initialize()
+    task = FactoryTask(
+        title="Issue context failure",
+        target_repository="example/target",
+        source=TaskSource("github", "example/control", 69),
+    )
+    adapter = FakeAgentAdapter()
+    provisioner = FakeWorkspaceProvisioner()
+    checkout = tmp_path / "source"
+    if failure != "missing":
+        checkout.mkdir()
+        (checkout / "AGENTS.md").write_bytes(
+            b"\xff" if failure == "invalid" else b"Repository rules"
+        )
+        (checkout / "README.md").write_text("Repository overview")
+    budget = 10 if failure == "over_budget" else 48_000
+    runtime = FactoryRuntime(
+        intake=IssueIntakeService(FakeIssueSource(task), tasks),
+        intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
+        tasks=tasks,
+        runs=runs,
+        adapter=adapter,
+        provisioner=provisioner,
+        workspace_root=str(tmp_path / "workspaces"),
+        gate_specs=specs("tests"),
+        gate_runner=FakeQualityGateRunner(),
+        revision_inspector=FakeRevisionInspector(),
+        publisher=FakeWorkspacePublisher(),
+        pull_request_sink=FakePullRequestSink(),
+        pull_requests=prs,
+        base_branch="main",
+        poll_interval=0,
+        timeout=1,
+        context_builder=ContextPackBuilder(
+            (RepositoryContextSource(str(checkout)),), budget=budget
+        ),
+    )
+    first = runtime.run_once()
+    assert first.outcome == "REQUIRED_CONTEXT_BLOCKED"
+    assert first.task_status is TaskStatus.BLOCKED
+    assert (
+        tasks.get(first.task_id).blocked_reason
+        == "required context unavailable, invalid or over budget"
+    )  # type: ignore[arg-type,union-attr]
+    assert not runs.list_runs(first.task_id)  # type: ignore[arg-type]
+    assert not adapter.dispatched and not provisioner.prepared
+    assert any(
+        event.name == "TaskBLOCKED"
+        for event in SqliteAuditEventStore(db).for_task(first.task_id)  # type: ignore[arg-type]
+    )
+    assert runtime.run_once().outcome == "NO_ELIGIBLE_TASK"
 
 
 def test_ready_task_with_durable_active_run_never_dispatches_again(runtime_parts) -> None:

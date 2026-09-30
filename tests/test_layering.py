@@ -110,6 +110,16 @@ def test_escalation_free_orchestration_imports_no_concrete_agent_engine() -> Non
     assert violations == []
 
 
+def test_context_sources_do_not_depend_on_an_agent_engine() -> None:
+    for path in _modules("integrations/context"):
+        imports = _imports_in(path)
+        assert not any(
+            module.startswith("factory.integrations.codex")
+            or module.startswith("factory.integrations.openhands")
+            for module in imports
+        ), path
+
+
 def test_infrastructure_does_not_import_orchestration() -> None:
     assert _violations("infrastructure", "factory.orchestration") == []
 

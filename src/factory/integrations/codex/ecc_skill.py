@@ -9,7 +9,7 @@ from pathlib import Path
 SKILL_NAME = "verification-loop"
 UPSTREAM_COMMIT = "c9148d0bb239ed01a95724a5928b98cdf9c30658"
 SKILL_SHA256 = "73f62a80e10034274249b94ba611b7c2ade5b729578f168944d763d7bd503c2a"
-_SKILL_PATH = Path(__file__).parent / "ecc" / SKILL_NAME / "SKILL.md"
+_SKILL_PATH = Path(__file__).parent.parent / "context" / "ecc" / SKILL_NAME / "SKILL.md"
 
 
 def load_skill(name: str, *, path: Path = _SKILL_PATH) -> str:

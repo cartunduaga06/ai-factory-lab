@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from factory.domain.context import ContextPack
 from factory.domain.enums import AgentKind, RepositoryRole, RunStatus, TaskStatus
 from factory.domain.errors import PullRequestIdentityError
 from factory.domain.models import (
@@ -52,9 +53,11 @@ class CapturingCodex(FakeAgentAdapter):
         super().__init__(kind=AgentKind.CODEX, status=RunStatus.SUCCEEDED)
         self.instructions: list[str] = []
 
-    def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
-        self.instructions.append(task.body)
-        return super().dispatch(task, workspace)
+    def dispatch(
+        self, task: FactoryTask, workspace: Workspace, context_pack: ContextPack | None = None
+    ) -> AgentRun:
+        self.instructions.append(context_pack.render() if context_pack else task.body)
+        return super().dispatch(task, workspace, context_pack)
 
 
 def test_second_review_cycle_reuses_branch_and_pr(tmp_path: Path) -> None:

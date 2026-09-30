@@ -14,7 +14,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from factory.domain.context import ContextPack
 from uuid import uuid4
 
 from factory.domain.enums import (
@@ -301,6 +304,7 @@ class AgentRun:
     #: bound (never validated, or the gates failed, or the workspace changed while
     #: the gates ran). Publication requires it to be present and to still match.
     validated_revision: str | None = None
+    context_pack: ContextPack | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -438,7 +442,9 @@ class AgentAdapter(Protocol):
         """Which engine this adapter drives."""
         ...
 
-    def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    def dispatch(
+        self, task: FactoryTask, workspace: Workspace, context_pack: ContextPack | None = None
+    ) -> AgentRun:
         """Start work on ``task`` inside ``workspace`` and return the run record."""
         ...
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from factory.domain.context import ContextPack
 from factory.domain.enums import AgentKind, RunStatus
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 
@@ -48,7 +49,9 @@ class FakeAgentAdapter:
     def kind(self) -> AgentKind:
         return self._kind
 
-    def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    def dispatch(
+        self, task: FactoryTask, workspace: Workspace, context_pack: ContextPack | None = None
+    ) -> AgentRun:
         self.dispatched.append((task.task_id, workspace.workspace_id))
         self.received_paths.append(workspace.path)
         self.path_existed_at_dispatch.append(Path(workspace.path).exists())

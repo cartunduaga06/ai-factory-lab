@@ -30,9 +30,9 @@ There is no engine-specific branch anywhere in this module: only
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime
 
+from factory.domain.context import ContextPack
 from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus
 from factory.domain.errors import (
     AgentDispatchError,
@@ -51,6 +51,7 @@ from factory.domain.models import (
     new_workspace,
 )
 from factory.domain.ports import RunRepository, TaskRepository, WorkspaceProvisioner
+from factory.orchestration.context import ContextBuildError, ContextPackBuilder
 from factory.orchestration.machine import InvalidTransitionError, TaskStateMachine
 from factory.orchestration.transitions import TaskLifecycleService
 
@@ -77,12 +78,14 @@ class DispatchService:
         provisioner: WorkspaceProvisioner,
         workspace_root: str = "./.workspaces",
         state_machine: TaskStateMachine | None = None,
+        context_builder: ContextPackBuilder | None = None,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
         self._provisioner = provisioner
         self._lifecycle = TaskLifecycleService(tasks, state_machine)
         self._workspace_root = workspace_root.rstrip("/")
+        self._context_builder = context_builder or ContextPackBuilder()
 
     @property
     def lifecycle(self) -> TaskLifecycleService:
@@ -118,9 +121,10 @@ class DispatchService:
         if self._runs.find_active_run(task_id) is not None:
             raise DispatchConflictError(task_id)
 
+        pack = self._build_context(task)
         claimed = self._claim(task)
         workspace = self._prepare_workspace(claimed)
-        run = self._start_run(claimed, workspace, adapter)
+        run = self._start_run(claimed, workspace, adapter, pack)
         self._advance_to_running(claimed)
         return run
 
@@ -135,20 +139,36 @@ class DispatchService:
         previous = history[-1] if history else None
         if previous is None or previous.workspace is None or not previous.is_terminal:
             raise WorkspaceProvisioningError(task_id)
+        historical = previous.context_pack
+        if historical is None and feedback.startswith("Operator-authorized timeout recovery:"):
+            # Runs created before E5 have no historical pack; recovery retains
+            # their checkout while binding a fresh explicit base for audit.
+            historical = self._build_context(task)
+        pack = self._build_context(task, feedback=feedback, previous=historical)
         claimed = self._claim(task)
         workspace = self._provisioner.repair(claimed, previous.workspace)
-        instruction = replace(
-            claimed,
-            body=(
-                f"QA feedback for this rework:\n{feedback}\n\n"
-                f"Original task (first 3000 characters):\n{claimed.body[:3000]}"
-            ),
-        )
-        run = self._start_run(instruction, workspace, adapter)
+        run = self._start_run(claimed, workspace, adapter, pack)
         self._advance_to_running(claimed)
         return run
 
     # -- steps -------------------------------------------------------------
+
+    def _build_context(
+        self, task: FactoryTask, *, feedback: str | None = None, previous: ContextPack | None = None
+    ) -> ContextPack:
+        if task.kind is TaskKind.OPERATIONAL:
+            return self._context_builder.build(task)
+        try:
+            return self._context_builder.build(task, feedback=feedback, previous=previous)
+        except ValueError:
+            blocked = self._lifecycle.transition(
+                task.task_id, TaskStatus.BLOCKED, expected_from=TaskStatus.READY
+            )
+            blocked.blocked_reason = "required context unavailable, invalid or over budget"
+            self._tasks.update(blocked)
+            raise ContextBuildError(
+                "required context unavailable, invalid or over budget"
+            ) from None
 
     def _require_task(self, task_id: str) -> FactoryTask:
         task = self._tasks.get(task_id)
@@ -191,12 +211,12 @@ class DispatchService:
             raise WorkspaceProvisioningError(workspace.workspace_id) from None
 
     def _start_run(
-        self, task: FactoryTask, workspace: Workspace, adapter: AgentAdapter
+        self, task: FactoryTask, workspace: Workspace, adapter: AgentAdapter, pack: ContextPack
     ) -> AgentRun:
         started_at = datetime.now(UTC)
         produced: AgentRun | None
         try:
-            produced = adapter.dispatch(task, workspace)
+            produced = adapter.dispatch(task, workspace, pack)
         except Exception:  # noqa: BLE001 - deliberately discarded, see below
             # The engine's exception is intentionally NOT captured. Its message
             # may embed a credential, and retaining it as ``__cause__`` or
@@ -207,7 +227,7 @@ class DispatchService:
             produced = None
 
         if produced is None:
-            failed = self._record_failure(task, workspace, adapter.kind, started_at)
+            failed = self._record_failure(task, workspace, adapter.kind, started_at, pack)
             self._lifecycle.transition(
                 task.task_id, TaskStatus.BLOCKED, expected_from=TaskStatus.CLAIMED
             )
@@ -226,6 +246,7 @@ class DispatchService:
             ),
             finished_at=produced.finished_at,
             gates=produced.gates,
+            context_pack=pack,
         )
         return self._persist_run(run)
 
@@ -245,6 +266,7 @@ class DispatchService:
         workspace: Workspace,
         kind: AgentKind,
         started_at: datetime,
+        pack: ContextPack,
     ) -> AgentRun:
         """Persist a terminal FAILED run so a failed attempt stays auditable."""
         failed = AgentRun(
@@ -254,6 +276,7 @@ class DispatchService:
             workspace=workspace,
             started_at=started_at,
             finished_at=datetime.now(UTC),
+            context_pack=pack,
         )
         return self._persist_run(failed)
 

@@ -32,7 +32,8 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from factory.domain.enums import AgentKind
+from factory.domain.context import ContextPack
+from factory.domain.enums import AgentKind, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.integrations.base import AgentAdapterBase
 from factory.integrations.openhands.client import (
@@ -81,7 +82,9 @@ class OpenHandsAdapter(AgentAdapterBase):
 
     # -- dispatch ----------------------------------------------------------
 
-    def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    def dispatch(
+        self, task: FactoryTask, workspace: Workspace, context_pack: ContextPack | None = None
+    ) -> AgentRun:
         """Create the OpenHands conversation for ``task`` and return its run.
 
         The workspace path supplied by the factory is used verbatim as the
@@ -93,12 +96,19 @@ class OpenHandsAdapter(AgentAdapterBase):
             OpenHandsError: a sanitized integration error if the conversation
                 could not be created.
         """
+        if task.kind is TaskKind.CODE and context_pack is None:
+            raise ValueError("CODE dispatch requires a context pack")
         agent_path = (
             self._workspace_paths.to_container(workspace.path)
             if self._workspace_paths is not None
             else workspace.path
         )
-        payload = build_creation_payload(task, agent_path, self._execution).as_dict()
+        payload = build_creation_payload(
+            task,
+            agent_path,
+            self._execution,
+            instruction=context_pack.render() if context_pack else None,
+        ).as_dict()
         descriptor = self._client.create_conversation(payload)
         conversation_id = self._conversation_id(descriptor)
         status = map_status(descriptor.get(_EXECUTION_STATUS_KEY))
