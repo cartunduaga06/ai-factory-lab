@@ -69,7 +69,7 @@ def content_digest(content: str) -> str:
 def build_pack(
     fragments: tuple[ContextFragment, ...],
     *,
-    budget: int = 32_000,
+    budget: int = 48_000,
     base_sha256: str | None = None,
 ) -> ContextPack:
     """Validate, deduplicate, order, and hash exact fragment identities."""

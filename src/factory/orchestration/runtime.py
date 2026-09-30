@@ -30,7 +30,7 @@ from factory.domain.ports import (
     WorkspacePublisher,
     WorkspaceRevisionInspector,
 )
-from factory.orchestration.context import ContextPackBuilder
+from factory.orchestration.context import ContextBuildError, ContextPackBuilder
 from factory.orchestration.dispatch import DispatchService
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
 from factory.orchestration.publication import PublicationResult, PublicationService
@@ -310,23 +310,32 @@ class FactoryRuntime:
                 if timeout_recovery:
                     if self._adapter.kind is not AgentKind.CODEX:
                         return self._result(task, previous, None, "ENGINE_MISMATCH", intake)
-                    run = self._dispatch.dispatch_rework(
-                        task.task_id,
-                        self._adapter,
-                        "Operator-authorized timeout recovery: resume the original "
-                        "workspace without erasing existing changes. Complete the "
-                        "original task and required tests; stop at human PR review.",
-                    )
+                    try:
+                        run = self._dispatch.dispatch_rework(
+                            task.task_id,
+                            self._adapter,
+                            "Operator-authorized timeout recovery: resume the original "
+                            "workspace without erasing existing changes. Complete the "
+                            "original task and required tests; stop at human PR review.",
+                        )
+                    except ContextBuildError:
+                        return self._context_blocked(task, previous, intake)
                 elif (feedback is not None or gate_feedback is not None) and previous is not None:
                     if feedback is not None and self._adapter.kind is not AgentKind.CODEX:
                         return self._result(task, previous, None, "ENGINE_MISMATCH", intake)
-                    run = self._dispatch.dispatch_rework(
-                        task.task_id,
-                        self._adapter,
-                        "\n".join(part for part in (feedback, gate_feedback) if part),
-                    )
+                    try:
+                        run = self._dispatch.dispatch_rework(
+                            task.task_id,
+                            self._adapter,
+                            "\n".join(part for part in (feedback, gate_feedback) if part),
+                        )
+                    except ContextBuildError:
+                        return self._context_blocked(task, previous, intake)
                 else:
-                    run = self._dispatch.dispatch(task.task_id, self._adapter)
+                    try:
+                        run = self._dispatch.dispatch(task.task_id, self._adapter)
+                    except ContextBuildError:
+                        return self._context_blocked(task, previous, intake)
         else:
             run = self._runs.find_active_run(task.task_id)
             if run is None:
@@ -482,6 +491,13 @@ class FactoryRuntime:
         blocked = self._dispatch.lifecycle.transition(task_id, TaskStatus.BLOCKED)
         blocked.blocked_reason = reason
         return self._tasks.update(blocked)
+
+    def _context_blocked(
+        self, task: FactoryTask, previous: AgentRun | None, intake: IntakeSummary
+    ) -> RuntimeResult:
+        blocked = self._tasks.get(task.task_id)
+        assert blocked is not None
+        return self._result(blocked, previous, None, "REQUIRED_CONTEXT_BLOCKED", intake)
 
     def _is_unstarted(self, task: FactoryTask) -> bool:
         if task.status not in {TaskStatus.DISCOVERED, TaskStatus.READY}:

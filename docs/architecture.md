@@ -1076,13 +1076,24 @@ to existing databases and projects their saved task transition history once.
 
 Before claiming a READY code task, `DispatchService` asks `ContextPackBuilder` for a
 version 1 pack. Its mandatory task fragment contains the bounded issue instruction
-and factory boundaries. Additional `ContextSource` implementations can provide
-verified fragments; the configured ECC source admits only pinned, `APPROVED` skills
-whose file digest matches the registry. Sources return neutral `ContextFragment`
+and factory boundaries. Its version hashes the full source fields, including Issue
+text after the 8,000 character render limit. Production also requires the configured
+repository checkout's `AGENTS.md` and one deterministic relevant code/docs file:
+the first explicitly named `src/`, `docs/`, or `tests/` path, otherwise `README.md`,
+`docs/architecture.md`, or the first source Python file. Each repository file has
+a bounded render and a version that hashes its complete bytes. The engine-neutral
+ECC source admits only pinned, `APPROVED` skills whose file digest matches the
+reviewed registry. Sources return neutral `ContextFragment`
 records with `source`, `type`, `id`, `version`, `content_ref` (SHA-256 of content),
 and transient content. The builder rejects missing or changed content, conflicting
-fragment identities, and packs over its explicit character budget. It sorts and
+fragment identities, and packs over its explicit 48,000 character budget. It sorts and
 deduplicates fragments before hashing canonical JSON metadata.
+
+If any mandatory source is absent, invalid, or over budget, dispatch persists a
+sanitized `BLOCKED` reason and task transition before any workspace or agent starts.
+The watcher therefore cannot repeatedly select that READY task. CODE adapters
+refuse a missing pack at their boundary; operational tasks retain their separate
+instruction contract.
 
 `AgentAdapter.dispatch(task, workspace, context_pack)` receives the resulting pack.
 Codex renders its content to the worker prompt and OpenHands renders it into the

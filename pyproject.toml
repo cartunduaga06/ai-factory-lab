@@ -37,7 +37,7 @@ addopts = "-q"
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = ["src/factory/integrations/codex/ecc/*/SKILL.md"]
+extend-exclude = ["src/factory/integrations/context/ecc/*/SKILL.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

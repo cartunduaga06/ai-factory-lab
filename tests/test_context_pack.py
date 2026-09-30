@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 
 from factory.domain.context import ContextFragment, build_pack, content_digest, pack_from_metadata
-from factory.domain.models import FactoryTask
+from factory.domain.models import FactoryTask, TaskSource
 from factory.integrations.codex.context_source import ApprovedSkillSource
+from factory.integrations.context.repository import RepositoryContextSource
 from factory.orchestration.context import ContextPackBuilder
 
 
@@ -47,6 +48,43 @@ def test_rework_preserves_base_and_versions_feedback() -> None:
             feedback="Change",
             previous=base,
         )
+
+
+def test_issue_tail_changes_pack_identity_but_not_bounded_render() -> None:
+    task = FactoryTask(title="Long issue", target_repository="owner/repo", body="x" * 8000 + "A")
+    builder = ContextPackBuilder()
+    first = builder.build(task)
+    task.body = "x" * 8000 + "B"
+    second = builder.build(task)
+    assert first.render() == second.render()
+    assert first.fragments[0].version != second.fragments[0].version
+    assert first.sha256 != second.sha256
+
+
+def test_same_issue_has_same_pack_across_local_task_ids() -> None:
+    source = TaskSource("github", "owner/control", 69)
+    first = FactoryTask(title="Issue", target_repository="owner/repo", body="Text", source=source)
+    second = FactoryTask(title="Issue", target_repository="owner/repo", body="Text", source=source)
+    assert first.task_id != second.task_id
+    assert ContextPackBuilder().build(first).sha256 == ContextPackBuilder().build(second).sha256
+
+
+def test_repository_source_has_bounded_content_and_full_file_identity(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Rules\n")
+    (tmp_path / "src").mkdir()
+    code = tmp_path / "src" / "feature.py"
+    code.write_text("x" * 8000 + "A")
+    task = FactoryTask(title="Edit src/feature.py", target_repository="owner/repo")
+    builder = ContextPackBuilder((RepositoryContextSource(str(tmp_path)),))
+    first = builder.build(task)
+    assert [item.id for item in first.fragments if item.source == "repository"] == [
+        "AGENTS.md",
+        "src/feature.py",
+    ]
+    code.write_text("x" * 8000 + "B")
+    second = builder.build(task)
+    assert first.render() == second.render()
+    assert first.sha256 != second.sha256
 
 
 def test_approved_skill_enters_neutral_pack() -> None:

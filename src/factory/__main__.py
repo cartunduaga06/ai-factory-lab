@@ -42,7 +42,8 @@ from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 from factory.infrastructure.persistence.sprint_sqlite import SqliteSprintRepository
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
-from factory.integrations.codex.context_source import ApprovedSkillSource
+from factory.integrations.context.repository import RepositoryContextSource
+from factory.integrations.context.skill_source import ApprovedSkillSource
 from factory.integrations.gates import LocalQualityGateRunner
 from factory.integrations.github import (
     GitHubClient,
@@ -729,7 +730,12 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         tasks=tasks,
         runs=runs,
         adapter=adapter,
-        context_builder=ContextPackBuilder((ApprovedSkillSource(config.codex_ecc_skill),)),
+        context_builder=ContextPackBuilder(
+            (
+                RepositoryContextSource(config.source_checkout or ""),
+                ApprovedSkillSource(config.codex_ecc_skill),
+            )
+        ),
         provisioner=GitWorktreeWorkspaceProvisioner(
             config.source_checkout or "", base_ref=config.workspace_base_ref
         ),

@@ -33,7 +33,7 @@ import logging
 from datetime import UTC, datetime
 
 from factory.domain.context import ContextPack
-from factory.domain.enums import AgentKind
+from factory.domain.enums import AgentKind, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.integrations.base import AgentAdapterBase
 from factory.integrations.openhands.client import (
@@ -96,6 +96,8 @@ class OpenHandsAdapter(AgentAdapterBase):
             OpenHandsError: a sanitized integration error if the conversation
                 could not be created.
         """
+        if task.kind is TaskKind.CODE and context_pack is None:
+            raise ValueError("CODE dispatch requires a context pack")
         agent_path = (
             self._workspace_paths.to_container(workspace.path)
             if self._workspace_paths is not None

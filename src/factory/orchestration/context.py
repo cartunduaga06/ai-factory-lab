@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from factory.domain.context import (
     ContextFragment,
     ContextPack,
@@ -27,21 +29,53 @@ class TaskContextSource:
 
     def fragments(self, task: FactoryTask) -> tuple[ContextFragment, ...]:
         body = task.body.strip() or "(no description provided)"
+        source_id = (
+            f"{task.source.provider}:{task.source.repository_slug}#{task.source.issue_number}"
+            if task.source
+            else task.task_id
+        )
         content = (
             "You are executing a task dispatched by AI Factory Lab.\n\n"
             f"Target repository: {task.target_repository}\n"
             f"Task reference: {task.external_ref or task.task_id}\n"
             f"Task title: {task.title}\n\nTask description:\n{body[:8000]}\n\n" + _BOUNDARIES
         )
-        return (
-            ContextFragment("factory", "task", task.task_id, "1", content_digest(content), content),
+        # The prompt is bounded, while identity covers every authoritative field.
+        identity = json.dumps(
+            {
+                "target_repository": task.target_repository,
+                "source": (
+                    [task.source.provider, task.source.repository_slug, task.source.issue_number]
+                    if task.source
+                    else None
+                ),
+                "local_task_id": task.task_id if task.source is None else None,
+                "title": task.title,
+                "body": task.body,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
+        return (
+            ContextFragment(
+                "factory",
+                "task",
+                source_id,
+                content_digest(identity),
+                content_digest(content),
+                content,
+            ),
+        )
+
+
+class ContextBuildError(ValueError):
+    """A mandatory source could not produce a valid, bounded pack."""
 
 
 class ContextPackBuilder:
     """Build a deterministic pack from mandatory task and injected sources."""
 
-    def __init__(self, sources: tuple[ContextSource, ...] = (), budget: int = 32_000) -> None:
+    def __init__(self, sources: tuple[ContextSource, ...] = (), budget: int = 48_000) -> None:
         self._sources = (TaskContextSource(), *sources)
         self._budget = budget
 
@@ -52,13 +86,23 @@ class ContextPackBuilder:
         feedback: str | None = None,
         previous: ContextPack | None = None,
     ) -> ContextPack:
-        fragments = tuple(
-            fragment for source in self._sources for fragment in source.fragments(task)
-        )
+        try:
+            parts: list[ContextFragment] = []
+            for source in self._sources:
+                supplied = source.fragments(task)
+                if not supplied and getattr(source, "required", True):
+                    raise ValueError("mandatory source returned no fragments")
+                parts.extend(supplied)
+            fragments = tuple(parts)
+        except Exception:  # noqa: BLE001 - source messages may contain private data
+            raise ContextBuildError("required context unavailable") from None
         if feedback is not None:
             if previous is None:
                 raise ValueError("rework requires historical context pack")
-            base = build_pack(fragments, budget=self._budget)
+            try:
+                base = build_pack(fragments, budget=self._budget)
+            except ValueError:
+                raise ContextBuildError("required context invalid or over budget") from None
             if base.sha256 != (previous.base_sha256 or previous.sha256):
                 raise ValueError("historical context pack changed")
             text = f"QA feedback for this rework:\n{feedback}"
@@ -67,8 +111,11 @@ class ContextPackBuilder:
                     "factory", "feedback", previous.sha256, "1", content_digest(text), text
                 ),
             )
-        return build_pack(
-            fragments,
-            budget=self._budget,
-            base_sha256=(previous.base_sha256 or previous.sha256) if previous else None,
-        )
+        try:
+            return build_pack(
+                fragments,
+                budget=self._budget,
+                base_sha256=(previous.base_sha256 or previous.sha256) if previous else None,
+            )
+        except ValueError:
+            raise ContextBuildError("required context invalid or over budget") from None

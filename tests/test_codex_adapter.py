@@ -15,7 +15,9 @@ from factory.domain.models import AgentRun, FactoryTask, QualityGateSpec, Worksp
 from factory.integrations.codex import CodexAdapter
 from factory.integrations.codex.ecc_skill import SKILL_NAME, load_skill
 from factory.integrations.codex.worker import MAX_OUTPUT_BYTES
+from factory.integrations.context.skill_source import ApprovedSkillSource
 from factory.integrations.gates.local import LocalQualityGateRunner
+from factory.orchestration.context import ContextPackBuilder
 
 
 def _task() -> FactoryTask:
@@ -41,6 +43,11 @@ def _collect(adapter: CodexAdapter, run: AgentRun) -> AgentRun:
             return run
         sleep(0.01)
     pytest.fail("Codex worker did not finish")
+
+
+def _dispatch(adapter: CodexAdapter, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    pack = ContextPackBuilder((ApprovedSkillSource(adapter._ecc_skill),)).build(task)
+    return adapter.dispatch(task, workspace, pack)
 
 
 def test_pinned_ecc_skill_loading_fails_closed(tmp_path: Path) -> None:
@@ -89,7 +96,7 @@ pathlib.Path(sys.argv[7]).write_text('Done')
     task = _task()
     if task_type is not None:
         task.title = f"Implement a feature [type:{task_type}]"
-    run = _collect(adapter, adapter.dispatch(task, workspace))
+    run = _collect(adapter, _dispatch(adapter, task, workspace))
     assert run.status is RunStatus.SUCCEEDED
     gate = LocalQualityGateRunner().run(
         QualityGateSpec(
@@ -120,8 +127,8 @@ pathlib.Path(sys.argv[7]).write_text('Done')
 
 
 def test_unavailable_ecc_skill_prevents_dispatch(tmp_path: Path) -> None:
-    run = CodexAdapter(ecc_skill="unknown").dispatch(_task(), _workspace(tmp_path))
-    assert run.status is RunStatus.FAILED
+    with pytest.raises(ValueError, match="required context"):
+        _dispatch(CodexAdapter(ecc_skill="unknown"), _task(), _workspace(tmp_path))
 
 
 def test_codex_uses_assigned_workspace_and_authenticated_home(tmp_path: Path) -> None:
@@ -152,7 +159,7 @@ pathlib.Path(args[6]).write_text('Done')
         "OPENAI_API_KEY": "must-not-forward",
     }
     adapter = CodexAdapter(executable=executable, environment=environment)
-    run = adapter.dispatch(_task(), _workspace(checkout))
+    run = _dispatch(adapter, _task(), _workspace(checkout))
     assert run.status is RunStatus.RUNNING
     run = _collect(CodexAdapter(environment=environment), run)
     assert run.adapter is AgentKind.CODEX
@@ -174,7 +181,7 @@ print('complete')
 """,
     )
     adapter = CodexAdapter(executable=executable)
-    run = _collect(adapter, adapter.dispatch(_task(), _workspace(checkout)))
+    run = _collect(adapter, _dispatch(adapter, _task(), _workspace(checkout)))
     assert run.status is RunStatus.SUCCEEDED
     assert (checkout / "generated.bin").stat().st_size == MAX_OUTPUT_BYTES + 1
 
@@ -193,7 +200,7 @@ sys.{stream}.flush()
     )
     adapter = CodexAdapter(executable=executable)
     workspace = _workspace(checkout)
-    run = _collect(adapter, adapter.dispatch(_task(), workspace))
+    run = _collect(adapter, _dispatch(adapter, _task(), workspace))
     evidence = json.loads((CodexAdapter._state_dir(workspace) / f"{run.run_id}.result").read_text())
     assert run.status is RunStatus.SUCCEEDED
     assert evidence["status"] == "SUCCEEDED"
@@ -212,7 +219,7 @@ def test_exit_or_missing_result_fails(tmp_path: Path, body: str) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     adapter = CodexAdapter(executable=_executable(tmp_path, body))
-    run = _collect(adapter, adapter.dispatch(_task(), _workspace(checkout)))
+    run = _collect(adapter, _dispatch(adapter, _task(), _workspace(checkout)))
     assert run.status is RunStatus.FAILED
 
 
@@ -227,7 +234,7 @@ def test_worker_records_actual_exit_code_even_without_message(
         f"import sys\nsys.stderr.write('diagnostic\\n')\nsys.exit({exit_code})\n",
     )
     adapter = CodexAdapter(executable=executable)
-    run = _collect(adapter, adapter.dispatch(_task(), _workspace(checkout)))
+    run = _collect(adapter, _dispatch(adapter, _task(), _workspace(checkout)))
     result = CodexAdapter._state_dir(_workspace(checkout)) / f"{run.run_id}.result"
     evidence = json.loads(result.read_text())
     assert run.status is RunStatus.FAILED
@@ -249,7 +256,7 @@ def test_malformed_result_fails_closed(tmp_path: Path, payload: str) -> None:
         f"import pathlib, sys\npathlib.Path(sys.argv[7]).write_text({payload!r})\n",
     )
     adapter = CodexAdapter(executable=executable)
-    run = _collect(adapter, adapter.dispatch(_task(), _workspace(checkout)))
+    run = _collect(adapter, _dispatch(adapter, _task(), _workspace(checkout)))
     assert run.status is RunStatus.FAILED
 
 
@@ -258,11 +265,11 @@ def test_missing_executable_and_timeout_fail_closed(tmp_path: Path) -> None:
     checkout.mkdir()
     workspace = _workspace(checkout)
     missing_adapter = CodexAdapter(executable=str(tmp_path / "missing"))
-    missing = _collect(missing_adapter, missing_adapter.dispatch(_task(), workspace))
+    missing = _collect(missing_adapter, _dispatch(missing_adapter, _task(), workspace))
     sleeping_adapter = CodexAdapter(
         executable=_executable(tmp_path, "import time; time.sleep(1)\n"), timeout=0.01
     )
-    sleeping = _collect(sleeping_adapter, sleeping_adapter.dispatch(_task(), workspace))
+    sleeping = _collect(sleeping_adapter, _dispatch(sleeping_adapter, _task(), workspace))
     assert missing.status is RunStatus.FAILED
     assert sleeping.status is RunStatus.FAILED
 
@@ -271,7 +278,7 @@ def test_cancel_stops_an_active_codex_run(tmp_path: Path) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     adapter = CodexAdapter(executable=_executable(tmp_path, "import time; time.sleep(2)\n"))
-    run = adapter.dispatch(_task(), _workspace(checkout))
+    run = _dispatch(adapter, _task(), _workspace(checkout))
     adapter.cancel(run)
     assert _collect(adapter, run).status is RunStatus.CANCELLED
 
@@ -309,7 +316,7 @@ def test_inflight_code_worker_result_from_previous_format_is_accepted(tmp_path: 
 
 
 def test_collect_rejects_other_engine(tmp_path: Path) -> None:
-    run = CodexAdapter(executable="missing").dispatch(_task(), _workspace(tmp_path))
+    run = _dispatch(CodexAdapter(executable="missing"), _task(), _workspace(tmp_path))
     run.adapter = AgentKind.OPENHANDS
     with pytest.raises(ValueError):
         CodexAdapter().collect(run)
@@ -317,7 +324,7 @@ def test_collect_rejects_other_engine(tmp_path: Path) -> None:
 
 def test_invalid_workspace_fails_closed(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
-    run = CodexAdapter(executable="codex").dispatch(_task(), _workspace(missing))
+    run = _dispatch(CodexAdapter(executable="codex"), _task(), _workspace(missing))
     assert run.status is RunStatus.FAILED
 
 
@@ -325,7 +332,7 @@ def test_code_task_cannot_use_operational_workspace(tmp_path: Path) -> None:
     workspace = Workspace(
         repository_slug="owner/repo", path=str(tmp_path), branch="", kind=TaskKind.OPERATIONAL
     )
-    run = CodexAdapter(executable="codex").dispatch(_task(), workspace)
+    run = _dispatch(CodexAdapter(executable="codex"), _task(), workspace)
     assert run.status is RunStatus.FAILED
 
 

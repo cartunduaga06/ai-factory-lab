@@ -51,7 +51,7 @@ from factory.domain.models import (
     new_workspace,
 )
 from factory.domain.ports import RunRepository, TaskRepository, WorkspaceProvisioner
-from factory.orchestration.context import ContextPackBuilder
+from factory.orchestration.context import ContextBuildError, ContextPackBuilder
 from factory.orchestration.machine import InvalidTransitionError, TaskStateMachine
 from factory.orchestration.transitions import TaskLifecycleService
 
@@ -121,7 +121,7 @@ class DispatchService:
         if self._runs.find_active_run(task_id) is not None:
             raise DispatchConflictError(task_id)
 
-        pack = self._context_builder.build(task)
+        pack = self._build_context(task)
         claimed = self._claim(task)
         workspace = self._prepare_workspace(claimed)
         run = self._start_run(claimed, workspace, adapter, pack)
@@ -143,8 +143,8 @@ class DispatchService:
         if historical is None and feedback.startswith("Operator-authorized timeout recovery:"):
             # Runs created before E5 have no historical pack; recovery retains
             # their checkout while binding a fresh explicit base for audit.
-            historical = self._context_builder.build(task)
-        pack = self._context_builder.build(task, feedback=feedback, previous=historical)
+            historical = self._build_context(task)
+        pack = self._build_context(task, feedback=feedback, previous=historical)
         claimed = self._claim(task)
         workspace = self._provisioner.repair(claimed, previous.workspace)
         run = self._start_run(claimed, workspace, adapter, pack)
@@ -152,6 +152,23 @@ class DispatchService:
         return run
 
     # -- steps -------------------------------------------------------------
+
+    def _build_context(
+        self, task: FactoryTask, *, feedback: str | None = None, previous: ContextPack | None = None
+    ) -> ContextPack:
+        if task.kind is TaskKind.OPERATIONAL:
+            return self._context_builder.build(task)
+        try:
+            return self._context_builder.build(task, feedback=feedback, previous=previous)
+        except ValueError:
+            blocked = self._lifecycle.transition(
+                task.task_id, TaskStatus.BLOCKED, expected_from=TaskStatus.READY
+            )
+            blocked.blocked_reason = "required context unavailable, invalid or over budget"
+            self._tasks.update(blocked)
+            raise ContextBuildError(
+                "required context unavailable, invalid or over budget"
+            ) from None
 
     def _require_task(self, task_id: str) -> FactoryTask:
         task = self._tasks.get(task_id)

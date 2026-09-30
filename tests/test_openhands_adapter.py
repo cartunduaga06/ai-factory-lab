@@ -23,6 +23,7 @@ from factory.integrations.openhands.client import (
     ServerResponse,
 )
 from factory.integrations.openhands.execution import OpenHandsExecution
+from factory.orchestration.context import ContextPackBuilder
 from tests.fake_openhands import FakeTransport
 
 BASE_URL = "http://localhost:60000"
@@ -55,6 +56,10 @@ def _adapter(transport: FakeTransport) -> OpenHandsAdapter:
     return OpenHandsAdapter(client, OpenHandsExecution(agent_profile_id="profile-1"))
 
 
+def _dispatch(adapter: OpenHandsAdapter, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    return adapter.dispatch(task, workspace, ContextPackBuilder().build(task))
+
+
 # -- contract --------------------------------------------------------------
 
 
@@ -76,7 +81,7 @@ def test_dispatch_returns_a_run_bound_to_the_conversation() -> None:
         [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
     )
     task = _task()
-    run = _adapter(transport).dispatch(task, _workspace())
+    run = _dispatch(_adapter(transport), task, _workspace())
 
     assert run.adapter is AgentKind.OPENHANDS
     assert run.run_id == CONVERSATION_ID
@@ -92,7 +97,7 @@ def test_dispatch_posts_to_the_conversations_endpoint() -> None:
     transport = FakeTransport(
         [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
     )
-    _adapter(transport).dispatch(_task(), _workspace())
+    _dispatch(_adapter(transport), _task(), _workspace())
     assert transport.last.method == "POST"
     assert transport.last.url == f"{BASE_URL}/api/conversations"
 
@@ -103,7 +108,7 @@ def test_dispatch_sends_the_factory_workspace_path_and_task_text() -> None:
     transport = FakeTransport(
         [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
     )
-    _adapter(transport).dispatch(_task(), _workspace())
+    _dispatch(_adapter(transport), _task(), _workspace())
     body = json.loads(transport.last.body.decode())
     assert body["workspace"] == {"kind": "LocalWorkspace", "working_dir": WORKSPACE_PATH}
     assert "Add a health endpoint" in body["initial_message"]["content"][0]["text"]
@@ -116,7 +121,7 @@ def test_dispatch_never_sends_its_own_llm_credential() -> None:
     transport = FakeTransport(
         [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "idle"})]
     )
-    _adapter(transport).dispatch(_task(), _workspace())
+    _dispatch(_adapter(transport), _task(), _workspace())
     body = json.loads(transport.last.body.decode())
     assert "llm" not in body
     assert "api_key" not in json.dumps(body)
@@ -126,7 +131,7 @@ def test_dispatch_maps_a_running_conversation() -> None:
     transport = FakeTransport(
         [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "running"})]
     )
-    run = _adapter(transport).dispatch(_task(), _workspace())
+    run = _dispatch(_adapter(transport), _task(), _workspace())
     assert run.status is RunStatus.RUNNING
     assert run.finished_at is None
 
@@ -135,7 +140,7 @@ def test_dispatch_closes_a_terminal_conversation_immediately() -> None:
     transport = FakeTransport(
         [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "finished"})]
     )
-    run = _adapter(transport).dispatch(_task(), _workspace())
+    run = _dispatch(_adapter(transport), _task(), _workspace())
     assert run.status is RunStatus.SUCCEEDED
     assert run.finished_at is not None
 
@@ -143,7 +148,7 @@ def test_dispatch_closes_a_terminal_conversation_immediately() -> None:
 def test_dispatch_response_without_id_fails() -> None:
     transport = FakeTransport([ServerResponse(201, {"execution_status": "idle"})])
     with pytest.raises(OpenHandsError):
-        _adapter(transport).dispatch(_task(), _workspace())
+        _dispatch(_adapter(transport), _task(), _workspace())
 
 
 def test_dispatch_with_an_unknown_status_fails_safely() -> None:
@@ -151,7 +156,7 @@ def test_dispatch_with_an_unknown_status_fails_safely() -> None:
         [ServerResponse(201, {"id": CONVERSATION_ID, "execution_status": "wat"})]
     )
     with pytest.raises(OpenHandsStatusError):
-        _adapter(transport).dispatch(_task(), _workspace())
+        _dispatch(_adapter(transport), _task(), _workspace())
 
 
 # -- collect ---------------------------------------------------------------
@@ -340,7 +345,7 @@ def test_engine_failure_does_not_leak_the_session_key() -> None:
         [ServerResponse(500, {"detail": f"upstream failed with {SESSION_KEY}"})]
     )
     with pytest.raises(OpenHandsError) as caught:
-        _adapter(transport).dispatch(_task(), _workspace())
+        _dispatch(_adapter(transport), _task(), _workspace())
     formatted = "".join(traceback.format_exception(caught.value))
     assert SESSION_KEY not in formatted
 

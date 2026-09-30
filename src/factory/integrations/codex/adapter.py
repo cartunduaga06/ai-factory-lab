@@ -15,8 +15,6 @@ from factory.domain.enums import AgentKind, RunStatus, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.domain.operational import parse_scratch_artifact
 from factory.integrations.base import AgentAdapterBase
-from factory.integrations.codex.context_source import ApprovedSkillSource
-from factory.orchestration.context import ContextPackBuilder
 
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 _COLLECTION_GRACE_SECONDS = 5.0
@@ -68,6 +66,8 @@ class CodexAdapter(AgentAdapterBase):
         the checkout. Factory can persist this RUNNING record immediately and
         collect it even after the factory process restarts.
         """
+        if task.kind is TaskKind.CODE and context_pack is None:
+            raise ValueError("CODE dispatch requires a context pack")
         run = AgentRun(
             task_id=task.task_id,
             adapter=self.kind,
@@ -108,10 +108,8 @@ class CodexAdapter(AgentAdapterBase):
                         "Reply only with a short completion status.\n"
                     )
                 else:
-                    pack = context_pack or ContextPackBuilder(
-                        (ApprovedSkillSource(self._ecc_skill),)
-                    ).build(task)
-                    stream.write(pack.render())
+                    assert context_pack is not None
+                    stream.write(context_pack.render())
             environment = self._env()
             # Import the worker from trusted factory code. Python puts its cwd
             # first on sys.path for -m, so never start it in the target checkout.
