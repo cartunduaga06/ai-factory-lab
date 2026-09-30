@@ -290,8 +290,8 @@ class FactoryConfig:
         except ValueError:
             raise ValueError("FACTORY_AGENT_ENGINE must be codex or openhands") from None
         ecc_skill = _clean(source.get("FACTORY_CODEX_ECC_SKILL"))
-        if ecc_skill not in (None, "verification-loop"):
-            raise ValueError("FACTORY_CODEX_ECC_SKILL must be verification-loop or unset")
+        if ecc_skill not in (None, "verification-loop", "auto"):
+            raise ValueError("FACTORY_CODEX_ECC_SKILL must be auto, verification-loop or unset")
         raw_env = (_clean(source.get("FACTORY_ENV")) or Environment.DEVELOPMENT.value).lower()
         try:
             environment = Environment(raw_env)
