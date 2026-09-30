@@ -425,6 +425,7 @@ class FactoryConfig:
                     "context_profile": p.context_profile,
                     "deploy_policy": p.deploy_policy,
                     "deploy_required": p.deploy_required,
+                    "required_ci_checks": list(p.required_ci_checks),
                     "git_host": p.git_host,
                     "gates": [g.name for g in p.gates],
                 }
@@ -505,6 +506,7 @@ def _parse_projects(raw: str) -> ProjectRegistry:
                     deploy_policy=item.get("deploy_policy", "human-only"),
                     git_host=item.get("git_host", "github.com"),
                     deploy_required=item.get("deploy_required", False),
+                    required_ci_checks=tuple(item.get("required_ci_checks", ())),
                 )
             )
         return ProjectRegistry(tuple(profiles))

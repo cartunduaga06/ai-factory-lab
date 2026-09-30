@@ -130,3 +130,71 @@ def test_trello_feedback_preserves_source_snapshot_and_project() -> None:
     with pytest.raises(TrelloFeedbackError):
         sink.sync(_identity("project-b"), "DONE")
     assert transport.writes == 1
+
+
+class DeliveryClient:
+    def __init__(self, *, missing_check: bool = False) -> None:
+        self.paths: list[str] = []
+        self.missing_check = missing_check
+
+    def get(self, path: str, params: Mapping[str, str | int] | None = None) -> Any:  # noqa: ANN401
+        self.paths.append(path)
+        if path.endswith("/pulls/17"):
+            return {
+                "number": 17,
+                "state": "closed",
+                "merged": True,
+                "merged_at": "2026-09-30T22:33:47Z",
+                "merge_commit_sha": "b" * 40,
+                "head": {"sha": "a" * 40, "repo": {"full_name": "example/project-a"}},
+                "base": {"ref": "main", "repo": {"full_name": "example/project-a"}},
+            }
+        if path.endswith("/commits/" + "b" * 40):
+            return {"sha": "b" * 40}
+        if path.endswith("/commits/" + "a" * 40 + "/status"):
+            return {"statuses": []}
+        if path.endswith("/commits/" + "a" * 40 + "/check-runs"):
+            rows = [
+                {"name": "ci-3.11", "status": "completed", "conclusion": "success"},
+                {"name": "ci-3.12", "status": "completed", "conclusion": "success"},
+            ]
+            if self.missing_check:
+                rows = rows[:1]
+            return {"total_count": len(rows), "check_runs": rows}
+        if "/protection/" in path:
+            raise AssertionError("branch protection must not be queried when checks are configured")
+        raise AssertionError(path)
+
+
+def _delivery_registry() -> ProjectRegistry:
+    return ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+                required_ci_checks=("ci-3.11", "ci-3.12"),
+            ),
+        )
+    )
+
+
+def test_delivery_uses_explicit_required_ci_checks_without_branch_protection() -> None:
+    from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
+
+    client = DeliveryClient()
+    evidence = GitHubDeliveryEvidenceSource(client, _delivery_registry()).evidence(_identity())  # type: ignore[arg-type]
+    assert evidence.complete
+    assert not any("/protection/" in path for path in client.paths)
+
+
+def test_delivery_fails_closed_when_configured_ci_check_is_missing() -> None:
+    from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
+
+    evidence = GitHubDeliveryEvidenceSource(  # type: ignore[arg-type]
+        DeliveryClient(missing_check=True), _delivery_registry()
+    ).evidence(_identity())
+    assert not evidence.required_ci_passed
+    assert not evidence.complete

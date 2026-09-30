@@ -21,7 +21,10 @@ Issue, task, run, workspace, published commit, PR and Trello card relationship
 after human review. A merged PR becomes a completed delivery only after GitHub
 confirms the merge commit, the configured required branch checks pass, and a
 successful deployment is found when the project profile sets
-`"deploy_required": true`. Missing or unreadable evidence leaves the Issue open
+`"deploy_required": true`. A project may set `"required_ci_checks"` to an
+operator-owned list of exact GitHub check-run names; when configured, E6 verifies
+those checks directly and does not require branch-protection administration access.
+Missing or unreadable evidence leaves the Issue open
 and the Sprint at its human gate. The default is `false` for projects with no
 deployment acceptance requirement. Deployment remains a human operation.
 
