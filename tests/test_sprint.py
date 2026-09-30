@@ -324,3 +324,45 @@ def test_runtime_never_dispatches_issue_outside_authorized_sprint(tmp_path: Path
     assert runtime.run_once().outcome == "NO_ELIGIBLE_TASK"
     assert tasks.get(result.task_id).status is TaskStatus.DONE  # type: ignore[arg-type,union-attr]
     assert SqliteSprintRepository(str(path)).current()[1] is SprintState.COMPLETE  # type: ignore[index]
+
+
+def test_find_for_work_item_accepts_pre_e7_manifest_without_project_id(tmp_path: Path) -> None:
+    path = str(tmp_path / "factory.db")
+    sprints = SqliteSprintRepository(path)
+    sprints.initialize()
+    legacy_manifest = {
+        "sprint_id": "legacy-sprint",
+        "steps": [
+            {
+                "item": {
+                    "provider": "trello",
+                    "external_id": "legacy-card",
+                    "title": "Legacy",
+                    "description": "Legacy pre-E7 manifest",
+                    "target_repository": "cartunduaga06/ai-factory-lab",
+                    "eligible": True,
+                    "dependencies_satisfied": True,
+                },
+                "dependencies": [],
+            }
+        ],
+        "wip_limit": 1,
+        "stop_conditions": ["WAITING_HUMAN", "BLOCKED", "FAILED"],
+        "pipeline": ["materialize_issue", "pause", "resume", "cancel", "request_human"],
+    }
+    import json
+    import sqlite3
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO sprints (sprint_id, manifest, state, position) VALUES (?, ?, 'PAUSED', 0)",
+            ("legacy-sprint", json.dumps(legacy_manifest, sort_keys=True, separators=(",", ":"))),
+        )
+    assert (
+        SqliteSprintRepository(path).find_for_work_item("ai-factory-lab", "trello", "legacy-card")
+        == "legacy-sprint"
+    )
+    assert (
+        SqliteSprintRepository(path).find_for_work_item("other-project", "trello", "legacy-card")
+        is None
+    )

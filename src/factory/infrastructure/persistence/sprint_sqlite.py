@@ -69,7 +69,7 @@ class SqliteSprintRepository(SqliteRepository, SprintRepository):
         for row in rows:
             manifest = json.loads(str(row["manifest"]))
             if any(
-                step["item"]["project_id"] == project_id
+                step["item"].get("project_id", "ai-factory-lab") == project_id
                 and step["item"]["provider"] == provider
                 and step["item"]["external_id"] == external_id
                 for step in manifest["steps"]
