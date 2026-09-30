@@ -7,7 +7,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
-from factory.domain.enums import RunStatus, TaskKind, TaskStatus
+from factory.domain.enums import RunStatus, TaskKind, TaskStatus, ValidationOutcome
 from factory.domain.models import AgentRun, FactoryTask, StatusSnapshot
 from factory.domain.ports import PullRequestRepository, RunRepository, TaskRepository
 
@@ -43,11 +43,19 @@ class StatusService:
             TaskStatus.WAITING_HUMAN: 3,
             TaskStatus.CLAIMED: 4,
         }
-        active = [task for task in tasks if task.status in active_priority]
+        active = [
+            task
+            for task in tasks
+            if task.status in active_priority
+            or (task.status is TaskStatus.READY and self._latest_run_failed_gates(task.task_id))
+        ]
         if active:
             selected = min(
                 active,
-                key=lambda task: (active_priority[task.status], -task.updated_at.timestamp()),
+                key=lambda task: (
+                    active_priority.get(task.status, 4),
+                    -task.updated_at.timestamp(),
+                ),
             )
         else:
             selected = max(tasks, key=lambda task: task.updated_at)
@@ -98,16 +106,58 @@ class StatusService:
                 else (run.finished_at if run else None)
             ),
             pr_url=pr_url,
-            action="Review the pull request" if phase == "WAITING_HUMAN" else None,
+            action=(
+                "Review the pull request"
+                if phase == "WAITING_HUMAN"
+                else "QA rework queued"
+                if phase == "READY" and self._latest_run_failed_gates(task_id)
+                else None
+            ),
             evidence=evidence,
+            gates=self._gates(run),
+            previous_gates=tuple(
+                f"Run {hashlib.sha256(previous.run_id.encode()).hexdigest()[:12]}: {gate}"
+                for previous in runs[-6:-1]
+                for gate in self._gates(previous)
+            ),
             history=tuple(
                 f"{self._iso(item.occurred_at)} {item.to_status.value}" for item in transitions
             ),
         )
 
+    def _latest_run_failed_gates(self, task_id: str) -> bool:
+        runs = self._runs.list_runs(task_id)
+        return bool(runs) and runs[-1].validation_outcome is ValidationOutcome.GATES_FAILED
+
+    @staticmethod
+    def _gates(run: AgentRun | None) -> tuple[str, ...]:
+        """Expose only bounded gate labels, statuses and allowlisted process results."""
+        if run is None:
+            return ()
+        result = []
+        for gate in run.gates[:40]:
+            name = gate.name if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", gate.name) else "check"
+            detail = gate.detail or ""
+            if not re.fullmatch(
+                r"(?:exit_code=-?\d{1,3}|timeout|spawn_error|redacted|runner_error|runner_mismatch|"
+                r"no_workspace|workspace repair unavailable|workspace identity mismatch|"
+                r"workspace repair failed|workspace inspection failed|"
+                r"workspace changed during validation)",
+                detail,
+            ):
+                detail = ""
+            suffix = f" ({detail})" if detail else ""
+            requirement = "required" if gate.required else "optional"
+            result.append(f"{name}: {gate.status.value} ({requirement}){suffix}")
+        return tuple(result)
+
     def _pr_url(self, run: AgentRun) -> str | None:
         pr = self._pull_requests.get_for_run(run.run_id)
-        if pr is None or pr.number is None or pr.number <= 0:
+        if pr is None and run.workspace is not None:
+            pr = self._pull_requests.find_by_branch(
+                run.workspace.repository_slug, run.workspace.branch
+            )
+        if pr is None or pr.task_id != run.task_id or pr.number is None or pr.number <= 0:
             return None
         return f"https://github.com/{quote(pr.repository_slug, safe='/')}/pull/{pr.number}"
 
@@ -129,7 +179,7 @@ class StatusService:
                         return f"Operational agent exit code: {match.group(1)}"
                 return "Agent reported failure"
             return "Task failed"
-        if phase in {"BLOCKED", "VALIDATING"} and run is not None:
+        if phase in {"BLOCKED", "VALIDATING", "READY"} and run is not None:
             failed = sum(gate.is_blocking for gate in run.gates)
             if failed:
                 return f"{failed} required check(s) did not pass"

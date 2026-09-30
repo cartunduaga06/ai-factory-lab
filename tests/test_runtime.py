@@ -31,6 +31,7 @@ from factory.infrastructure.persistence import (
 from factory.integrations.github.client import GitHubRequestError
 from factory.integrations.openhands import WorkspacePathError, WorkspacePathMapper
 from factory.orchestration.intake import IssueIntakeService
+from factory.orchestration.retry import RetryService
 from factory.orchestration.runtime import FactoryRuntime
 from tests.fake_adapter import FakeAgentAdapter
 from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
@@ -454,15 +455,46 @@ def test_validated_run_resume_skips_agent_and_continues_to_publication(runtime_p
 
 
 def test_failed_required_gate_does_not_publish(runtime_parts) -> None:
-    runtime, tasks, _, _, publisher, sink, gate_runner = runtime_parts
+    runtime, tasks, runs, adapter, publisher, sink, gate_runner = runtime_parts
     gate_runner._statuses["tests"] = QualityGateStatus.FAILED  # type: ignore[attr-defined]
 
     result = runtime.run_once()
 
     assert result.outcome == "QUALITY_GATES_FAILED"
-    assert result.task_status is TaskStatus.VALIDATING
+    assert result.task_status is TaskStatus.READY
     assert publisher.calls == 0
     assert sink.create_calls == 0
+    failed = runs.get_run(result.run_id)
+    assert failed is not None and failed.workspace is not None
+    assert failed.validated_revision is None
+
+    gate_runner._statuses["tests"] = QualityGateStatus.PASSED  # type: ignore[attr-defined]
+    corrected = runtime.run_once()
+    assert corrected.outcome == "WAITING_HUMAN"
+    assert corrected.task_status is TaskStatus.WAITING_HUMAN
+    assert corrected.branch == failed.workspace.branch
+    assert len(runs.list_runs(result.task_id)) == 2
+    assert runs.list_runs(result.task_id)[-1].workspace == failed.workspace
+    assert len(adapter.dispatched) == 2
+    assert publisher.calls == sink.create_calls == 1
+
+
+def test_failed_qa_correction_remains_recoverable_on_same_branch(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, gate_runner = runtime_parts
+    gate_runner._statuses["tests"] = QualityGateStatus.FAILED  # type: ignore[attr-defined]
+    first = runtime.run_once()
+    adapter._status = RunStatus.FAILED  # type: ignore[attr-defined]
+    correction = runtime.run_once()
+    assert correction.task_status is TaskStatus.BLOCKED
+    assert publisher.calls == sink.create_calls == 0
+
+    RetryService(tasks, runs).retry(first.task_id)
+    adapter._status = RunStatus.SUCCEEDED  # type: ignore[attr-defined]
+    gate_runner._statuses["tests"] = QualityGateStatus.PASSED  # type: ignore[attr-defined]
+    recovered = runtime.run_once()
+    assert recovered.task_status is TaskStatus.WAITING_HUMAN
+    assert recovered.branch == first.branch
+    assert len({run.workspace.workspace_id for run in runs.list_runs(first.task_id)}) == 1
 
 
 def test_host_path_mapping_is_explicit_and_rejects_escape(tmp_path: Path) -> None:
@@ -515,7 +547,8 @@ def test_legacy_validating_runtime_revalidates_without_agent_or_new_records(
     assert (stored.validated_revision is not None) == (not failed)
     assert publisher.calls == sink.create_calls == (0 if failed else 1)
     assert result.outcome == ("QUALITY_GATES_FAILED" if failed else "WAITING_HUMAN")
-    assert result.task_status is (TaskStatus.VALIDATING if failed else TaskStatus.WAITING_HUMAN)
-    runtime.run_once()
-    assert runner.calls == [("tests", workspace.path)]
-    assert adapter.dispatched == [] and adapter.collected == 0
+    assert result.task_status is (TaskStatus.READY if failed else TaskStatus.WAITING_HUMAN)
+    if not failed:
+        runtime.run_once()
+        assert runner.calls == [("tests", workspace.path)]
+        assert adapter.dispatched == [] and adapter.collected == 0

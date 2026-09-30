@@ -101,6 +101,8 @@ def render_status(snapshot: StatusSnapshot) -> str:
         if url is not None
     )
     history = "".join(f"<li>{escape(item)}</li>" for item in snapshot.history)
+    gates = "".join(f"<li>{escape(item)}</li>" for item in snapshot.gates)
+    previous_gates = "".join(f"<li>{escape(item)}</li>" for item in snapshot.previous_gates)
     return (
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -111,5 +113,7 @@ def render_status(snapshot: StatusSnapshot) -> str:
         "a{display:inline-block;color:#8edaff;margin:1rem 1rem 0 0}li{margin:.5rem 0}"
         "</style><main><h1>AI Factory Lab</h1>"
         f"<strong>{escape(snapshot.phase)}</strong><dl>{details}</dl>{links}"
+        f"<h2>Quality gates</h2><ul>{gates}</ul>"
+        f"<h2>Previous gate results</h2><ul>{previous_gates}</ul>"
         f"<h2>Recent transitions</h2><ol>{history}</ol></main></html>"
     )

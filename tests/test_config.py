@@ -270,6 +270,35 @@ def test_quality_gate_redacted_view_omits_argv() -> None:
     assert "-x" not in repr(rendered)
 
 
+def test_task_quality_gates_are_operator_configured_and_redacted() -> None:
+    config = FactoryConfig.from_env(
+        {
+            "FACTORY_TASK_QUALITY_GATES": (
+                '{"example/control#58": [{"name": "acceptance", "argv": ["python3", "verify.py"]}]}'
+            )
+        }
+    )
+    assert config.quality_gates == ()
+    assert config.task_quality_gates["example/control#58"][0].argv == (
+        "python3",
+        "verify.py",
+    )
+    assert "verify.py" not in repr(config.redacted())
+
+
+def test_duplicate_gate_names_are_rejected() -> None:
+    from factory.infrastructure.config import InvalidGateSpecError
+
+    with pytest.raises(InvalidGateSpecError):
+        FactoryConfig.from_env(
+            {
+                "FACTORY_QUALITY_GATES": (
+                    '[{"name":"tests","argv":["pytest"]},{"name":"tests","argv":["true"]}]'
+                )
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "raw",
     [

@@ -140,7 +140,7 @@ class DispatchService:
         instruction = replace(
             claimed,
             body=(
-                f"Human QA feedback for this rework:\n{feedback}\n\n"
+                f"QA feedback for this rework:\n{feedback}\n\n"
                 f"Original task (first 3000 characters):\n{claimed.body[:3000]}"
             ),
         )

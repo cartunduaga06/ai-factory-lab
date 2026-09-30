@@ -242,6 +242,7 @@ class FactoryConfig:
     # Declarative gate definitions supplied by the application layer. The factory
     # never invents a gate a repository did not define.
     quality_gates: tuple[QualityGateSpec, ...] = ()
+    task_quality_gates: Mapping[str, tuple[QualityGateSpec, ...]] = field(default_factory=dict)
     codex_ecc_skill: str | None = None
     # Separate WRITE credential for Phase 5 publication (push + PR). Distinct from
     # the read-only intake token: the factory must not implicitly reuse a
@@ -305,6 +306,14 @@ class FactoryConfig:
             environment = Environment(raw_env)
         except ValueError:
             environment = Environment.DEVELOPMENT
+        quality_gates = parse_gate_specs(source.get("FACTORY_QUALITY_GATES"))
+        task_quality_gates = parse_task_gate_specs(source.get("FACTORY_TASK_QUALITY_GATES"))
+        common_names = {spec.name for spec in quality_gates}
+        if any(
+            common_names.intersection(spec.name for spec in specs)
+            for specs in task_quality_gates.values()
+        ):
+            raise InvalidGateSpecError("task quality gate duplicates a repository gate")
         return cls(
             environment=environment,
             github=GitHubConfig.from_env(source),
@@ -324,7 +333,8 @@ class FactoryConfig:
             logging=LoggingConfig.from_env(source),
             source_checkout=_clean(source.get("FACTORY_SOURCE_CHECKOUT")),
             workspace_base_ref=_clean(source.get("FACTORY_WORKSPACE_BASE_REF")),
-            quality_gates=parse_gate_specs(source.get("FACTORY_QUALITY_GATES")),
+            quality_gates=quality_gates,
+            task_quality_gates=task_quality_gates,
             codex_ecc_skill=ecc_skill,
             github_write_token=_clean(source.get("GITHUB_WRITE_TOKEN")),
             github_write_username=write_username,
@@ -397,6 +407,10 @@ class FactoryConfig:
             "quality_gates": [
                 {"name": spec.name, "required": spec.required} for spec in self.quality_gates
             ],
+            "task_quality_gates": {
+                ref: [{"name": spec.name, "required": spec.required} for spec in specs]
+                for ref, specs in self.task_quality_gates.items()
+            },
             "codex_ecc_skill": self.codex_ecc_skill,
             "github_write_token": "***" if self.github_write_token else None,
             "github_write_username": self.github_write_username,
@@ -440,7 +454,12 @@ def parse_gate_specs(raw: str | None) -> tuple[QualityGateSpec, ...]:
         raise InvalidGateSpecError("FACTORY_QUALITY_GATES must be valid JSON") from None
     if not isinstance(decoded, list):
         raise InvalidGateSpecError("FACTORY_QUALITY_GATES must be a JSON array")
+    return _parse_gate_items(decoded)
+
+
+def _parse_gate_items(decoded: list[object]) -> tuple[QualityGateSpec, ...]:
     specs: list[QualityGateSpec] = []
+    seen: set[str] = set()
     for index, item in enumerate(decoded):
         if not isinstance(item, dict):
             raise InvalidGateSpecError(f"quality gate #{index} must be a JSON object")
@@ -453,8 +472,30 @@ def parse_gate_specs(raw: str | None) -> tuple[QualityGateSpec, ...]:
             raise InvalidGateSpecError(f"quality gate {name!r} needs a non-empty argv list")
         if not isinstance(required, bool):
             raise InvalidGateSpecError(f"quality gate {name!r} 'required' must be a boolean")
+        if name in seen:
+            raise InvalidGateSpecError(f"quality gate {name!r} is duplicated")
+        seen.add(name)
         specs.append(QualityGateSpec(name=name, argv=tuple(argv), required=required))
     return tuple(specs)
+
+
+def parse_task_gate_specs(raw: str | None) -> dict[str, tuple[QualityGateSpec, ...]]:
+    """Parse operator-owned, issue-specific gates keyed by source reference."""
+    cleaned = _clean(raw)
+    if cleaned is None:
+        return {}
+    try:
+        decoded = json.loads(cleaned)
+    except json.JSONDecodeError:
+        raise InvalidGateSpecError("FACTORY_TASK_QUALITY_GATES must be valid JSON") from None
+    if not isinstance(decoded, dict):
+        raise InvalidGateSpecError("FACTORY_TASK_QUALITY_GATES must be a JSON object")
+    parsed: dict[str, tuple[QualityGateSpec, ...]] = {}
+    for ref, items in decoded.items():
+        if not isinstance(ref, str) or not isinstance(items, list):
+            raise InvalidGateSpecError("FACTORY_TASK_QUALITY_GATES entries must be gate arrays")
+        parsed[ref] = _parse_gate_items(items)
+    return parsed
 
 
 __all__ = [
@@ -478,4 +519,5 @@ __all__ = [
     "LoggingConfig",
     "UnsupportedDatabaseError",
     "parse_gate_specs",
+    "parse_task_gate_specs",
 ]
