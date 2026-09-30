@@ -264,11 +264,14 @@ class FactoryTask:
     blocked_reason: str | None = None
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
+    project_id: str = "ai-factory-lab"
 
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("task title must not be empty")
         _validate_slug(self.target_repository)
+        if not self.project_id:
+            raise ValueError("task project id is required")
 
     @property
     def external_ref(self) -> str | None:
@@ -305,6 +308,7 @@ class AgentRun:
     #: the gates ran). Publication requires it to be present and to still match.
     validated_revision: str | None = None
     context_pack: ContextPack | None = None
+    project_id: str = "ai-factory-lab"
 
     @property
     def is_terminal(self) -> bool:

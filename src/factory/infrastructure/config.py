@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from factory.domain.models import QualityGateSpec
+from factory.domain.projects import ProjectProfile, ProjectRegistry
 
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 DEFAULT_GITHUB_GIT_HOST = "github.com"
@@ -274,6 +275,7 @@ class FactoryConfig:
     # command local to the OpenHands container, not a factory process argument.
     openhands_shared_workspace_hook_command: str | None = None
     operational_scratch_root: str | None = None
+    project_registry: ProjectRegistry | None = None
 
     @property
     def database(self) -> DatabaseConfig:
@@ -309,6 +311,8 @@ class FactoryConfig:
         except ValueError:
             environment = Environment.DEVELOPMENT
         quality_gates = parse_gate_specs(source.get("FACTORY_QUALITY_GATES"))
+        raw_projects = _clean(source.get("FACTORY_PROJECTS"))
+        project_registry = _parse_projects(raw_projects) if raw_projects else None
         task_quality_gates = parse_task_gate_specs(source.get("FACTORY_TASK_QUALITY_GATES"))
         common_names = {spec.name for spec in quality_gates}
         if any(
@@ -336,6 +340,7 @@ class FactoryConfig:
             source_checkout=_clean(source.get("FACTORY_SOURCE_CHECKOUT")),
             workspace_base_ref=_clean(source.get("FACTORY_WORKSPACE_BASE_REF")),
             quality_gates=quality_gates,
+            project_registry=project_registry,
             task_quality_gates=task_quality_gates,
             codex_ecc_skill=ecc_skill,
             github_write_token=_clean(source.get("GITHUB_WRITE_TOKEN")),
@@ -411,6 +416,21 @@ class FactoryConfig:
             "quality_gates": [
                 {"name": spec.name, "required": spec.required} for spec in self.quality_gates
             ],
+            "projects": [
+                {
+                    "project_id": p.project_id,
+                    "repository": p.repository_slug,
+                    "source_checkout": p.source_checkout,
+                    "base_ref": p.base_ref,
+                    "context_profile": p.context_profile,
+                    "deploy_policy": p.deploy_policy,
+                    "git_host": p.git_host,
+                    "gates": [g.name for g in p.gates],
+                }
+                for p in self.project_registry.profiles
+            ]
+            if self.project_registry
+            else [],
             "task_quality_gates": {
                 ref: [{"name": spec.name, "required": spec.required} for spec in specs]
                 for ref, specs in self.task_quality_gates.items()
@@ -461,6 +481,33 @@ def parse_gate_specs(raw: str | None) -> tuple[QualityGateSpec, ...]:
     if not isinstance(decoded, list):
         raise InvalidGateSpecError("FACTORY_QUALITY_GATES must be a JSON array")
     return _parse_gate_items(decoded)
+
+
+def _parse_projects(raw: str) -> ProjectRegistry:
+    """Parse operator owned project profiles; provider content never reaches this path."""
+    try:
+        decoded = json.loads(raw)
+        if not isinstance(decoded, list):
+            raise ValueError
+        profiles: list[ProjectProfile] = []
+        for item in decoded:
+            if not isinstance(item, dict) or not isinstance(item.get("gates"), list):
+                raise ValueError
+            profiles.append(
+                ProjectProfile(
+                    project_id=item["project_id"],
+                    repository_slug=item["repository"],
+                    source_checkout=item["source_checkout"],
+                    base_ref=item["base_ref"],
+                    gates=_parse_gate_items(item["gates"]),
+                    context_profile=item.get("context_profile", "repository"),
+                    deploy_policy=item.get("deploy_policy", "human-only"),
+                    git_host=item.get("git_host", "github.com"),
+                )
+            )
+        return ProjectRegistry(tuple(profiles))
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("FACTORY_PROJECTS contains an invalid project profile") from None
 
 
 def _parse_gate_items(decoded: list[object]) -> tuple[QualityGateSpec, ...]:

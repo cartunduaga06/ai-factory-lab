@@ -17,15 +17,20 @@ class SqliteBacklogLinkRepository(SqliteRepository, BacklogLinkRepository):
         with self._connect() as conn:
             cursor = conn.execute(
                 f"INSERT OR IGNORE INTO {BACKLOG_LINKS_TABLE} "
-                "(provider, external_id, repository_slug, state) VALUES (?, ?, ?, 'RESERVED')",
-                (item.provider, item.external_id, item.target_repository),
+                "(provider, external_id, repository_slug, project_id, state) "
+                "VALUES (?, ?, ?, ?, 'RESERVED')",
+                (item.provider, item.external_id, item.target_repository, item.project_id),
             )
             row = conn.execute(
-                f"SELECT repository_slug FROM {BACKLOG_LINKS_TABLE} "
+                f"SELECT repository_slug, project_id FROM {BACKLOG_LINKS_TABLE} "
                 "WHERE provider = ? AND external_id = ?",
                 (item.provider, item.external_id),
             ).fetchone()
-            if row is None or row["repository_slug"] != item.target_repository:
+            if (
+                row is None
+                or row["repository_slug"] != item.target_repository
+                or row["project_id"] != item.project_id
+            ):
                 raise ValueError("backlog link repository identity changed")
             return cursor.rowcount == 1
 
@@ -34,8 +39,9 @@ class SqliteBacklogLinkRepository(SqliteRepository, BacklogLinkRepository):
             cursor = conn.execute(
                 f"UPDATE {BACKLOG_LINKS_TABLE} SET state = 'POSTING' "
                 "WHERE provider = ? AND external_id = ? AND repository_slug = ? "
+                "AND project_id = ? "
                 "AND state = 'RESERVED'",
-                (item.provider, item.external_id, item.target_repository),
+                (item.provider, item.external_id, item.target_repository, item.project_id),
             )
             return cursor.rowcount == 1
 
@@ -58,6 +64,7 @@ class SqliteBacklogLinkRepository(SqliteRepository, BacklogLinkRepository):
                     f"UPDATE {BACKLOG_LINKS_TABLE} "
                     "SET state = 'MATERIALIZED', issue_number = ?, issue_url = ? "
                     "WHERE provider = ? AND external_id = ? AND repository_slug = ? "
+                    "AND project_id = ? "
                     "AND state != 'MATERIALIZED'",
                     (
                         issue.number,
@@ -65,11 +72,13 @@ class SqliteBacklogLinkRepository(SqliteRepository, BacklogLinkRepository):
                         item.provider,
                         item.external_id,
                         item.target_repository,
+                        item.project_id,
                     ),
                 )
                 if cursor.rowcount == 0:
                     row = conn.execute(
-                        f"SELECT issue_number, issue_url FROM {BACKLOG_LINKS_TABLE} "
+                        f"SELECT issue_number, issue_url, repository_slug, project_id "
+                        f"FROM {BACKLOG_LINKS_TABLE} "
                         "WHERE provider = ? AND external_id = ?",
                         (item.provider, item.external_id),
                     ).fetchone()
@@ -77,7 +86,19 @@ class SqliteBacklogLinkRepository(SqliteRepository, BacklogLinkRepository):
                         row is None
                         or row["issue_number"] != issue.number
                         or row["issue_url"] != issue.url
+                        or row["repository_slug"] != item.target_repository
+                        or row["project_id"] != item.project_id
                     ):
                         raise ValueError("conflicting backlog issue link")
         except sqlite3.IntegrityError:
             raise ValueError("issue is linked to another work item") from None
+
+    def record_rejection(self, item: WorkItem, reason: str) -> None:
+        if reason != "PROJECT_ROUTING_REJECTED":
+            raise ValueError("invalid routing rejection reason")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO routing_rejections "
+                "(provider, external_id, project_id, reason) VALUES (?, ?, ?, ?)",
+                (item.provider, item.external_id, item.project_id[:64], reason),
+            )

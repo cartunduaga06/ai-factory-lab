@@ -235,6 +235,7 @@ class DispatchService:
 
         run = AgentRun(
             task_id=task.task_id,
+            project_id=task.project_id,
             adapter=adapter.kind,
             run_id=produced.run_id,
             status=produced.status,
@@ -271,6 +272,7 @@ class DispatchService:
         """Persist a terminal FAILED run so a failed attempt stays auditable."""
         failed = AgentRun(
             task_id=task.task_id,
+            project_id=task.project_id,
             adapter=kind,
             status=RunStatus.FAILED,
             workspace=workspace,

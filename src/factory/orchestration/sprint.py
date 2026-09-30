@@ -13,6 +13,7 @@ from factory.domain.ports import (
     SprintRepository,
     TaskRepository,
 )
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 from factory.domain.sprint import SprintManifest, SprintState, SprintStep
 from factory.orchestration.backlog import BacklogMaterializationService
 
@@ -99,12 +100,14 @@ class SprintService:
         links: BacklogLinkRepository,
         tasks: TaskRepository,
         sprints: SprintRepository,
+        registry: ProjectRegistry | None = None,
     ) -> None:
         self._source = source
         self._materializer = materializer
         self._links = links
         self._tasks = tasks
         self._sprints = sprints
+        self._registry = registry
         self._dependencies = DependencyResolver(links, tasks)
 
     def draft(
@@ -143,8 +146,16 @@ class SprintService:
             key = f"{step.item.provider}:{step.item.external_id}"
             if key in seen:
                 blockers.append("duplicate_work_item")
-            if (step.item.provider, step.item.target_repository) != scope:
+            if (
+                self._registry is None
+                and (step.item.provider, step.item.target_repository) != scope
+            ):
                 blockers.append("outside_scope")
+            if self._registry is not None:
+                try:
+                    self._registry.resolve(step.item.project_id, step.item.target_repository)
+                except ProjectRoutingError:
+                    blockers.append("project_routing_rejected")
             if any(dependency not in seen for dependency in step.dependencies):
                 blockers.append("dependency_not_preceding")
             seen.add(key)
@@ -171,6 +182,9 @@ class SprintService:
             self._sprints.authorize(manifest)
             return
         rows = self.plan(manifest)
+        for step, row in zip(manifest.steps, rows, strict=True):
+            if "project_routing_rejected" in row.blockers:
+                self._links.record_rejection(step.item, "PROJECT_ROUTING_REJECTED")
         if any(
             blocker != "ordered_predecessor_waiting" for row in rows for blocker in row.blockers
         ):

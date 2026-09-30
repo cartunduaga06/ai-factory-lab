@@ -30,6 +30,7 @@ from factory import __version__
 from factory.domain.enums import RepositoryRole
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
 from factory.domain.models import AgentAdapter, Repository
+from factory.domain.ports import IssueSource
 from factory.infrastructure.config import AgentEngine, FactoryConfig, UnsupportedDatabaseError
 from factory.infrastructure.logging import configure_logging
 from factory.infrastructure.persistence import (
@@ -53,6 +54,7 @@ from factory.integrations.github import (
 )
 from factory.integrations.github.backlog_issues import GitHubBacklogIssueSink
 from factory.integrations.github.pr_state import GitHubPullRequestStateSource
+from factory.integrations.github.project_issues import ProjectIssueSource
 from factory.integrations.openhands import (
     OpenHandsAdapter,
     OpenHandsClient,
@@ -60,6 +62,11 @@ from factory.integrations.openhands import (
     WorkspacePathMapper,
 )
 from factory.integrations.operational import ScratchAcceptance, ScratchWorkspaceProvisioner
+from factory.integrations.project_routing import (
+    ProjectContextSource,
+    ProjectSkillSource,
+    ProjectWorkspaceProvisioner,
+)
 from factory.integrations.status_http import serve_status
 from factory.integrations.trello.backlog import TrelloBacklogSource
 from factory.integrations.trello.status import TrelloStatusChannel
@@ -231,9 +238,14 @@ def _run_intake(config: FactoryConfig) -> int:
 
     assert config.github.token is not None  # guaranteed by _resolve_repository
     client = GitHubClient(token=config.github.token, api_url=config.github.api_url)
-    source = GitHubIssueSource(
+    raw_source = GitHubIssueSource(
         client,
-        target_repository=config.github.target_repo,
+        target_repository=None if config.project_registry else config.github.target_repo,
+    )
+    source: IssueSource = (
+        ProjectIssueSource(raw_source, config.project_registry)
+        if config.project_registry
+        else raw_source
     )
     service = IssueIntakeService(source=source, repository=task_repository)
 
@@ -275,9 +287,11 @@ def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | Non
             list_id,
             label_id,
             config.github.control_plane_repo,
+            registry=config.project_registry,
         ),
         GitHubBacklogIssueSink(GitHubWriteClient(config.github_write_token, config.github.api_url)),
         links,
+        registry=config.project_registry,
     )
 
 
@@ -304,6 +318,7 @@ def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintS
         config.trello_backlog_list_id,
         config.trello_ready_label_id,
         config.github.control_plane_repo,
+        registry=config.project_registry,
     )
     sprints = SqliteSprintRepository(config.database.path)
     links = SqliteBacklogLinkRepository(config.database.path)
@@ -312,8 +327,11 @@ def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintS
         wrapped,
         GitHubBacklogIssueSink(GitHubWriteClient(config.github_write_token, config.github.api_url)),
         links,
+        registry=config.project_registry,
     )
-    return SprintService(source, materializer, links, tasks, sprints)
+    return SprintService(
+        source, materializer, links, tasks, sprints, registry=config.project_registry
+    )
 
 
 def _run_backlog(config: FactoryConfig, card_id: str | None) -> int:
@@ -501,7 +519,7 @@ def _recover_terminal_timeout(
         token = config.github.token
         write_token = config.github_write_token
         source_checkout = config.source_checkout
-        if not token or not write_token or not source_checkout:
+        if not token or not write_token or (not source_checkout and not config.project_registry):
             raise ConfigurationError(
                 "GitHub read/write credentials and source checkout are required"
             )
@@ -511,9 +529,14 @@ def _recover_terminal_timeout(
         tasks.initialize()
         runs.initialize()
         prs.initialize()
-        source = GitHubIssueSource(
+        raw_source = GitHubIssueSource(
             GitHubClient(token=token, api_url=config.github.api_url),
-            target_repository=config.github.target_repo,
+            target_repository=None if config.project_registry else config.github.target_repo,
+        )
+        source: IssueSource = (
+            ProjectIssueSource(raw_source, config.project_registry)
+            if config.project_registry
+            else raw_source
         )
         intake = IssueIntakeService(source=source, repository=tasks)
         service = TerminalRecoveryService(
@@ -521,9 +544,16 @@ def _recover_terminal_timeout(
             runs,
             prs,
             GitHubPullRequestSink(GitHubWriteClient(write_token, config.github.api_url)),
-            GitWorktreeWorkspaceProvisioner(source_checkout, base_ref=config.workspace_base_ref),
+            (
+                ProjectWorkspaceProvisioner(config.project_registry)
+                if config.project_registry
+                else GitWorktreeWorkspaceProvisioner(
+                    source_checkout or "", base_ref=config.workspace_base_ref
+                )
+            ),
             workspace_root=config.workspace_root,
             base_branch=config.target_default_branch,
+            registry=config.project_registry,
             source_is_eligible=lambda task: (
                 task.source is not None
                 and intake.is_eligible(
@@ -695,9 +725,17 @@ def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
 def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     """Validate the run prerequisites and build the production runtime graph."""
     repository = _resolve_repository(config)
-    if config.github.target_repo is None and config.operational_scratch_root is None:
+    if (
+        config.github.target_repo is None
+        and config.project_registry is None
+        and config.operational_scratch_root is None
+    ):
         raise ConfigurationError("FACTORY_TARGET_REPO is required for run")
-    if config.source_checkout is None and config.operational_scratch_root is None:
+    if (
+        config.source_checkout is None
+        and config.project_registry is None
+        and config.operational_scratch_root is None
+    ):
         raise ConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
     if config.github_write_token is None and config.operational_scratch_root is None:
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
@@ -713,8 +751,16 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     sprint = _build_sprint(config, tasks)
 
     read_client = GitHubClient(token=config.github.token or "", api_url=config.github.api_url)
+    issue_source = GitHubIssueSource(
+        read_client,
+        target_repository=(None if config.project_registry else config.github.target_repo),
+    )
     intake = IssueIntakeService(
-        source=GitHubIssueSource(read_client, target_repository=config.github.target_repo),
+        source=(
+            ProjectIssueSource(issue_source, config.project_registry)
+            if config.project_registry
+            else issue_source
+        ),
         repository=tasks,
     )
     adapter = _build_agent_adapter(config)
@@ -732,15 +778,28 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         adapter=adapter,
         context_builder=ContextPackBuilder(
             (
-                RepositoryContextSource(config.source_checkout or ""),
-                ApprovedSkillSource(config.codex_ecc_skill),
+                (
+                    ProjectContextSource(config.project_registry)
+                    if config.project_registry
+                    else RepositoryContextSource(config.source_checkout or "")
+                ),
+                (
+                    ProjectSkillSource(config.project_registry, config.codex_ecc_skill)
+                    if config.project_registry
+                    else ApprovedSkillSource(config.codex_ecc_skill)
+                ),
             )
         ),
-        provisioner=GitWorktreeWorkspaceProvisioner(
-            config.source_checkout or "", base_ref=config.workspace_base_ref
+        provisioner=(
+            ProjectWorkspaceProvisioner(config.project_registry)
+            if config.project_registry
+            else GitWorktreeWorkspaceProvisioner(
+                config.source_checkout or "", base_ref=config.workspace_base_ref
+            )
         ),
         workspace_root=config.workspace_root,
         gate_specs=config.quality_gates,
+        registry=config.project_registry,
         task_gate_specs=config.task_quality_gates,
         gate_runner=LocalQualityGateRunner(),
         revision_inspector=GitWorkspaceRevisionInspector(),
@@ -761,8 +820,10 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
             else None
         ),
         code_capable=(
-            config.github.target_repo is not None
-            and config.source_checkout is not None
+            (
+                config.project_registry is not None
+                or (config.github.target_repo is not None and config.source_checkout is not None)
+            )
             and config.github_write_token is not None
         ),
         poll_interval=config.run_poll_interval,
