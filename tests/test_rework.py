@@ -178,3 +178,74 @@ def test_feedback_rejects_secrets_and_controls() -> None:
         with pytest.raises(ReworkNotAllowedError):
             sanitize_feedback(raw)
     assert sanitize_feedback("  fix formatting\n  ") == "fix formatting"
+
+
+@pytest.mark.parametrize(
+    ("provider_state", "expected"),
+    [
+        (PullRequestState.MERGED, TaskStatus.DONE),
+        (PullRequestState.CLOSED, TaskStatus.CANCELLED),
+    ],
+)
+def test_rework_validating_reconciles_provider_closed_pr(
+    tmp_path: Path, provider_state: PullRequestState, expected: TaskStatus
+) -> None:
+    """A PR merged/closed while rework validates must not be republished."""
+    db = str(tmp_path / "factory.db")
+    tasks = SqliteTaskRepository(db)
+    runs = SqliteRunRepository(db)
+    prs = SqlitePullRequestRepository(db)
+    tasks.initialize()
+    runs.initialize()
+    prs.initialize()
+    task = FactoryTask(
+        title="QA merge race",
+        body="Implementation request",
+        target_repository="example/target",
+        source=TaskSource("github", "example/control", 58),
+    )
+    adapter = CapturingCodex()
+    sink = FakePullRequestSink()
+    publisher = FakeWorkspacePublisher()
+    state = OpenState()
+    runtime = FactoryRuntime(
+        intake=IssueIntakeService(FakeIssueSource(task), tasks),
+        intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
+        tasks=tasks,
+        runs=runs,
+        adapter=adapter,
+        provisioner=FakeWorkspaceProvisioner(),
+        workspace_root=str(tmp_path / "workspaces"),
+        gate_specs=specs("tests"),
+        gate_runner=FakeQualityGateRunner(),
+        revision_inspector=FakeRevisionInspector(),
+        publisher=publisher,
+        pull_request_sink=sink,
+        pull_requests=prs,
+        pull_request_state=state,
+        base_branch="main",
+        poll_interval=0,
+        timeout=1,
+    )
+    first = runtime.run_once()
+    assert first.task_status is TaskStatus.WAITING_HUMAN
+    assert first.task_id is not None
+    ReworkService(tasks, runs, prs, state).request(first.task_id, "Please revise")
+    assert tasks.get(first.task_id).status is TaskStatus.CHANGES_REQUESTED  # type: ignore[union-attr]
+
+    # Simulate run 2 completing validation without entering publication yet.
+    runtime._reconcile_human_reviews = lambda: None  # type: ignore[method-assign]
+    second = runtime.run_once()
+    assert second.task_status is TaskStatus.WAITING_HUMAN
+    # Put the task back into the exact race window observed in production.
+    tasks.get(first.task_id).status = TaskStatus.VALIDATING  # type: ignore[union-attr]
+    tasks.update(tasks.get(first.task_id))  # type: ignore[arg-type]
+    runtime._reconcile_human_reviews = FactoryRuntime._reconcile_human_reviews.__get__(runtime)
+    state.value = provider_state
+
+    before_publish = publisher.calls
+    result = runtime.run_once()
+
+    assert tasks.get(first.task_id).status is expected  # type: ignore[union-attr]
+    assert result.outcome == "NO_ELIGIBLE_TASK"
+    assert publisher.calls == before_publish

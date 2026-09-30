@@ -270,7 +270,11 @@ class FactoryRuntime:
         """Apply only provider-confirmed outcomes to durable human-review tasks."""
         if self._pull_request_state is None:
             return
-        for task in self._tasks.list(TaskStatus.WAITING_HUMAN):
+        review_tasks = [
+            *self._tasks.list(TaskStatus.WAITING_HUMAN),
+            *self._tasks.list(TaskStatus.VALIDATING),
+        ]
+        for task in review_tasks:
             if task.kind is not TaskKind.CODE:
                 continue
             run = self._latest_run(task.task_id)
