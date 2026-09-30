@@ -29,6 +29,11 @@ from tests.fake_publish import FakePullRequestSink
 from tests.fake_workspace import FakeWorkspaceProvisioner
 
 
+class _AllowingSprint:
+    def allows_review(self, task: FactoryTask) -> bool:
+        return True
+
+
 @pytest.fixture
 def timeout_case(tmp_path: Path):
     root = tmp_path / "workspaces"
@@ -88,6 +93,7 @@ def timeout_case(tmp_path: Path):
         workspace_root=str(root),
         base_branch="main",
         source_is_eligible=lambda _: availability[0],
+        sprint=_AllowingSprint(),  # type: ignore[arg-type]
     )
     return service, task, run, root, tasks, runs, prs, sink, availability
 
@@ -267,6 +273,7 @@ def test_cli_recover_timeout_is_explicit_and_does_not_dispatch(
     }
     config = FactoryConfig.from_env(env)
     monkeypatch.setattr(cli.FactoryConfig, "from_env", lambda: config)
+    monkeypatch.setattr(cli, "_build_sprint", lambda *a, **kw: _AllowingSprint())
     monkeypatch.setattr(cli, "GitHubIssueSource", lambda *a, **kw: FakeIssueSource(task))
     monkeypatch.setattr(cli, "GitHubPullRequestSink", lambda *a, **kw: FakePullRequestSink())
     monkeypatch.setattr(
@@ -284,3 +291,12 @@ def test_cli_recover_timeout_is_explicit_and_does_not_dispatch(
     assert len(runs.list_runs(task.task_id)) == 1
     assert cli.main([*argv, "--acknowledge-timeout"]) == cli.EXIT_INTAKE_ERROR
     assert len(tasks.history(task.task_id)) == 1
+
+
+def test_terminal_recovery_without_authorized_sprint_is_refused(timeout_case) -> None:
+    service, task, run, _, tasks, _, _, _, _ = timeout_case
+    service._sprint = None
+    with pytest.raises(TerminalRecoveryRefused, match="authorized Sprint"):
+        service.authorize(task.task_id, run.run_id, acknowledge_timeout=True)
+    assert tasks.get(task.task_id).status is TaskStatus.FAILED
+    assert tasks.history(task.task_id) == []

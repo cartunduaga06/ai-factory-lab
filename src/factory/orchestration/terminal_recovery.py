@@ -121,8 +121,8 @@ class TerminalRecoveryService:
             raise TerminalRecoveryRefused("trusted worker deadline evidence is missing")
         if self._runs.find_active_run(task_id) is not None:
             raise TerminalRecoveryRefused("task has an active run")
-        if self._sprint is not None and not self._sprint.allows_review(task):
-            raise TerminalRecoveryRefused("task is outside current authorized Sprint")
+        if self._sprint is None or not self._sprint.allows_review(task):
+            raise TerminalRecoveryRefused("an authorized Sprint is required for recovery")
         if task.source is None or not self._eligible(task):
             raise TerminalRecoveryRefused("source Issue is not currently eligible")
         if self._prs.find_by_branch(task.target_repository, workspace.branch) is not None:

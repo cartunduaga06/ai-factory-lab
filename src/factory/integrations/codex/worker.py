@@ -79,6 +79,7 @@ def run(
             stderr_bytes = stderr_path.stat().st_size
         if (
             status != "CANCELLED"
+            and not timed_out
             and (kind == "CODE" or not output_exceeded)
             and process.returncode == 0
             and _valid_result(message)
