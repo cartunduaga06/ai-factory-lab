@@ -31,6 +31,7 @@ from factory.infrastructure.persistence import (
 from factory.integrations.github.client import GitHubRequestError
 from factory.integrations.openhands import WorkspacePathError, WorkspacePathMapper
 from factory.orchestration.intake import IssueIntakeService
+from factory.orchestration.recovery import RecoveryPolicy
 from factory.orchestration.retry import RetryService
 from factory.orchestration.runtime import FactoryRuntime
 from tests.fake_adapter import FakeAgentAdapter
@@ -123,6 +124,7 @@ def runtime_parts(tmp_path: Path):
         base_branch="main",
         poll_interval=0,
         timeout=1,
+        recovery_policy=RecoveryPolicy(base_backoff_seconds=0),
     )
     return runtime, tasks, runs, adapter, publisher, sink, gate_runner
 
@@ -139,6 +141,28 @@ def test_run_happy_path_reaches_waiting_human(runtime_parts) -> None:
     assert len(adapter.dispatched) == 1
     assert publisher.calls == 1
     assert sink.create_calls == 1
+
+
+def test_ready_task_with_durable_active_run_never_dispatches_again(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, _, _, _ = runtime_parts
+    task = tasks.save(
+        FactoryTask(
+            "Interrupted",
+            "example/target",
+            source=TaskSource("github", "example/control", 8),
+            status=TaskStatus.READY,
+        )
+    )
+    run = runs.save_run(
+        AgentRun(task_id=task.task_id, adapter=AgentKind.OTHER, status=RunStatus.PENDING)
+    )
+
+    result = runtime.run_once()
+
+    assert result.outcome == "ACTIVE_RUN_STATE_MISMATCH"
+    assert result.run_id == run.run_id
+    assert len(runs.list_runs(task.task_id)) == 1
+    assert adapter.dispatched == []
 
 
 @pytest.mark.parametrize(
@@ -477,6 +501,44 @@ def test_failed_required_gate_does_not_publish(runtime_parts) -> None:
     assert runs.list_runs(result.task_id)[-1].workspace == failed.workspace
     assert len(adapter.dispatched) == 2
     assert publisher.calls == sink.create_calls == 1
+
+
+def test_quality_correction_limit_stops_new_runs(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, gate_runner = runtime_parts
+    runtime._recovery_policy = RecoveryPolicy(correction_limit=1, base_backoff_seconds=0)
+    gate_runner._statuses["tests"] = QualityGateStatus.FAILED  # type: ignore[attr-defined]
+
+    first = runtime.run_once()
+    second = runtime.run_once()
+    third = runtime.run_once()
+
+    assert first.task_status is TaskStatus.READY
+    assert second.task_status is TaskStatus.BLOCKED
+    assert third.outcome == "NO_ELIGIBLE_TASK"
+    assert len(runs.list_runs(first.task_id)) == 2
+    assert len(adapter.dispatched) == 2
+    assert tasks.get(first.task_id).blocked_reason == "quality correction limit reached"
+    assert publisher.calls == sink.create_calls == 0
+
+
+def test_quality_correction_backoff_uses_persisted_finish_time(runtime_parts) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    runtime, _, runs, adapter, _, _, gate_runner = runtime_parts
+    runtime._recovery_policy = RecoveryPolicy(base_backoff_seconds=60)
+    gate_runner._statuses["tests"] = QualityGateStatus.FAILED  # type: ignore[attr-defined]
+    first = runtime.run_once()
+
+    assert runtime.run_once().outcome == "BACKOFF_PENDING"
+    assert len(runs.list_runs(first.task_id)) == 1
+    old = runs.get_run(first.run_id)
+    assert old is not None
+    old.finished_at = datetime.now(UTC) - timedelta(seconds=61)
+    runs.update_run(old)
+    gate_runner._statuses["tests"] = QualityGateStatus.PASSED  # type: ignore[attr-defined]
+
+    assert runtime.run_once().outcome == "WAITING_HUMAN"
+    assert len(adapter.dispatched) == 2
 
 
 def test_failed_qa_correction_remains_recoverable_on_same_branch(runtime_parts) -> None:

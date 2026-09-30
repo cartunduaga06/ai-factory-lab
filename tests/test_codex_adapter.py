@@ -236,6 +236,7 @@ def test_worker_records_actual_exit_code_even_without_message(
         "exit_code": exit_code,
         "stdout_bytes": 0,
         "stderr_bytes": len("diagnostic\n"),
+        "timed_out": False,
     }
 
 

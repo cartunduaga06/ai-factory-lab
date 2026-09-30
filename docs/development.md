@@ -205,3 +205,57 @@ run, its workspace and all prior history. A `CLAIMED` task with no runs, a lates
 run other than `FAILED`, or any active run is refused without a retry transition.
 Concurrent retries use guarded lifecycle writes and cannot duplicate recovery
 edges or create runs.
+
+The production retry policy reads the failed run history and last attempt time
+from SQLite. It refuses a fourth failed run attempt and delays eligible retries
+by 60 seconds after the first failure and 120 seconds after the second.
+`BACKOFF_PENDING` means the watcher will wait; it has not created a run. A task
+with a successful agent run but failed quality gates enters the existing QA
+correction path on the same checkout. That path allows two correction runs,
+with the same delay, then records `BLOCKED` and a reason if the gates still
+fail. A human `request-changes` cycle continues to use the reviewed PR and
+branch. The worker never merges that PR.
+
+Each `run` or `watch` pass first reconciles persisted tasks against their latest
+run. It repairs a missing terminal lifecycle transition through the normal
+tracking service. A `CLAIMED` task with no run stays claimed and is reported as
+unresolved: the operator must verify that no external agent was started before
+choosing a recovery action. The durable claim prevents another task from
+starting in the meantime. An active run that cannot be collected stays active;
+the worker observes that same run on a later pass.
+
+### Operator-evidenced terminal Codex timeout recovery
+
+A CODE task recorded FAILED remains terminal for ordinary scheduling and
+`factory retry`. After inspecting the actual Codex attempt, an operator may
+explicitly authorize **one** exceptional timeout recovery:
+
+```sh
+python -m factory recover-timeout --task-id TASK_UUID --run-id FAILED_RUN_UUID --acknowledge-timeout
+python -m factory retry --task-id TASK_UUID
+python -m factory sprint resume --sprint-id APPROVED_SPRINT_ID
+```
+
+The operator must independently confirm that the worker was killed at the
+configured timeout; `exit_code=-9` alone could also be an external SIGKILL.
+The exceptional command requires the exact latest FAILED CODEX run, its trusted
+worker result (`status=FAILED`, `exit_code=-9`), the existing isolated checkout
+and canonical Factory branch, an eligible source Issue, authorization in the
+current Sprint when enabled, no active run, no recorded local PR, and no open
+provider PR on that branch. Provider failures are fail-closed. The number of
+failed runs must remain below the bounded recovery policy limit.
+
+Success records a special guarded, atomic FAILED -> BLOCKED transition and a
+normal append-only E1 audit fact. This exception is not exposed through the
+ordinary state machine. Nothing is dispatched, erased, merged, deployed or
+automatically resumed. The existing explicit retry and human Sprint resume are
+both still required. The subsequent Codex run **reuses the exact original
+workspace/branch** and has a fresh AgentRun; its predecessor remains FAILED in
+history. Existing QA gates and PR WAITING_HUMAN safeguards still apply.
+
+A branch with an existing PR requires human PR review, not terminal timeout
+recovery. In particular, the manually published E4 PR #68 must be reviewed on
+its own merits; this feature must not alter E4's historical FAILED/PAUSED
+production records merely to make the dashboard appear complete.
+
+Terminal recovery requires the new worker's explicit `timed_out: true` result evidence as well as exit_code -9; SIGKILL alone is not proof of a timeout. Legacy results without that marker are not eligible for automatic operator recovery and require separate human review.

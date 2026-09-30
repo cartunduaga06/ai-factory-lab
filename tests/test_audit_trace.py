@@ -85,7 +85,7 @@ def test_pr_rework_and_completion_share_trace(tmp_path: Path) -> None:
         (TaskStatus.RUNNING, TaskStatus.VALIDATING),
     ):
         tasks.apply_transition(task.task_id, source, target)
-    run = AgentRun(task_id=task.task_id, adapter=AgentKind.CODEX)
+    run = AgentRun(task_id=task.task_id, adapter=AgentKind.CODEX, status=RunStatus.SUCCEEDED)
     runs.save_run(run)
     prs.save(
         PullRequest(

@@ -145,6 +145,36 @@ def test_changed_snapshot_pauses_before_e2_write(tmp_path: Path) -> None:
     assert sink.posts == 0
 
 
+def test_dependency_requires_predecessor_done_even_if_position_was_advanced(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    service, tasks = _service(path, source, sink)
+    manifest = service.draft("sprint-deps", (("a", ()), ("b", ("trello:a",))))
+    service.authorize(manifest)
+    assert service.prepare() is True
+    predecessor = tasks.save(
+        FactoryTask(
+            "predecessor",
+            "example/control",
+            source=TaskSource("github", "example/control", 1),
+            status=TaskStatus.READY,
+        )
+    )
+    # Simulate an interrupted or divergent position update. The dependency
+    # resolver must use the durable task outcome, not the position alone.
+    SqliteSprintRepository(str(path)).move(
+        manifest.sprint_id, SprintState.ACTIVE, 1, "SprintAdvanced"
+    )
+    assert service.prepare() is False
+    assert service.is_paused()
+    assert sink.posts == 1
+    with pytest.raises(ValueError, match="dependencies"):
+        service.resume(manifest.sprint_id)
+    assert tasks.get(predecessor.task_id).status is TaskStatus.READY  # type: ignore[union-attr]
+
+
 def test_dry_run_reports_ineligible_and_repeated_human_pauses_are_traced(tmp_path: Path) -> None:
     path = tmp_path / "factory.db"
     source, sink = Source(), Sink()
