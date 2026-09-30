@@ -24,6 +24,7 @@ class ProjectProfile:
     context_profile: str = "repository"
     deploy_policy: str = "human-only"
     git_host: str = "github.com"
+    deploy_required: bool = False
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", self.project_id):
@@ -40,6 +41,8 @@ class ProjectProfile:
             raise ProjectRoutingError("project checkout must be absolute")
         if self.deploy_policy != "human-only":
             raise ProjectRoutingError("unsupported deploy policy")
+        if not isinstance(self.deploy_required, bool):
+            raise ProjectRoutingError("invalid deploy requirement")
         if not self.gates or not any(gate.required for gate in self.gates):
             raise ProjectRoutingError("project requires at least one quality gate")
         if not re.fullmatch(r"[A-Za-z0-9.-]+", self.git_host):

@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from factory.domain.backlog import WorkItem
 from factory.domain.ports import BacklogSource
 from factory.domain.projects import ProjectRegistry, ProjectRoutingError
+from factory.integrations.trello.feedback import source_description
 
 
 class TrelloBacklogError(RuntimeError):
@@ -95,6 +96,7 @@ class TrelloBacklogSource(BacklogSource):
             or not isinstance(card.get("idList"), str)
         ):
             raise TrelloBacklogError("invalid Trello card fields")
+        body = source_description(body)
         project_id = "ai-factory-lab"
         repository = self._repository
         if self._registry is not None:

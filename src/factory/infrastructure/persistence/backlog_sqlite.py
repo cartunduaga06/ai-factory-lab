@@ -55,6 +55,18 @@ class SqliteBacklogLinkRepository(SqliteRepository, BacklogLinkRepository):
             return None
         return MaterializedIssue(row["repository_slug"], row["issue_number"], row["issue_url"])
 
+    def find_work_item(
+        self, project_id: str, repository: str, number: int
+    ) -> tuple[str, str] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT provider, external_id FROM {BACKLOG_LINKS_TABLE} "
+                "WHERE project_id = ? AND repository_slug = ? AND issue_number = ? "
+                "AND state = 'MATERIALIZED'",
+                (project_id, repository, number),
+            ).fetchone()
+        return (str(row["provider"]), str(row["external_id"])) if row else None
+
     def complete(self, item: WorkItem, issue: MaterializedIssue) -> None:
         if issue.repository_slug != item.target_repository or issue.number <= 0:
             raise ValueError("issue identity does not match backlog reservation")

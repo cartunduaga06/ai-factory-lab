@@ -17,6 +17,7 @@ from enum import StrEnum
 
 from factory.domain.backlog import MaterializedIssue, WorkItem
 from factory.domain.enums import TaskStatus
+from factory.domain.feedback import DeliveryEvidence, FeedbackIdentity
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
@@ -108,6 +109,48 @@ class BacklogLinkRepository(ABC):
     def record_rejection(self, item: WorkItem, reason: str) -> None:
         """Store sanitized evidence of a rejected routing declaration."""
 
+    @abstractmethod
+    def find_work_item(
+        self, project_id: str, repository: str, number: int
+    ) -> tuple[str, str] | None:
+        """Find the unique provider and external id for an exact project Issue."""
+
+
+class DeliveryEvidenceSource(ABC):
+    """Read provider confirmed integration, CI and deployment facts."""
+
+    @abstractmethod
+    def evidence(self, identity: FeedbackIdentity) -> DeliveryEvidence:
+        """Fail closed when any required fact cannot be verified."""
+
+
+class IssueCompletionSink(ABC):
+    """Idempotently remove readiness, record evidence and close one Issue."""
+
+    @abstractmethod
+    def complete(self, identity: FeedbackIdentity) -> None:
+        """Apply only to the exact Issue and PR relationship."""
+
+
+class WorkItemFeedbackSink(ABC):
+    """Project checked Trello projection of an authorized WorkItem."""
+
+    @abstractmethod
+    def sync(self, identity: FeedbackIdentity, phase: str) -> None:
+        """Set one card's lifecycle phase idempotently."""
+
+
+class FeedbackEventRepository(ABC):
+    """Append one final reconciliation fact to the E1 task trace."""
+
+    @abstractmethod
+    def record_completed(self, identity: FeedbackIdentity) -> None:
+        """Record the exact relationship once after external completion succeeds."""
+
+    @abstractmethod
+    def is_completed(self, task_id: str) -> bool:
+        """Return whether final reconciliation was durably recorded."""
+
 
 class SprintRepository(ABC):
     """Durable authorization and position, with orchestration facts in E1."""
@@ -123,6 +166,10 @@ class SprintRepository(ABC):
     @abstractmethod
     def move(self, sprint_id: str, state: SprintState, position: int, event: str) -> None:
         """Atomically update position/state and append one E1 event."""
+
+    @abstractmethod
+    def find_for_work_item(self, project_id: str, provider: str, external_id: str) -> str | None:
+        """Return the immutable Sprint identity that authorized one WorkItem."""
 
 
 class TaskRepository(ABC):
@@ -493,6 +540,10 @@ class PullRequestRepository(ABC):
     @abstractmethod
     def find_by_branch(self, repository_slug: str, head_branch: str) -> PullRequest | None:
         """Return the PR persisted for ``repository_slug`` + ``head_branch``."""
+
+    @abstractmethod
+    def record_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
+        """Bind a reviewed PR to a new validated rework commit on its same branch."""
 
 
 __all__ = [

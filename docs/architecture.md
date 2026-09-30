@@ -1,12 +1,20 @@
 # Architecture
 
+Post-review feedback verifies the project-specific provider merge, integration,
+required CI and optional deployment facts before marking a task DONE. It then
+idempotently closes the exact linked Issue, completes the Trello card and
+appends `DeliveryReconciled` to E1. A paused Sprint resumes only after that
+final event exists, preserving WIP=1 across a crash. The lifecycle edges remain
+those defined in `factory/orchestration/lifecycle.py`.
+
 The E3 sprint controller is an optional authorization gate around the existing
 E2 materializer and one-shot GitHub runtime. With Trello backlog configuration,
 an immutable SQLite manifest fixes the ordered WorkItems and WIP=1 policy.
 Only the current linked Issue may be selected by `run` or `watch`; no authorized
 manifest means no selection. The controller pauses on `WAITING_HUMAN`, `BLOCKED`
-and `FAILED`, and resumes only after an explicit human command and resolution
-of the task gate. Sprint facts are appended to the E1 trace, keyed by
+and `FAILED`. A verified merged delivery resumes automatically after final
+Issue and card reconciliation; other gates need an explicit human command.
+Sprint facts are appended to the E1 trace, keyed by
 `sprint:<sprint_id>`. See [backlog.md](backlog.md) for the operator commands.
 The E4 dependency resolver checks every named predecessor against its linked
 task's durable `DONE` state immediately before materialization and on resume.

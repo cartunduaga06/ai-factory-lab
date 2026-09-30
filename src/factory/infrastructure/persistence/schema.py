@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -239,7 +239,8 @@ END;
 
 CREATE_AUDIT_PR_UPDATE_TRIGGER = f"""
 CREATE TRIGGER IF NOT EXISTS audit_pr_update AFTER UPDATE ON {PULL_REQUESTS_TABLE}
-WHEN OLD.number IS NOT NEW.number OR OLD.url IS NOT NEW.url OR OLD.merged IS NOT NEW.merged
+WHEN OLD.number IS NOT NEW.number OR OLD.url IS NOT NEW.url OR
+ OLD.merged IS NOT NEW.merged OR OLD.commit_sha IS NOT NEW.commit_sha
 BEGIN
 {_audit_insert("'PRUpdated'", "'pr:update:' || NEW.pull_request_id || ':' || (SELECT count(*) + 1 FROM audit_events WHERE aggregate_type = 'pull_request' AND aggregate_id = NEW.pull_request_id)", "(SELECT task_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.run_id", "pull_request", "NEW.pull_request_id", "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')", "NEW.run_id", "(SELECT workspace_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.pull_request_id")}
 END;
@@ -419,6 +420,7 @@ CREATE TABLE IF NOT EXISTS {PULL_REQUESTS_TABLE} (
     number           INTEGER,
     url              TEXT,
     merged           INTEGER NOT NULL DEFAULT 0,
+    commit_sha       TEXT,
     opened_at        TEXT NOT NULL,
     CONSTRAINT uq_pull_requests_run UNIQUE (run_id),
     CONSTRAINT fk_pull_requests_run
@@ -464,6 +466,7 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
     f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
     f"ALTER TABLE {BACKLOG_LINKS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
+    f"ALTER TABLE {PULL_REQUESTS_TABLE} ADD COLUMN commit_sha TEXT;",
 )
 
 #: Statements applied, in order, by :func:`initialize_schema`.

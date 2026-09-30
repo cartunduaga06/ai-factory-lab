@@ -10,6 +10,7 @@ from factory.domain.models import FactoryTask, TaskSource
 from factory.domain.ports import (
     BacklogLinkRepository,
     BacklogSource,
+    FeedbackEventRepository,
     SprintRepository,
     TaskRepository,
 )
@@ -101,6 +102,7 @@ class SprintService:
         tasks: TaskRepository,
         sprints: SprintRepository,
         registry: ProjectRegistry | None = None,
+        feedback_events: FeedbackEventRepository | None = None,
     ) -> None:
         self._source = source
         self._materializer = materializer
@@ -108,6 +110,7 @@ class SprintService:
         self._tasks = tasks
         self._sprints = sprints
         self._registry = registry
+        self._feedback_events = feedback_events
         self._dependencies = DependencyResolver(links, tasks)
 
     def draft(
@@ -202,6 +205,13 @@ class SprintService:
             issue = self._links.get_issue(item.provider, item.external_id)
             task = self._task_for(item) if issue is not None else None
             if task is not None and task.status is TaskStatus.DONE:
+                if self._feedback_events is not None and not self._feedback_events.is_completed(
+                    task.task_id
+                ):
+                    self._sprints.move(
+                        manifest.sprint_id, SprintState.PAUSED, position, "SprintPaused"
+                    )
+                    return False
                 position += 1
                 state = (
                     SprintState.COMPLETE if position == len(manifest.steps) else SprintState.ACTIVE
@@ -303,6 +313,26 @@ class SprintService:
         ):
             raise ValueError("sprint dependencies remain unresolved")
         self._sprints.move(sprint_id, SprintState.ACTIVE, position, "SprintResumed")
+
+    def resume_completed(self) -> None:
+        """Release the human gate after verified completion of the current step."""
+        current = self._sprints.current()
+        if current is None or current[1] is not SprintState.PAUSED:
+            return
+        manifest, _, position = current
+        if position < len(manifest.steps):
+            task = self._task_for(manifest.steps[position].item)
+            if (
+                task is not None
+                and task.status is TaskStatus.DONE
+                and (
+                    self._feedback_events is None
+                    or self._feedback_events.is_completed(task.task_id)
+                )
+            ):
+                self._sprints.move(
+                    manifest.sprint_id, SprintState.ACTIVE, position, "SprintResumed"
+                )
 
     def cancel(self, sprint_id: str) -> None:
         current = self._sprints.current()

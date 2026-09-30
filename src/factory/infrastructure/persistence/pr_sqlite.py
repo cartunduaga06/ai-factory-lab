@@ -45,8 +45,9 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
                     f"""
                     INSERT INTO {PULL_REQUESTS_TABLE} (
                         pull_request_id, run_id, task_id, repository_slug,
-                        head_branch, base_branch, title, number, url, merged, opened_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        head_branch, base_branch, title, number, url, merged, opened_at,
+                        commit_sha
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(uuid.uuid4()),
@@ -60,6 +61,7 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
                         pull_request.url,
                         1 if pull_request.merged else 0,
                         encode_datetime(pull_request.opened_at),
+                        pull_request.commit_sha,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -88,6 +90,30 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
                 (repository_slug, head_branch),
             ).fetchone()
         return _row_to_pull_request(row) if row is not None else None
+
+    def record_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
+        if not commit_sha.strip() or pull_request.run_id is None:
+            raise ValueError("invalid published revision")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE {PULL_REQUESTS_TABLE} SET commit_sha = ? "
+                "WHERE run_id = ? AND task_id = ? AND repository_slug = ? "
+                "AND head_branch = ? AND base_branch = ? AND number = ?",
+                (
+                    commit_sha,
+                    pull_request.run_id,
+                    pull_request.task_id,
+                    pull_request.repository_slug,
+                    pull_request.head_branch,
+                    pull_request.base_branch,
+                    pull_request.number,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("pull request revision identity mismatch")
+        result = self.get_for_run(pull_request.run_id)
+        assert result is not None
+        return result
 
     # -- internals ---------------------------------------------------------
 
@@ -122,6 +148,7 @@ def _row_to_pull_request(row: sqlite3.Row) -> PullRequest:
         run_id=row["run_id"],
         opened_at=decode_datetime(row["opened_at"]),
         merged=bool(row["merged"]),
+        commit_sha=row["commit_sha"],
     )
 
 

@@ -321,9 +321,6 @@ def test_runtime_never_dispatches_issue_outside_authorized_sprint(tmp_path: Path
             return PullRequestState.MERGED
 
     runtime._pull_request_state = Merged()
-    assert runtime.run_once().outcome == "SPRINT_PAUSED"
-    assert tasks.get(result.task_id).status is TaskStatus.DONE  # type: ignore[arg-type,union-attr]
-    assert sprint.is_paused()
-    sprint.resume("sprint-3")
     assert runtime.run_once().outcome == "NO_ELIGIBLE_TASK"
+    assert tasks.get(result.task_id).status is TaskStatus.DONE  # type: ignore[arg-type,union-attr]
     assert SqliteSprintRepository(str(path)).current()[1] is SprintState.COMPLETE  # type: ignore[index]

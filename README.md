@@ -14,6 +14,36 @@ The configured checkout must already exist with an HTTPS `origin` matching its
 registered repository. The Dulces E2E pilot requires its real repository and
 checkout; the Factory does not create them.
 
+## Post-review feedback and metrics
+
+For an authorized project Sprint, `factory run` rechecks the exact persisted
+Issue, task, run, workspace, published commit, PR and Trello card relationship
+after human review. A merged PR becomes a completed delivery only after GitHub
+confirms the merge commit, the configured required branch checks pass, and a
+successful deployment is found when the project profile sets
+`"deploy_required": true`. Missing or unreadable evidence leaves the Issue open
+and the Sprint at its human gate. The default is `false` for projects with no
+deployment acceptance requirement. Deployment remains a human operation.
+
+After verification, the Factory marks the task DONE, writes one marker-based
+closure comment, removes `factory-ready`, closes the source Issue with reason
+`completed`, sets the Trello card to DONE/complete, and records one final E1
+`DeliveryReconciled` event. Repeated runs check the same identities and repair a
+previously DONE task whose Issue or card is still open. The next authorized
+WorkItem is eligible only after the final event is durable. Closed PRs are
+recorded as cancelled and projected to Trello; open reviewed PRs and failed
+tasks project their current phase. Card feedback is stored in a Factory-owned
+description suffix that does not alter the authorized WorkItem snapshot.
+
+`python -m factory metrics` prints JSON for each project and the global total.
+Metrics use persisted task, run, gate and transition facts: throughput is DONE
+tasks; lead time is the mean from task creation to the DONE transition; success
+rate is DONE over terminal tasks; first-pass gates is the fraction of started
+tasks whose first run succeeded with nonempty green gates; retry rate is the
+fraction of started tasks with more than one run; human interventions count
+WAITING_HUMAN and CHANGES_REQUESTED transitions. A rate with no denominator is
+`null`. Detailed token and cost metrics are outside this command.
+
 AI Factory Lab is the **control plane** of a software-development factory. It
 coordinates autonomous coding agents (OpenHands, Codex and future engines) that
 work on *external* product repositories — starting with

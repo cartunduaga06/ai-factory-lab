@@ -62,6 +62,23 @@ class SqliteSprintRepository(SqliteRepository, SprintRepository):
         )
         return manifest, SprintState(row["state"]), int(row["position"])
 
+    def find_for_work_item(self, project_id: str, provider: str, external_id: str) -> str | None:
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT sprint_id, manifest FROM {SPRINTS_TABLE}").fetchall()
+        found: str | None = None
+        for row in rows:
+            manifest = json.loads(str(row["manifest"]))
+            if any(
+                step["item"]["project_id"] == project_id
+                and step["item"]["provider"] == provider
+                and step["item"]["external_id"] == external_id
+                for step in manifest["steps"]
+            ):
+                if found is not None:
+                    raise ValueError("WorkItem belongs to multiple Sprints")
+                found = str(row["sprint_id"])
+        return found
+
     def move(self, sprint_id: str, state: SprintState, position: int, event: str) -> None:
         if event not in {
             "WorkItemSelected",
