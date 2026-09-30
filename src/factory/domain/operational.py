@@ -94,6 +94,37 @@ def canonical_scratch_body(body: str) -> str:
     return "```factory-operational\n" + json.dumps(declaration, sort_keys=True) + "\n```"
 
 
+def parse_database_readonly(body: str) -> str:
+    """Accept only a target identifier, never agent supplied connection details."""
+    blocks = _BLOCK.findall(body)
+    if len(blocks) != 1:
+        raise ValueError("exactly one factory-operational block is required")
+    try:
+        value = json.loads(blocks[0])
+    except json.JSONDecodeError:
+        raise ValueError("invalid operational declaration") from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"mode", "target_id"}
+        or value["mode"] != "database_readonly"
+        or not isinstance(value["target_id"], str)
+        or not _NAME.fullmatch(value["target_id"])
+        or value["target_id"] in {".", ".."}
+    ):
+        raise ValueError("unsupported operational declaration")
+    return value["target_id"]
+
+
+def canonical_operational_body(body: str) -> str:
+    """Persist only the validated declaration from an operational Issue."""
+    try:
+        return canonical_scratch_body(body)
+    except ValueError:
+        target_id = parse_database_readonly(body)
+        value = {"mode": "database_readonly", "target_id": target_id}
+        return "```factory-operational\n" + json.dumps(value, sort_keys=True) + "\n```"
+
+
 def _parse_body(body: str) -> ScratchArtifact:
     blocks = _BLOCK.findall(body)
     if len(blocks) != 1:

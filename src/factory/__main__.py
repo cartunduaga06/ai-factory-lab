@@ -30,6 +30,7 @@ from factory import __version__
 from factory.domain.enums import RepositoryRole, TaskStatus
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
 from factory.domain.models import AgentAdapter, Repository
+from factory.domain.operational import OperationalCapability, OperationalPolicy
 from factory.domain.ports import IssueSource
 from factory.infrastructure.config import AgentEngine, FactoryConfig, UnsupportedDatabaseError
 from factory.infrastructure.logging import configure_logging
@@ -48,6 +49,7 @@ from factory.infrastructure.persistence.status_events import SqliteStatusEventSt
 from factory.integrations.codex import CodexAdapter
 from factory.integrations.context.repository import RepositoryContextSource
 from factory.integrations.context.skill_source import ApprovedSkillSource
+from factory.integrations.database_readonly import SqliteReadonlyInspector
 from factory.integrations.gates import LocalQualityGateRunner
 from factory.integrations.github import (
     GitHubClient,
@@ -813,15 +815,21 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         config.github.target_repo is None
         and config.project_registry is None
         and config.operational_scratch_root is None
+        and not config.database_readonly_targets
     ):
         raise ConfigurationError("FACTORY_TARGET_REPO is required for run")
     if (
         config.source_checkout is None
         and config.project_registry is None
         and config.operational_scratch_root is None
+        and not config.database_readonly_targets
     ):
         raise ConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
-    if config.github_write_token is None and config.operational_scratch_root is None:
+    if (
+        config.github_write_token is None
+        and config.operational_scratch_root is None
+        and not config.database_readonly_targets
+    ):
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
     database = config.database
@@ -877,6 +885,17 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         if config.operational_scratch_root is not None
         else None
     )
+    database_targets = dict(config.database_readonly_targets)
+    operational_policy = OperationalPolicy(
+        enabled=frozenset(
+            ({OperationalCapability.SCRATCH} if config.operational_scratch_root else set())
+            | ({OperationalCapability.DATABASE_READONLY} if database_targets else set())
+        ),
+        hosts=frozenset({"local"}) if database_targets else frozenset(),
+        paths=frozenset(database_targets.values()),
+        commands=frozenset({"inspect"}) if database_targets else frozenset(),
+        targets=frozenset(database_targets),
+    )
     return FactoryRuntime(
         intake=intake,
         intake_repository=repository,
@@ -928,6 +947,10 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         pull_request_state=GitHubPullRequestStateSource(read_client),
         base_branch=config.target_default_branch,
         operational_provisioner=operational_provisioner,
+        operational_policy=operational_policy,
+        database_inspector=(
+            SqliteReadonlyInspector(database_targets) if database_targets else None
+        ),
         operational_root=config.operational_scratch_root,
         operational_acceptance=(
             ScratchAcceptance(operational_provisioner)

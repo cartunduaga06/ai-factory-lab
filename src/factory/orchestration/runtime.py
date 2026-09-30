@@ -9,15 +9,31 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus, ValidationOutcome
+from factory.domain.enums import (
+    AgentKind,
+    QualityGateStatus,
+    RunStatus,
+    TaskKind,
+    TaskStatus,
+    ValidationOutcome,
+)
 from factory.domain.errors import AgentCollectError
-from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, QualityGateSpec, Repository
+from factory.domain.models import (
+    AgentAdapter,
+    AgentRun,
+    FactoryTask,
+    QualityGate,
+    QualityGateSpec,
+    Repository,
+)
 from factory.domain.operational import (
     OperationalCapability,
     OperationalPolicy,
+    parse_database_readonly,
     parse_scratch_artifact,
 )
 from factory.domain.ports import (
+    DatabaseReadonlyInspector,
     OperationalAcceptance,
     PullRequestRepository,
     PullRequestSink,
@@ -89,6 +105,7 @@ class FactoryRuntime:
         operational_provisioner: WorkspaceProvisioner | None = None,
         operational_root: str | None = None,
         operational_acceptance: OperationalAcceptance | None = None,
+        database_inspector: DatabaseReadonlyInspector | None = None,
         code_capable: bool = True,
         poll_interval: float = 5.0,
         timeout: float = 1800.0,
@@ -165,6 +182,7 @@ class FactoryRuntime:
         self._pull_requests = pull_requests
         self._pull_request_state = pull_request_state
         self._operational_policy = operational_policy or OperationalPolicy()
+        self._database_inspector = database_inspector
         self._poll_interval = max(0.0, poll_interval)
         self._timeout = max(0.0, timeout)
         self._sleep = sleep
@@ -298,6 +316,12 @@ class FactoryRuntime:
             task = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
         if task.status is TaskStatus.READY:
             if task.kind is TaskKind.OPERATIONAL:
+                try:
+                    target_id = parse_database_readonly(task.body)
+                except ValueError:
+                    target_id = None
+                if target_id is not None:
+                    return self._run_database(task, target_id, intake)
                 if not self._operational_policy.permits(OperationalCapability.SCRATCH):
                     blocked = self._block(task.task_id, "operational capability denied")
                     return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
@@ -437,6 +461,53 @@ class FactoryRuntime:
             current = self._block(task.task_id, "security review blocked publication")
             return self._result(current, refresh.run, refresh, "SECURITY_REVIEW_BLOCKED", intake)
         return self._result_from_publication(published, refresh.run, intake)
+
+    def _run_database(
+        self, task: FactoryTask, target_id: str, intake: IntakeSummary
+    ) -> RuntimeResult:
+        """Run an approved fixed observation directly, without agent dispatch."""
+        if self._database_inspector is None or not self._operational_policy.permits(
+            OperationalCapability.DATABASE_READONLY,
+            host="local",
+            path=self._database_inspector.target_path(target_id),
+            command="inspect",
+            target=target_id,
+        ):
+            blocked = self._block(task.task_id, "operational capability denied")
+            return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
+        lifecycle = self._dispatch.lifecycle
+        lifecycle.transition(task.task_id, TaskStatus.CLAIMED)
+        lifecycle.transition(task.task_id, TaskStatus.RUNNING)
+        run = self._runs.save_run(
+            AgentRun(
+                task_id=task.task_id,
+                adapter=AgentKind.OTHER,
+                status=RunStatus.RUNNING,
+                started_at=datetime.now(UTC),
+                project_id=task.project_id,
+            )
+        )
+        try:
+            evidence = self._database_inspector.inspect(target_id)
+        except ValueError:
+            run.status = RunStatus.FAILED
+            run.summary = "database inspection rejected"
+            run.gates = (QualityGate("database_readonly", QualityGateStatus.FAILED),)
+            outcome = "OPERATIONAL_DATABASE_BLOCKED"
+        else:
+            run.status = RunStatus.SUCCEEDED
+            run.summary = evidence
+            run.gates = (QualityGate("database_readonly", QualityGateStatus.PASSED),)
+            outcome = "OPERATIONAL_DONE"
+        run.finished_at = datetime.now(UTC)
+        self._runs.update_run(run)
+        lifecycle.transition(task.task_id, TaskStatus.VALIDATING)
+        current = (
+            lifecycle.transition(task.task_id, TaskStatus.DONE)
+            if run.status is RunStatus.SUCCEEDED
+            else self._block(task.task_id, "database inspection rejected")
+        )
+        return self._result(current, run, None, outcome, intake)
 
     def _reconcile_human_reviews(self) -> None:
         """Apply only provider-confirmed outcomes to durable human-review tasks."""

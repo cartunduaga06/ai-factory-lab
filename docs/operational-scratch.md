@@ -44,27 +44,52 @@ The repository's offline watcher test exercises intake, Codex worker, scratch
 artifact validation and the branchless final state. It does not claim that a
 live GitHub Issue or the ai-server host was modified during development.
 
+## OPERATIONAL v0.2 database inspection
+
+An operator may register local SQLite files with
+`FACTORY_DATABASE_READONLY_TARGETS`, a JSON object mapping a safe `target_id` to
+an absolute file path. A database task declares exactly one fenced block:
+
+````text
+```factory-operational
+{"mode":"database_readonly","target_id":"pilot"}
+```
+````
+
+The Factory checks the exact registered id and path through its deny-by-default
+policy. It executes the observation itself; no SQL, DSN, path, command or Issue
+prose is sent to Codex. The file must be a regular, single-link file without
+symlink components or active SQLite journal sidecars. The connection is opened
+read-only with query-only and an authorizer. The fixed observations are SQLite
+version, integrity check, schema/user version, and counts for at most 32 ordinary
+tables. If an `alembic_version` table has exactly one short text revision, its
+revision is recorded as a digest. Table names appear only as SHA-256 digests.
+The file limit is 64 MiB,
+the execution deadline is 2 seconds, and evidence is capped at 2 KiB. Failure
+blocks the task with a sanitized reason. Success records bounded evidence and
+ends at `DONE` without a branch or PR. This capability does not modify a DB,
+perform a backup, or inspect an unregistered target. A separate post-deploy
+read-only pilot is required for a real operator target.
+
 ## OPERATIONAL v2 boundary
 
 `OperationalCapability` names `scratch`, `database_readonly`, `docker_inspect`,
 `service_health`, and `backup`. `OperationalPolicy` defaults to scratch only;
 its host, path, command, and target allowlists start empty. The runtime checks
 that scratch is enabled before dispatch. A declaration cannot modify this
-operator-owned policy. The intake parser and Codex adapter still accept only the
-fixed scratch declaration, so naming or even configuring a v2 capability does
-not execute a host command. This is a policy foundation, not an authorization
-to inspect a live database, Docker daemon, or service. Backup is always denied
+operator-owned policy. Intake accepts only the fixed scratch or database
+declarations. The Codex adapter accepts only scratch; the Factory-owned database
+inspector is the only additional executable route. Backup is always denied
 until its route and allowlist design and human gate are implemented and tested.
 
 Future read-only executors must use exact allowlisted hosts, paths, argv commands,
 and targets, a non-root account, bounded time and output, and sanitized evidence.
-`database_readonly` must use a database-enforced read-only connection;
 `docker_inspect` must expose no start, stop, or recreate; `service_health` must
 read only allowlisted targets. Cutover, webhook, Meta, and destructive actions
 have no capability. Until those executors and their offline E2E tests exist,
-requests for these modes fail closed at intake or dispatch.
+requests for the remaining modes fail closed at intake or dispatch.
 
 Rollback is to stop the worker, restore the previous release, and leave any
 blocked task for an explicit retry after correcting policy. The scratch artifact
-is disposable under its per-run directory. No database, service, or Docker
-state is changed by this release.
+is disposable under its per-run directory. The database inspector makes no
+database writes; service and Docker state is unchanged.
