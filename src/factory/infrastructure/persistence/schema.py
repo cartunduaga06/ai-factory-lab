@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -46,6 +46,27 @@ QA_REWORK_TABLE = "qa_rework"
 STATUS_EVENTS_TABLE = "status_events"
 AUDIT_EVENTS_TABLE = "audit_events"
 BACKLOG_LINKS_TABLE = "backlog_links"
+SPRINTS_TABLE = "sprints"
+
+CREATE_SPRINTS = f"""
+CREATE TABLE IF NOT EXISTS {SPRINTS_TABLE} (
+    sprint_id TEXT PRIMARY KEY,
+    manifest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('ACTIVE', 'PAUSED', 'CANCELLED', 'COMPLETE')),
+    position INTEGER NOT NULL CHECK (position >= 0)
+);
+"""
+
+CREATE_ACTIVE_SPRINT_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS uq_{SPRINTS_TABLE}_live
+ON {SPRINTS_TABLE} ((1)) WHERE state IN ('ACTIVE', 'PAUSED');
+"""
+
+CREATE_SPRINT_IMMUTABLE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS sprint_manifest_immutable
+BEFORE UPDATE OF manifest ON {SPRINTS_TABLE}
+BEGIN SELECT RAISE(ABORT, 'sprint manifest is immutable'); END;
+"""
 
 CREATE_BACKLOG_LINKS = f"""
 CREATE TABLE IF NOT EXISTS {BACKLOG_LINKS_TABLE} (
@@ -393,6 +414,9 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
 #: Statements applied, in order, by :func:`initialize_schema`.
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS,
+    CREATE_SPRINTS,
+    CREATE_ACTIVE_SPRINT_INDEX,
+    CREATE_SPRINT_IMMUTABLE_TRIGGER,
     CREATE_BACKLOG_LINKS,
     CREATE_AUDIT_EVENTS,
     CREATE_TRANSITIONS,

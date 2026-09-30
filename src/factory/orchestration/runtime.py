@@ -31,6 +31,7 @@ from factory.domain.ports import (
 from factory.orchestration.dispatch import DispatchService
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
 from factory.orchestration.publication import PublicationResult, PublicationService
+from factory.orchestration.sprint import SprintService
 from factory.orchestration.tracking import RunRefresh, RunTrackingService
 
 
@@ -83,6 +84,7 @@ class FactoryRuntime:
         monotonic: Callable[[], float] = time.monotonic,
         status_pulse: Callable[[], None] | None = None,
         backlog_reconcile: Callable[[], object] | None = None,
+        sprint: SprintService | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
@@ -138,17 +140,31 @@ class FactoryRuntime:
         self._monotonic = monotonic
         self._status_pulse = status_pulse
         self._backlog_reconcile = backlog_reconcile
+        self._sprint = sprint
 
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
         try:
-            return self._run_once()
+            if self._sprint is not None and self._sprint.is_paused():
+                self._reconcile_human_reviews()
+                return RuntimeResult(
+                    None, None, None, None, None, None, None, "SPRINT_PAUSED", IntakeSummary()
+                )
+            if self._sprint is not None and not self._sprint.prepare():
+                outcome = "SPRINT_PAUSED" if self._sprint.is_paused() else "NO_ELIGIBLE_TASK"
+                return RuntimeResult(
+                    None, None, None, None, None, None, None, outcome, IntakeSummary()
+                )
+            result = self._run_once()
+            if self._sprint is not None and result.task_id is not None:
+                self._sprint.observe(self._tasks.get(result.task_id))
+            return result
         finally:
             self._pulse_status()
 
     def _run_once(self) -> RuntimeResult:
         """Drive the existing one-shot lifecycle."""
-        if self._backlog_reconcile is not None:
+        if self._backlog_reconcile is not None and self._sprint is None:
             self._backlog_reconcile()
         intake = self._intake.intake(self._intake_repository)
         self._reconcile_human_reviews()
@@ -302,6 +318,8 @@ class FactoryRuntime:
             *self._tasks.list(TaskStatus.VALIDATING),
         ]
         for task in review_tasks:
+            if self._sprint is not None and not self._sprint.allows_review(task):
+                continue
             if task.kind is not TaskKind.CODE:
                 continue
             run = self._latest_run(task.task_id)
@@ -324,10 +342,10 @@ class FactoryRuntime:
         # Recovery states take precedence over new work; ordering within each
         # state is the repository's stable created_at/task_id order. Human
         # review of a CODE PR does not occupy the separate scratch workflow.
-        requested = self._tasks.list(TaskStatus.CHANGES_REQUESTED)
+        requested = self._selectable(TaskStatus.CHANGES_REQUESTED)
         if requested:
             return requested[0]
-        for ready in self._tasks.list(TaskStatus.READY):
+        for ready in self._selectable(TaskStatus.READY):
             history = self._runs.list_runs(ready.task_id)
             previous = history[-1] if history else None
             gate_rework = previous is not None and (
@@ -349,10 +367,10 @@ class FactoryRuntime:
             TaskStatus.VALIDATING,
             TaskStatus.PR_OPEN,
         ):
-            for candidate in self._tasks.list(status):
+            for candidate in self._selectable(status):
                 if self._tasks.latest_rework_feedback(candidate.task_id):
                     return candidate
-        waiting = self._tasks.list(TaskStatus.WAITING_HUMAN)
+        waiting = self._selectable(TaskStatus.WAITING_HUMAN)
         if waiting:
             for status in (
                 TaskStatus.VALIDATING,
@@ -364,7 +382,7 @@ class FactoryRuntime:
                 operational = next(
                     (
                         task
-                        for task in self._tasks.list(status)
+                        for task in self._selectable(status)
                         if task.kind is TaskKind.OPERATIONAL
                     ),
                     None,
@@ -380,10 +398,17 @@ class FactoryRuntime:
             TaskStatus.READY,
             TaskStatus.DISCOVERED,
         ):
-            tasks = self._tasks.list(status)
+            tasks = self._selectable(status)
             if tasks:
                 return tasks[0]
         return None
+
+    def _selectable(self, status: TaskStatus) -> list[FactoryTask]:
+        return [
+            task
+            for task in self._tasks.list(status)
+            if self._sprint is None or self._sprint.allows(task)
+        ]
 
     def _block(self, task_id: str, reason: str) -> FactoryTask:
         blocked = self._dispatch.lifecycle.transition(task_id, TaskStatus.BLOCKED)

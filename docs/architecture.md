@@ -1,5 +1,14 @@
 # Architecture
 
+The E3 sprint controller is an optional authorization gate around the existing
+E2 materializer and one-shot GitHub runtime. With Trello backlog configuration,
+an immutable SQLite manifest fixes the ordered WorkItems and WIP=1 policy.
+Only the current linked Issue may be selected by `run` or `watch`; no authorized
+manifest means no selection. The controller pauses on `WAITING_HUMAN`, `BLOCKED`
+and `FAILED`, and resumes only after an explicit human command and resolution
+of the task gate. Sprint facts are appended to the E1 trace, keyed by
+`sprint:<sprint_id>`. See [backlog.md](backlog.md) for the operator commands.
+
 AI Factory Lab is the control plane of a software-development factory. It turns
 work items into verified Pull Requests produced by autonomous coding agents, and
 stops short of merging them.
