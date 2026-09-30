@@ -29,6 +29,7 @@ from factory.domain.models import (
     TaskTransition,
     Workspace,
 )
+from factory.domain.sprint import SprintManifest, SprintState
 
 
 class IssueSource(ABC):
@@ -102,6 +103,22 @@ class BacklogLinkRepository(ABC):
     @abstractmethod
     def complete(self, item: WorkItem, issue: MaterializedIssue) -> None:
         """Commit the immutable link; refuse a conflicting identity."""
+
+
+class SprintRepository(ABC):
+    """Durable authorization and position, with orchestration facts in E1."""
+
+    @abstractmethod
+    def authorize(self, manifest: SprintManifest) -> None:
+        """Persist an immutable manifest; refuse conflicting or concurrent authorization."""
+
+    @abstractmethod
+    def current(self) -> tuple[SprintManifest, SprintState, int] | None:
+        """Return the current authorization, state and ordered position."""
+
+    @abstractmethod
+    def move(self, sprint_id: str, state: SprintState, position: int, event: str) -> None:
+        """Atomically update position/state and append one E1 event."""
 
 
 class TaskRepository(ABC):

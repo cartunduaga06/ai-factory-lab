@@ -39,6 +39,7 @@ from factory.infrastructure.persistence import (
     SqliteTaskRepository,
 )
 from factory.infrastructure.persistence.audit import SqliteAuditEventStore
+from factory.infrastructure.persistence.sprint_sqlite import SqliteSprintRepository
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
 from factory.integrations.gates import LocalQualityGateRunner
@@ -70,6 +71,7 @@ from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.retry import RetryService
 from factory.orchestration.rework import ReworkNotAllowedError, ReworkService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
+from factory.orchestration.sprint import AuthorizedBacklogSource, SprintService
 from factory.orchestration.status import StatusService
 from factory.orchestration.status_events import StatusEventPublisher
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
@@ -113,6 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
         "sync-backlog", help="Reconcile Trello Sprint cards into GitHub Issues."
     )
     backlog.add_argument("--card-id", help="Reconcile one card from a verified webhook event.")
+    sprint = subparsers.add_parser("sprint", help="Plan, authorize or control a bounded sprint.")
+    sprint.add_argument(
+        "action",
+        choices=("plan", "authorize", "status", "pause", "resume", "cancel", "request-human"),
+    )
+    sprint.add_argument("--manifest", help="JSON file with sprint_id and ordered items.")
+    sprint.add_argument("--sprint-id", help="Authorized sprint id for a state decision.")
     retry = subparsers.add_parser(
         "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
     )
@@ -148,6 +157,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_intake(config)
     if args.command == "sync-backlog":
         return _run_backlog(config, args.card_id)
+    if args.command == "sprint":
+        return _run_sprint(config, args.action, args.manifest, args.sprint_id)
     if args.command == "retry":
         return _run_retry(config, str(args.task_id))
     if args.command == "request-changes":
@@ -246,6 +257,41 @@ def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | Non
     )
 
 
+def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintService | None:
+    """Use E2's exact ports with an immutable, authorized source guard."""
+    if config.trello_backlog_list_id is None and config.trello_ready_label_id is None:
+        return None
+    if not all(
+        (
+            config.trello_backlog_list_id,
+            config.trello_ready_label_id,
+            config.trello_key,
+            config.trello_token,
+        )
+    ):
+        raise ConfigurationError("Trello backlog list, READY label, key and token are required")
+    if config.github.control_plane_repo is None or config.github_write_token is None:
+        raise ConfigurationError("GitHub repository and write token are required for backlog")
+    assert config.trello_key is not None and config.trello_token is not None
+    assert config.trello_backlog_list_id is not None and config.trello_ready_label_id is not None
+    source = TrelloBacklogSource(
+        config.trello_key,
+        config.trello_token,
+        config.trello_backlog_list_id,
+        config.trello_ready_label_id,
+        config.github.control_plane_repo,
+    )
+    sprints = SqliteSprintRepository(config.database.path)
+    links = SqliteBacklogLinkRepository(config.database.path)
+    wrapped = AuthorizedBacklogSource(source, sprints)
+    materializer = BacklogMaterializationService(
+        wrapped,
+        GitHubBacklogIssueSink(GitHubWriteClient(config.github_write_token, config.github.api_url)),
+        links,
+    )
+    return SprintService(source, materializer, links, tasks, sprints)
+
+
 def _run_backlog(config: FactoryConfig, card_id: str | None) -> int:
     try:
         service = _build_backlog(config)
@@ -264,6 +310,95 @@ def _run_backlog(config: FactoryConfig, card_id: str | None) -> int:
     print(f"Ineligible: {summary.ineligible}")
     print(f"Uncertain: {summary.uncertain}")
     return EXIT_OK if summary.uncertain == 0 else EXIT_INTAKE_ERROR
+
+
+def _run_sprint(
+    config: FactoryConfig, action: str, manifest_file: str | None, sprint_id: str | None
+) -> int:
+    """Require an explicit operator command for every authorization or resume."""
+    try:
+        tasks = SqliteTaskRepository(config.database.path)
+        sprints = SqliteSprintRepository(config.database.path)
+        if (
+            action == "plan"
+            and config.database.path != ":memory:"
+            and not Path(config.database.path).exists()
+        ):
+            raise ConfigurationError("database must exist for side-effect-free planning")
+        if action != "plan":
+            tasks.initialize()
+            sprints.initialize()
+        service = _build_sprint(config, tasks)
+        if service is None:
+            raise ConfigurationError("Trello backlog adapter is not enabled")
+        if action in {"plan", "authorize"}:
+            if manifest_file is None:
+                raise ValueError("--manifest is required")
+            raw = json.loads(Path(manifest_file).read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
+                raise ValueError("invalid sprint manifest")
+            entries = tuple(
+                (str(item["external_id"]), tuple(str(dep) for dep in item.get("dependencies", [])))
+                for item in raw["items"]
+            )
+            manifest = service.draft(str(raw["sprint_id"]), entries)
+            plan = service.plan(manifest)
+            print(
+                json.dumps(
+                    {
+                        "sprint_id": manifest.sprint_id,
+                        "wip_limit": 1,
+                        "steps": [
+                            {
+                                "position": row.position,
+                                "external_id": row.external_id,
+                                "eligible": row.eligible,
+                                "blockers": row.blockers,
+                            }
+                            for row in plan
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+            if action == "authorize":
+                service.authorize(manifest)
+                print("Sprint authorized")
+        elif action == "status":
+            current = sprints.current()
+            print(
+                json.dumps(
+                    {
+                        "sprint_id": current[0].sprint_id,
+                        "state": current[1].value,
+                        "position": current[2],
+                    }
+                    if current is not None
+                    else {"state": "UNAUTHORIZED"}
+                )
+            )
+        elif action in {"pause", "request-human"}:
+            if sprint_id is None:
+                raise ValueError("--sprint-id is required")
+            service.pause(sprint_id)
+            print("Sprint paused for human decision")
+        elif action == "resume":
+            if sprint_id is None:
+                raise ValueError("--sprint-id is required")
+            service.resume(sprint_id)
+            print("Sprint resumed")
+        elif action == "cancel":
+            if sprint_id is None:
+                raise ValueError("--sprint-id is required")
+            service.cancel(sprint_id)
+            print("Sprint cancelled")
+    except (ConfigurationError, UnsupportedDatabaseError, ValueError, KeyError, TypeError) as exc:
+        print(f"sprint refused: {type(exc).__name__}")
+        return EXIT_CONFIG_ERROR
+    except Exception as exc:  # noqa: BLE001 - provider text and credentials are not public
+        print(f"sprint failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    return EXIT_OK
 
 
 def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) -> int:
@@ -411,7 +546,13 @@ def _run_runtime(config: FactoryConfig) -> int:
     return (
         EXIT_OK
         if result.outcome
-        in {"WAITING_HUMAN", "OPERATIONAL_DONE", "NO_ELIGIBLE_TASK", "SOURCE_INELIGIBLE"}
+        in {
+            "WAITING_HUMAN",
+            "OPERATIONAL_DONE",
+            "NO_ELIGIBLE_TASK",
+            "SOURCE_INELIGIBLE",
+            "SPRINT_PAUSED",
+        }
         else EXIT_INTAKE_ERROR
     )
 
@@ -483,7 +624,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     runs.initialize()
     pull_requests.initialize()
     status_publisher = _status_publisher(config)
-    backlog = _build_backlog(config)
+    sprint = _build_sprint(config, tasks)
 
     read_client = GitHubClient(token=config.github.token or "", api_url=config.github.api_url)
     intake = IssueIntakeService(
@@ -536,7 +677,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         timeout=config.run_timeout,
         heartbeat_interval=config.heartbeat_interval,
         status_pulse=status_publisher.flush if status_publisher else None,
-        backlog_reconcile=backlog.reconcile if backlog else None,
+        sprint=sprint,
     )
 
 

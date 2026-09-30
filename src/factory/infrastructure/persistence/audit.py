@@ -48,6 +48,10 @@ class SqliteAuditEventStore(SqliteRepository):
             ).fetchall()
         return tuple(self._event(row) for row in rows)
 
+    def for_sprint(self, sprint_id: str) -> tuple[AuditEvent, ...]:
+        """Read sprint facts from the same append-only E1 event store."""
+        return self.for_task(f"sprint:{sprint_id}")
+
     def for_issue(self, provider: str, repository: str, number: int) -> tuple[AuditEvent, ...]:
         with self._connect() as conn:
             row = conn.execute(

@@ -92,7 +92,10 @@ class FactoryWatcher:
                 idle_waits += 1
             else:
                 processed += 1
-            if result.outcome == "WAITING_HUMAN" or result.task_status is TaskStatus.WAITING_HUMAN:
+            if (
+                result.outcome in {"WAITING_HUMAN", "SPRINT_PAUSED"}
+                or result.task_status is TaskStatus.WAITING_HUMAN
+            ):
                 stopped = True
                 break
             if result.outcome in IDLE_OUTCOMES:
