@@ -1,0 +1,123 @@
+"""Project checked Trello card lifecycle projection."""
+
+from __future__ import annotations
+
+import json
+import re
+import urllib.error
+import urllib.request
+from collections.abc import Mapping
+from typing import Any, Protocol
+
+from factory.domain.feedback import FeedbackIdentity
+from factory.domain.ports import WorkItemFeedbackSink
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
+
+_START = "<!-- factory-feedback:start -->"
+_END = "<!-- factory-feedback:end -->"
+_PHASES = {"WAITING_HUMAN", "MERGED", "CLOSED", "FAILED", "DONE"}
+
+
+def source_description(description: str) -> str:
+    """Remove only the Factory-owned suffix from a card snapshot."""
+    if _START not in description:
+        return description
+    prefix, marker, suffix = description.partition(_START)
+    if marker and suffix.endswith(_END) and prefix.endswith("\n\n"):
+        return prefix[:-2]
+    return description
+
+
+class TrelloFeedbackTransport(Protocol):
+    def request_json(
+        self, method: str, url: str, headers: Mapping[str, str], body: bytes | None
+    ) -> Any:  # noqa: ANN401
+        """Read or update exactly one card."""
+
+
+class UrllibFeedbackTransport:
+    def request_json(
+        self, method: str, url: str, headers: Mapping[str, str], body: bytes | None
+    ) -> Any:  # noqa: ANN401
+        request = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError):
+            raise TrelloFeedbackError("Trello feedback request failed") from None
+
+
+class TrelloFeedbackError(RuntimeError):
+    """Sanitized card identity or write failure."""
+
+
+class TrelloWorkItemFeedbackSink(WorkItemFeedbackSink):
+    def __init__(
+        self,
+        key: str,
+        token: str,
+        registry: ProjectRegistry,
+        transport: TrelloFeedbackTransport | None = None,
+    ) -> None:
+        self._key = key
+        self._token = token
+        self._registry = registry
+        self._transport = transport or UrllibFeedbackTransport()
+
+    def sync(self, identity: FeedbackIdentity, phase: str) -> None:
+        if phase not in _PHASES or identity.work_item_provider != "trello":
+            raise TrelloFeedbackError("invalid card feedback phase or provider")
+        if (
+            identity.work_item_id is None
+            or re.fullmatch(r"[A-Za-z0-9]+", identity.work_item_id) is None
+        ):
+            raise TrelloFeedbackError("invalid card identity")
+        try:
+            self._registry.resolve(identity.project_id, identity.repository_slug)
+        except ProjectRoutingError:
+            raise TrelloFeedbackError("card project routing mismatch") from None
+        url = f"https://api.trello.com/1/cards/{identity.work_item_id}"
+        headers = {
+            "Authorization": f'OAuth oauth_consumer_key="{self._key}", oauth_token="{self._token}"',
+            "Accept": "application/json",
+        }
+        try:
+            card = self._transport.request_json(
+                "GET", url + "?fields=id,desc,dueComplete", headers, None
+            )
+        except Exception:
+            raise TrelloFeedbackError("Trello card read failed") from None
+        if not isinstance(card, Mapping) or card.get("id") != identity.work_item_id:
+            raise TrelloFeedbackError("Trello card identity mismatch")
+        raw = card.get("desc")
+        if not isinstance(raw, str):
+            raise TrelloFeedbackError("invalid Trello card description")
+        original = source_description(raw)
+        declarations = re.findall(r"(?im)^project_id\s*[:=]\s*([^\s]+)\s*$", original)
+        if declarations != [identity.project_id]:
+            raise TrelloFeedbackError("Trello card project identity mismatch")
+        suffix = (
+            f"{_START}\nFactory: {phase}\nProject: {identity.project_id}\n"
+            f"Sprint: {identity.sprint_id or '-'}\n"
+            f"Issue: {identity.repository_slug}#{identity.issue_number}\n"
+            f"Task: {identity.task_id}\nRun: {identity.run_id}\n"
+            f"Workspace: {identity.workspace_id}\nCommit: {identity.commit_sha}\n"
+            f"PR: {identity.repository_slug}#{identity.pull_request_number}\n{_END}"
+        )
+        description = original + "\n\n" + suffix
+        completed = phase == "DONE"
+        if raw == description and card.get("dueComplete") is completed:
+            return
+        payload = json.dumps({"desc": description, "dueComplete": completed}).encode()
+        headers = {**headers, "Content-Type": "application/json"}
+        try:
+            updated = self._transport.request_json("PUT", url, headers, payload)
+        except Exception:
+            raise TrelloFeedbackError("Trello card update failed") from None
+        if (
+            not isinstance(updated, Mapping)
+            or updated.get("id") != identity.work_item_id
+            or updated.get("desc") != description
+            or updated.get("dueComplete") is not completed
+        ):
+            raise TrelloFeedbackError("Trello card update identity mismatch")

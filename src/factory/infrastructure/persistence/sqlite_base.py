@@ -55,6 +55,7 @@ class SqliteRepository:
             # Rework runs are sequential attempts on the same reviewed checkout.
             # The active-task index still forbids concurrent writers.
             conn.execute("DROP INDEX IF EXISTS uq_agent_runs_workspace")
+            conn.execute("DROP TRIGGER IF EXISTS audit_pr_update")
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
             for statement in MIGRATION_STATEMENTS:

@@ -40,6 +40,8 @@ from factory.infrastructure.persistence import (
     SqliteTaskRepository,
 )
 from factory.infrastructure.persistence.audit import SqliteAuditEventStore
+from factory.infrastructure.persistence.feedback_sqlite import SqliteFeedbackEventRepository
+from factory.infrastructure.persistence.metrics import SqliteSprintMetrics
 from factory.infrastructure.persistence.sprint_sqlite import SqliteSprintRepository
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
@@ -53,6 +55,8 @@ from factory.integrations.github import (
     GitHubWriteClient,
 )
 from factory.integrations.github.backlog_issues import GitHubBacklogIssueSink
+from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
+from factory.integrations.github.issue_completion import GitHubIssueCompletionSink
 from factory.integrations.github.pr_state import GitHubPullRequestStateSource
 from factory.integrations.github.project_issues import ProjectIssueSource
 from factory.integrations.openhands import (
@@ -69,6 +73,7 @@ from factory.integrations.project_routing import (
 )
 from factory.integrations.status_http import serve_status
 from factory.integrations.trello.backlog import TrelloBacklogSource
+from factory.integrations.trello.feedback import TrelloWorkItemFeedbackSink
 from factory.integrations.trello.status import TrelloStatusChannel
 from factory.integrations.workspace import (
     GitWorkspacePublisher,
@@ -77,6 +82,7 @@ from factory.integrations.workspace import (
 )
 from factory.orchestration.backlog import BacklogMaterializationService
 from factory.orchestration.context import ContextPackBuilder
+from factory.orchestration.feedback import FeedbackReconciliationService
 from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.recovery import RecoveryPolicy
 from factory.orchestration.retry import RetryService
@@ -126,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--host", default="127.0.0.1")
     status.add_argument("--port", type=int, default=8765)
     subparsers.add_parser("sync-status", help="Deliver queued status events to Trello.")
+    subparsers.add_parser(
+        "metrics", help="Read deterministic global and per-project sprint metrics."
+    )
     backlog = subparsers.add_parser(
         "sync-backlog", help="Reconcile Trello Sprint cards into GitHub Issues."
     )
@@ -211,6 +220,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"status sync failed: {type(exc).__name__}")
             return EXIT_INTAKE_ERROR
         return EXIT_OK
+    if args.command == "metrics":
+        try:
+            metrics = SqliteSprintMetrics(config.database.path)
+            metrics.initialize()
+            print(json.dumps([row.as_dict() for row in metrics.report()], sort_keys=True))
+            return EXIT_OK
+        except Exception as exc:  # noqa: BLE001 - persistence details stay private
+            print(f"metrics failed: {type(exc).__name__}")
+            return EXIT_INTAKE_ERROR
 
     parser.print_help()
     return EXIT_OK
@@ -330,7 +348,17 @@ def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintS
         registry=config.project_registry,
     )
     return SprintService(
-        source, materializer, links, tasks, sprints, registry=config.project_registry
+        source,
+        materializer,
+        links,
+        tasks,
+        sprints,
+        registry=config.project_registry,
+        feedback_events=(
+            SqliteFeedbackEventRepository(config.database.path)
+            if config.project_registry is not None
+            else None
+        ),
     )
 
 
@@ -765,6 +793,26 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     )
     adapter = _build_agent_adapter(config)
     write_client = GitHubWriteClient(config.github_write_token or "", config.github.api_url)
+    feedback = None
+    if (
+        config.project_registry is not None
+        and config.trello_key is not None
+        and config.trello_token is not None
+        and sprint is not None
+    ):
+        feedback = FeedbackReconciliationService(
+            tasks,
+            pull_requests,
+            GitHubDeliveryEvidenceSource(read_client, config.project_registry),
+            GitHubIssueCompletionSink(write_client),
+            TrelloWorkItemFeedbackSink(
+                config.trello_key, config.trello_token, config.project_registry
+            ),
+            SqliteFeedbackEventRepository(database.path),
+            SqliteBacklogLinkRepository(database.path),
+            config.project_registry,
+            SqliteSprintRepository(database.path),
+        )
     operational_provisioner = (
         ScratchWorkspaceProvisioner(config.operational_scratch_root)
         if config.operational_scratch_root is not None
@@ -800,6 +848,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         workspace_root=config.workspace_root,
         gate_specs=config.quality_gates,
         registry=config.project_registry,
+        feedback=feedback,
         task_gate_specs=config.task_quality_gates,
         gate_runner=LocalQualityGateRunner(),
         revision_inspector=GitWorkspaceRevisionInspector(),

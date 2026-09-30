@@ -429,6 +429,7 @@ class PullRequest:
     run_id: str | None = None
     opened_at: datetime = field(default_factory=_utcnow)
     merged: bool = False
+    commit_sha: str | None = None
 
 
 @runtime_checkable

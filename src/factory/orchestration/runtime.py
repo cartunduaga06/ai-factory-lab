@@ -33,6 +33,7 @@ from factory.domain.ports import (
 from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 from factory.orchestration.context import ContextBuildError, ContextPackBuilder
 from factory.orchestration.dispatch import DispatchService
+from factory.orchestration.feedback import FeedbackReconciliationService
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
 from factory.orchestration.publication import PublicationResult, PublicationService
 from factory.orchestration.reconciliation import ReconciliationService
@@ -94,10 +95,12 @@ class FactoryRuntime:
         recovery_policy: RecoveryPolicy | None = None,
         context_builder: ContextPackBuilder | None = None,
         registry: ProjectRegistry | None = None,
+        feedback: FeedbackReconciliationService | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
         self._registry = registry
+        self._feedback = feedback
         self._tasks = tasks
         self._runs = runs
         self._adapter = adapter
@@ -168,11 +171,13 @@ class FactoryRuntime:
         """Run intake and reconcile exactly one task, never merging or deploying."""
         try:
             self._reconciliation.reconcile()
+            self._reconcile_human_reviews()
             if self._sprint is not None and self._sprint.is_paused():
-                self._reconcile_human_reviews()
-                return RuntimeResult(
-                    None, None, None, None, None, None, None, "SPRINT_PAUSED", IntakeSummary()
-                )
+                self._sprint.resume_completed()
+                if self._sprint.is_paused():
+                    return RuntimeResult(
+                        None, None, None, None, None, None, None, "SPRINT_PAUSED", IntakeSummary()
+                    )
             if self._sprint is not None and not self._sprint.prepare():
                 outcome = "SPRINT_PAUSED" if self._sprint.is_paused() else "NO_ELIGIBLE_TASK"
                 return RuntimeResult(
@@ -429,6 +434,8 @@ class FactoryRuntime:
         review_tasks = [
             *self._tasks.list(TaskStatus.WAITING_HUMAN),
             *self._tasks.list(TaskStatus.VALIDATING),
+            *self._tasks.list(TaskStatus.DONE),
+            *self._tasks.list(TaskStatus.FAILED),
         ]
         for task in review_tasks:
             if self._registry is not None:
@@ -436,7 +443,11 @@ class FactoryRuntime:
                     self._registry.resolve(task.project_id, task.target_repository)
                 except ProjectRoutingError:
                     continue
-            if self._sprint is not None and not self._sprint.allows_review(task):
+            if (
+                self._sprint is not None
+                and task.status is not TaskStatus.DONE
+                and not self._sprint.allows_review(task)
+            ):
                 continue
             if task.kind is not TaskKind.CODE:
                 continue
@@ -456,9 +467,22 @@ class FactoryRuntime:
                 continue
             state = self._pull_request_state.state(pr)
             if state is PullRequestState.MERGED:
-                self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
-            elif state is PullRequestState.CLOSED:
+                if self._feedback is not None:
+                    self._feedback.reconcile(task, run)
+                elif task.status in {TaskStatus.WAITING_HUMAN, TaskStatus.VALIDATING}:
+                    self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
+            elif state is PullRequestState.CLOSED and task.status in {
+                TaskStatus.WAITING_HUMAN,
+                TaskStatus.VALIDATING,
+            }:
                 self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
+                if self._feedback is not None:
+                    self._feedback.sync(task, run, "CLOSED")
+            elif self._feedback is not None and task.status in {
+                TaskStatus.WAITING_HUMAN,
+                TaskStatus.FAILED,
+            }:
+                self._feedback.sync(task, run, task.status.value)
 
     def _select_task(self) -> FactoryTask | None:
         # Recovery states take precedence over new work; ordering within each

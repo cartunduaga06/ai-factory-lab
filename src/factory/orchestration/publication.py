@@ -145,6 +145,7 @@ class PublicationService:
                 revision = self._publisher.publish(task, run)
                 if revision.branch != rework.head_branch:
                     raise PullRequestIdentityError(task.task_id, run.run_id)
+                rework = self._pull_requests.record_revision(rework, revision.commit_sha)
             status, opened = self._reconcile(task.task_id)
             return PublicationResult(rework, status, opened)
 
@@ -172,7 +173,7 @@ class PublicationService:
             raise ValidatedRevisionMissingError(task.task_id, run.run_id)
 
         revision = self._publisher.publish(task, run)
-        pull_request = self._resolve_pull_request(task, run, revision.branch)
+        pull_request = self._resolve_pull_request(task, run, revision.branch, revision.commit_sha)
         persisted = self._persist(pull_request)
         status, opened = self._reconcile(task.task_id)
         return PublicationResult(pull_request=persisted, task_status=status, opened_now=opened)
@@ -300,7 +301,7 @@ class PublicationService:
             raise PullRequestIdentityError(task.task_id, run.run_id)
 
     def _resolve_pull_request(
-        self, task: FactoryTask, run: AgentRun, head_branch: str
+        self, task: FactoryTask, run: AgentRun, head_branch: str, commit_sha: str
     ) -> PullRequest:
         """Recover an existing open PR for the branch, or open a new one."""
         workspace = run.workspace
@@ -312,7 +313,7 @@ class PublicationService:
             # Defense in depth: the sink contract promises exact identity, but the
             # service must not re-label a recovered PR with the configured base.
             self._require_provider_identity(task, run, found, head_branch)
-            return _with_factory_metadata(found, task, run, self._base_for(task))
+            return _with_factory_metadata(found, task, run, self._base_for(task), commit_sha)
 
         requested = PullRequest(
             repository_slug=workspace.repository_slug,
@@ -327,7 +328,7 @@ class PublicationService:
         # The same bar applies to a created PR: a provider response that does not
         # confirm the expected identity must not be persisted or advance the task.
         self._require_provider_identity(task, run, opened, head_branch)
-        return _with_factory_metadata(opened, task, run, self._base_for(task))
+        return _with_factory_metadata(opened, task, run, self._base_for(task), commit_sha)
 
     def _require_provider_identity(
         self,
@@ -460,7 +461,11 @@ def _bounded_title(title: str) -> str:
 
 
 def _with_factory_metadata(
-    pull_request: PullRequest, task: FactoryTask, run: AgentRun, base_branch: str
+    pull_request: PullRequest,
+    task: FactoryTask,
+    run: AgentRun,
+    base_branch: str,
+    commit_sha: str,
 ) -> PullRequest:
     """Return ``pull_request`` with factory-owned identity and a bounded title/body.
 
@@ -480,6 +485,7 @@ def _with_factory_metadata(
         run_id=run.run_id,
         opened_at=pull_request.opened_at,
         merged=pull_request.merged,
+        commit_sha=commit_sha,
     )
 
 
