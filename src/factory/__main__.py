@@ -806,7 +806,10 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
             GitHubDeliveryEvidenceSource(read_client, config.project_registry),
             GitHubIssueCompletionSink(write_client),
             TrelloWorkItemFeedbackSink(
-                config.trello_key, config.trello_token, config.project_registry
+                config.trello_key,
+                config.trello_token,
+                config.project_registry,
+                done_list_id=config.trello_done_list_id,
             ),
             SqliteFeedbackEventRepository(database.path),
             SqliteBacklogLinkRepository(database.path),

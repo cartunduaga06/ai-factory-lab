@@ -58,10 +58,15 @@ class TrelloWorkItemFeedbackSink(WorkItemFeedbackSink):
         token: str,
         registry: ProjectRegistry,
         transport: TrelloFeedbackTransport | None = None,
+        *,
+        done_list_id: str | None = None,
     ) -> None:
         self._key = key
         self._token = token
         self._registry = registry
+        if done_list_id is not None and re.fullmatch(r"[A-Za-z0-9]+", done_list_id) is None:
+            raise TrelloFeedbackError("invalid DONE list identity")
+        self._done_list_id = done_list_id
         self._transport = transport or UrllibFeedbackTransport()
 
     def sync(self, identity: FeedbackIdentity, phase: str) -> None:
@@ -83,7 +88,7 @@ class TrelloWorkItemFeedbackSink(WorkItemFeedbackSink):
         }
         try:
             card = self._transport.request_json(
-                "GET", url + "?fields=id,desc,dueComplete", headers, None
+                "GET", url + "?fields=id,desc,dueComplete,idList", headers, None
             )
         except Exception:
             raise TrelloFeedbackError("Trello card read failed") from None
@@ -106,9 +111,17 @@ class TrelloWorkItemFeedbackSink(WorkItemFeedbackSink):
         )
         description = original + "\n\n" + suffix
         completed = phase == "DONE"
-        if raw == description and card.get("dueComplete") is completed:
+        desired_list = self._done_list_id if completed else None
+        if (
+            raw == description
+            and card.get("dueComplete") is completed
+            and (desired_list is None or card.get("idList") == desired_list)
+        ):
             return
-        payload = json.dumps({"desc": description, "dueComplete": completed}).encode()
+        update = {"desc": description, "dueComplete": completed}
+        if desired_list is not None:
+            update["idList"] = desired_list
+        payload = json.dumps(update).encode()
         headers = {**headers, "Content-Type": "application/json"}
         try:
             updated = self._transport.request_json("PUT", url, headers, payload)
@@ -119,5 +132,6 @@ class TrelloWorkItemFeedbackSink(WorkItemFeedbackSink):
             or updated.get("id") != identity.work_item_id
             or updated.get("desc") != description
             or updated.get("dueComplete") is not completed
+            or (desired_list is not None and updated.get("idList") != desired_list)
         ):
             raise TrelloFeedbackError("Trello card update identity mismatch")
