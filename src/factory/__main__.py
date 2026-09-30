@@ -75,6 +75,10 @@ from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 from factory.orchestration.sprint import AuthorizedBacklogSource, SprintService
 from factory.orchestration.status import StatusService
 from factory.orchestration.status_events import StatusEventPublisher
+from factory.orchestration.terminal_recovery import (
+    TerminalRecoveryRefused,
+    TerminalRecoveryService,
+)
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
 
 EXIT_OK = 0
@@ -128,6 +132,17 @@ def build_parser() -> argparse.ArgumentParser:
         "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
     )
     retry.add_argument("--task-id", required=True, type=UUID, help="UUID of the task to recover.")
+    timeout_recovery = subparsers.add_parser(
+        "recover-timeout",
+        help="Operator-evidenced recovery of one FAILED Codex timeout; never dispatches.",
+    )
+    timeout_recovery.add_argument("--task-id", required=True, type=UUID)
+    timeout_recovery.add_argument("--run-id", required=True, type=UUID)
+    timeout_recovery.add_argument(
+        "--acknowledge-timeout",
+        action="store_true",
+        help="Explicitly attest to a reviewed worker timeout and request recovery.",
+    )
     rework = subparsers.add_parser(
         "request-changes", help="Record human QA feedback for an open PR."
     )
@@ -163,6 +178,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_sprint(config, args.action, args.manifest, args.sprint_id)
     if args.command == "retry":
         return _run_retry(config, str(args.task_id))
+    if args.command == "recover-timeout":
+        return _recover_terminal_timeout(
+            config, str(args.task_id), str(args.run_id), args.acknowledge_timeout
+        )
     if args.command == "request-changes":
         return _request_changes(config, str(args.task_id), args.feedback_file)
     if args.command == "run":
@@ -466,6 +485,68 @@ def _status_publisher(config: FactoryConfig) -> StatusEventPublisher | None:
     )
     channel = TrelloStatusChannel(card_id, key, token)
     return StatusEventPublisher(service, events, channel, channel)
+
+
+def _recover_terminal_timeout(
+    config: FactoryConfig, task_id: str, run_id: str, acknowledged: bool
+) -> int:
+    """Exceptional operator action: fail closed, never dispatch or resume."""
+    if not acknowledged:
+        print("recover-timeout refused: --acknowledge-timeout is required")
+        return EXIT_INTAKE_ERROR
+    try:
+        token = config.github.token
+        write_token = config.github_write_token
+        source_checkout = config.source_checkout
+        if not token or not write_token or not source_checkout:
+            raise ConfigurationError(
+                "GitHub read/write credentials and source checkout are required"
+            )
+        tasks = SqliteTaskRepository(config.database.path)
+        runs = SqliteRunRepository(config.database.path)
+        prs = SqlitePullRequestRepository(config.database.path)
+        tasks.initialize()
+        runs.initialize()
+        prs.initialize()
+        source = GitHubIssueSource(
+            GitHubClient(token=token, api_url=config.github.api_url),
+            target_repository=config.github.target_repo,
+        )
+        intake = IssueIntakeService(source=source, repository=tasks)
+        service = TerminalRecoveryService(
+            tasks,
+            runs,
+            prs,
+            GitHubPullRequestSink(GitHubWriteClient(write_token, config.github.api_url)),
+            GitWorktreeWorkspaceProvisioner(source_checkout, base_ref=config.workspace_base_ref),
+            workspace_root=config.workspace_root,
+            base_branch=config.target_default_branch,
+            source_is_eligible=lambda task: (
+                task.source is not None
+                and intake.is_eligible(
+                    Repository(task.source.repository_slug, role=RepositoryRole.CONTROL_PLANE),
+                    task.source,
+                )
+            ),
+            sprint=_build_sprint(config, tasks),
+        )
+        result = service.authorize(task_id, run_id, acknowledge_timeout=True)
+    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except KeyError:
+        print("recover-timeout refused: task was not found")
+        return EXIT_INTAKE_ERROR
+    except (TerminalRecoveryRefused, TaskStateChangedError) as exc:
+        print(f"recover-timeout refused: {exc}")
+        return EXIT_INTAKE_ERROR
+    except Exception as exc:  # noqa: BLE001 - do not expose remote/provider values
+        print(f"recover-timeout failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    print(f"Task: {result.task_id}")
+    print("Task status: BLOCKED")
+    print("Next steps: explicit factory retry, then human Sprint resume.")
+    return EXIT_OK
 
 
 def _run_retry(config: FactoryConfig, task_id: str) -> int:

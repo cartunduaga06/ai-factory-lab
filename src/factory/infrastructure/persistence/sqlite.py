@@ -265,6 +265,66 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         assert updated is not None  # the guarded UPDATE above proved the row exists
         return _row_to_task(updated)
 
+    def authorize_terminal_timeout_recovery(self, task_id: str, run_id: str) -> FactoryTask:
+        """Exceptional operator-approved FAILED -> BLOCKED, atomically audited.
+
+        The normal state machine still treats FAILED as terminal. This special
+        CAS requires the exact latest failed CODE run, no active run anywhere,
+        and no locally persisted PR. Provider/workspace checks happen above.
+        """
+        timestamp = encode_datetime(datetime.now(UTC))
+        marker = "terminal-timeout-recovery:" + run_id
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE {TASKS_TABLE}
+                   SET status = ?, blocked_reason = ?, updated_at = ?
+                 WHERE task_id = ? AND status = 'FAILED' AND kind = 'CODE'
+                   AND EXISTS (
+                     SELECT 1 FROM {AGENT_RUNS_TABLE} r
+                     WHERE r.run_id = ? AND r.task_id = {TASKS_TABLE}.task_id
+                       AND r.status = 'FAILED' AND r.workspace_id IS NOT NULL
+                       AND r.rowid = (
+                         SELECT x.rowid FROM {AGENT_RUNS_TABLE} x
+                         WHERE x.task_id = {TASKS_TABLE}.task_id
+                         ORDER BY x.created_at DESC, x.run_id DESC LIMIT 1
+                       )
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM {AGENT_RUNS_TABLE} active
+                     WHERE active.status IN ('PENDING', 'RUNNING')
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM pull_requests pr
+                     WHERE pr.task_id = {TASKS_TABLE}.task_id
+                   )
+                """,
+                (TaskStatus.BLOCKED.value, marker, timestamp, task_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                row = conn.execute(
+                    f"SELECT status FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(task_id)
+                if row["status"] != TaskStatus.FAILED.value:
+                    raise TaskStateChangedError(
+                        task_id, TaskStatus.FAILED, TaskStatus(row["status"])
+                    )
+                raise ValueError("terminal recovery evidence or concurrency guard rejected")
+            # audit_transition adds the immutable E1 fact in the same transaction.
+            conn.execute(
+                f"""INSERT INTO {TRANSITIONS_TABLE}
+                    (transition_id, task_id, from_status, to_status, occurred_at)
+                    VALUES (?, ?, 'FAILED', 'BLOCKED', ?)""",
+                (str(uuid.uuid4()), task_id, timestamp),
+            )
+            updated = conn.execute(
+                f"SELECT * FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        assert updated is not None
+        return _row_to_task(updated)
+
     def history(self, task_id: str) -> Sequence[TaskTransition]:
         with self._connect() as conn:
             rows = conn.execute(

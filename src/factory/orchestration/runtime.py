@@ -296,7 +296,25 @@ class FactoryRuntime:
                     )
                     if elapsed < delay:
                         return self._result(task, previous, None, "BACKOFF_PENDING", intake)
-                if (feedback is not None or gate_feedback is not None) and previous is not None:
+                # An operator-authorized terminal timeout is exceptional:
+                # reuse the exact failed run's checkout instead of discarding
+                # partially written code. The prior FAILED run stays immutable.
+                timeout_recovery = (
+                    previous is not None
+                    and previous.status is RunStatus.FAILED
+                    and task.blocked_reason == f"terminal-timeout-recovery:{previous.run_id}"
+                )
+                if timeout_recovery:
+                    if self._adapter.kind is not AgentKind.CODEX:
+                        return self._result(task, previous, None, "ENGINE_MISMATCH", intake)
+                    run = self._dispatch.dispatch_rework(
+                        task.task_id,
+                        self._adapter,
+                        "Operator-authorized timeout recovery: resume the original "
+                        "workspace without erasing existing changes. Complete the "
+                        "original task and required tests; stop at human PR review.",
+                    )
+                elif (feedback is not None or gate_feedback is not None) and previous is not None:
                     if feedback is not None and self._adapter.kind is not AgentKind.CODEX:
                         return self._result(task, previous, None, "ENGINE_MISMATCH", intake)
                     run = self._dispatch.dispatch_rework(
