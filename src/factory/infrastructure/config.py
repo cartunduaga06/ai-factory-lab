@@ -268,6 +268,7 @@ class FactoryConfig:
     trello_token: str | None = field(default=None, repr=False)
     trello_backlog_list_id: str | None = None
     trello_ready_label_id: str | None = None
+    trello_done_list_id: str | None = None
     # Command the OpenHands conversation runs as a shared-workspace hook. When
     # set, it is passed as ``hook_config`` on conversation creation: it
     # normalizes owner-side after ``file_editor`` writes and blocks completion
@@ -381,6 +382,7 @@ class FactoryConfig:
             trello_token=_clean(source.get("FACTORY_TRELLO_TOKEN")),
             trello_backlog_list_id=_clean(source.get("FACTORY_TRELLO_BACKLOG_LIST_ID")),
             trello_ready_label_id=_clean(source.get("FACTORY_TRELLO_READY_LABEL_ID")),
+            trello_done_list_id=_clean(source.get("FACTORY_TRELLO_DONE_LIST_ID")),
             openhands_shared_workspace_hook_command=_clean(
                 source.get("OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND")
             ),
@@ -452,6 +454,7 @@ class FactoryConfig:
             "trello_token": "***" if self.trello_token else None,
             "trello_backlog_list_id": self.trello_backlog_list_id,
             "trello_ready_label_id": self.trello_ready_label_id,
+            "trello_done_list_id": self.trello_done_list_id,
             "openhands_shared_workspace_hook_command": (
                 self.openhands_shared_workspace_hook_command
             ),

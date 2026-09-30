@@ -93,6 +93,7 @@ class TrelloTransport:
             "id": "carda",
             "desc": description,
             "dueComplete": False,
+            "idList": "backlog",
         }
         self.writes = 0
 
@@ -198,3 +199,25 @@ def test_delivery_fails_closed_when_configured_ci_check_is_missing() -> None:
     ).evidence(_identity())
     assert not evidence.required_ci_passed
     assert not evidence.complete
+
+
+def test_trello_done_moves_card_to_configured_done_list_idempotently() -> None:
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    transport = TrelloTransport("project_id: project-a\nOriginal")
+    sink = TrelloWorkItemFeedbackSink("key", "token", registry, transport, done_list_id="done123")
+    sink.sync(_identity(), "DONE")
+    assert transport.card["dueComplete"] is True
+    assert transport.card["idList"] == "done123"
+    assert transport.writes == 1
+    sink.sync(_identity(), "DONE")
+    assert transport.writes == 1

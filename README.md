@@ -30,8 +30,9 @@ deployment acceptance requirement. Deployment remains a human operation.
 
 After verification, the Factory marks the task DONE, writes one marker-based
 closure comment, removes `factory-ready`, closes the source Issue with reason
-`completed`, sets the Trello card to DONE/complete, and records one final E1
-`DeliveryReconciled` event. Repeated runs check the same identities and repair a
+`completed`, sets the Trello card to DONE/complete and, when
+`FACTORY_TRELLO_DONE_LIST_ID` is configured, moves it to that DONE list; then
+it records one final E1 `DeliveryReconciled` event. Repeated runs check the same identities and repair a
 previously DONE task whose Issue or card is still open. The next authorized
 WorkItem is eligible only after the final event is durable. Closed PRs are
 recorded as cancelled and projected to Trello; open reviewed PRs and failed
