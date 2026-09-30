@@ -55,6 +55,28 @@ The output masks all credentials (`"***"`). Never commit `.env`.
 | Manual issue intake | `python -m factory intake` |
 | One-shot task run | `python -m factory run` |
 | Automatic worker | `python -m factory watch` |
+| Current operator snapshot | `python -m factory status` |
+| Phone view (loopback) | `python -m factory status --serve` |
+| Retry queued Trello events | `python -m factory sync-status` |
+
+The read-only phone view is at `/factory/status` (add `?task_id=<id>` for one
+task). It binds to loopback only; use a trusted, authenticated reverse proxy or
+tunnel for remote phone access. JSON is available with `Accept: application/json`.
+No write routes exist. The page uses allowlisted identifiers, timestamps and
+deterministic evidence; agent summaries, task bodies, provider payloads and
+workspace paths are omitted. `STALLED` is derived from the persisted heartbeat
+and configured missed interval, leaving the task's lifecycle status `RUNNING`.
+
+When the Trello card ID, key and token are configured, meaningful transitions
+are queued transactionally and delivered during `run`/`watch` and by the status
+server's once-per-minute monitor. `sync-status` retries queued events after a
+restart. Heartbeats do not enqueue events. Stall and recovery observations are
+deduplicated per run heartbeat. Delivery failure leaves the event pending and
+does not interrupt an agent run. A separate alert channel can implement the
+`AlertChannel` port; the Trello implementation comments on the card only for
+`WAITING_HUMAN`, `FAILED`, `STALLED` and `DONE`, never heartbeat updates. Another
+channel can implement the same port later. Delivery is at least once after a
+crash between the remote write and the local acknowledgement.
 
 `pyproject.toml` sets `testpaths = ["tests"]` and `pythonpath = ["src"]`, so
 `pytest` works from the repository root without installing the package.

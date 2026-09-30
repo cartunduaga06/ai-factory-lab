@@ -37,6 +37,7 @@ from factory.infrastructure.persistence import (
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
 from factory.integrations.gates import LocalQualityGateRunner
 from factory.integrations.github import (
@@ -53,6 +54,8 @@ from factory.integrations.openhands import (
     WorkspacePathMapper,
 )
 from factory.integrations.operational import ScratchAcceptance, ScratchWorkspaceProvisioner
+from factory.integrations.status_http import serve_status
+from factory.integrations.trello.status import TrelloStatusChannel
 from factory.integrations.workspace import (
     GitWorkspacePublisher,
     GitWorkspaceRevisionInspector,
@@ -62,6 +65,8 @@ from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.retry import RetryService
 from factory.orchestration.rework import ReworkNotAllowedError, ReworkService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
+from factory.orchestration.status import StatusService
+from factory.orchestration.status_events import StatusEventPublisher
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
 
 EXIT_OK = 0
@@ -94,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         "watch",
         help="Automatic worker: sequential one-task iterations (WIP=1) with idle waits.",
     )
+    status = subparsers.add_parser("status", help="Read the current factory status.")
+    status.add_argument("--serve", action="store_true", help="Serve a read-only phone view.")
+    status.add_argument("--host", default="127.0.0.1")
+    status.add_argument("--port", type=int, default=8765)
+    subparsers.add_parser("sync-status", help="Deliver queued status events to Trello.")
     retry = subparsers.add_parser(
         "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
     )
@@ -135,6 +145,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_runtime(config)
     if args.command == "watch":
         return _run_watch(config)
+    if args.command == "status":
+        return _show_status(config, serve=args.serve, host=args.host, port=args.port)
+    if args.command == "sync-status":
+        publisher = _status_publisher(config)
+        if publisher is None:
+            print("configuration error: Trello status card, key and token are required")
+            return EXIT_CONFIG_ERROR
+        try:
+            publisher.flush()
+        except Exception as exc:  # noqa: BLE001 - provider errors may contain credentials
+            print(f"status sync failed: {type(exc).__name__}")
+            return EXIT_INTAKE_ERROR
+        return EXIT_OK
 
     parser.print_help()
     return EXIT_OK
@@ -183,6 +206,65 @@ def _run_intake(config: FactoryConfig) -> int:
     print(f"Existing: {summary.existing}")
     print(f"Errors: {summary.errors}")
     return EXIT_OK if summary.errors == 0 else EXIT_INTAKE_ERROR
+
+
+def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) -> int:
+    """Read only durable state; serving is loopback by default."""
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        print("configuration error: status server must bind to loopback")
+        return EXIT_CONFIG_ERROR
+    try:
+        path = config.database.path
+        tasks = SqliteTaskRepository(path)
+        runs = SqliteRunRepository(path)
+        prs = SqlitePullRequestRepository(path)
+        tasks.initialize()
+        runs.initialize()
+        prs.initialize()
+        service = StatusService(
+            tasks,
+            runs,
+            prs,
+            heartbeat_interval=config.heartbeat_interval,
+            missed_heartbeats=config.missed_heartbeats,
+        )
+        if serve:
+            publisher = _status_publisher(config)
+            serve_status(service, host, port, publisher.flush if publisher else None)
+        else:
+            from dataclasses import asdict
+
+            print(json.dumps(asdict(service.current()), indent=2))
+    except Exception as exc:  # noqa: BLE001 - storage and path details are not public
+        print(f"status failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    return EXIT_OK
+
+
+def _status_publisher(config: FactoryConfig) -> StatusEventPublisher | None:
+    card_id = config.trello_status_card_id
+    key = config.trello_key
+    token = config.trello_token
+    if card_id is None or key is None or token is None:
+        return None
+    path = config.database.path
+    tasks = SqliteTaskRepository(path)
+    runs = SqliteRunRepository(path)
+    prs = SqlitePullRequestRepository(path)
+    events = SqliteStatusEventStore(path)
+    tasks.initialize()
+    runs.initialize()
+    prs.initialize()
+    events.initialize()
+    service = StatusService(
+        tasks,
+        runs,
+        prs,
+        heartbeat_interval=config.heartbeat_interval,
+        missed_heartbeats=config.missed_heartbeats,
+    )
+    channel = TrelloStatusChannel(card_id, key, token)
+    return StatusEventPublisher(service, events, channel, channel)
 
 
 def _run_retry(config: FactoryConfig, task_id: str) -> int:
@@ -336,6 +418,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     tasks.initialize()
     runs.initialize()
     pull_requests.initialize()
+    status_publisher = _status_publisher(config)
 
     read_client = GitHubClient(token=config.github.token or "", api_url=config.github.api_url)
     intake = IssueIntakeService(
@@ -385,6 +468,8 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         ),
         poll_interval=config.run_poll_interval,
         timeout=config.run_timeout,
+        heartbeat_interval=config.heartbeat_interval,
+        status_pulse=status_publisher.flush if status_publisher else None,
     )
 
 

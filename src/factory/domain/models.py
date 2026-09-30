@@ -289,6 +289,7 @@ class AgentRun:
     workspace: Workspace | None = None
     summary: str | None = None
     started_at: datetime | None = None
+    last_heartbeat: datetime | None = None
     finished_at: datetime | None = None
     gates: tuple[QualityGate, ...] = ()
     #: Durable identity of the workspace revision that passed validation.
@@ -352,6 +353,27 @@ class AgentRun:
         if self.required_gates_passed:
             return ValidationOutcome.READY_FOR_NEXT_PHASE
         return ValidationOutcome.GATES_FAILED
+
+
+@dataclass(slots=True, frozen=True)
+class StatusSnapshot:
+    """Allowlisted operator data shared with output adapters."""
+
+    phase: str
+    task_id: str | None = None
+    issue_url: str | None = None
+    run_id: str | None = None
+    agent: str | None = None
+    workspace_id: str | None = None
+    branch: str | None = None
+    started_at: str | None = None
+    last_heartbeat: str | None = None
+    last_transition: str | None = None
+    finished_at: str | None = None
+    pr_url: str | None = None
+    action: str | None = None
+    evidence: str | None = None
+    history: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -436,6 +458,7 @@ __all__ = [
     "QualityGate",
     "QualityGateSpec",
     "Repository",
+    "StatusSnapshot",
     "TaskSource",
     "TaskTransition",
     "Workspace",

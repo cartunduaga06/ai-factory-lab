@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from factory.domain.enums import (
     QualityGateStatus,
@@ -103,6 +104,7 @@ class RunTrackingService:
         pull_request_sink: PullRequestSink | None = None,
         base_branch: str = "main",
         operational_acceptance: OperationalAcceptance | None = None,
+        heartbeat_interval: float = 180.0,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
@@ -115,6 +117,7 @@ class RunTrackingService:
         self._base_branch = base_branch
         self._operational_acceptance = operational_acceptance
         self._lifecycle = TaskLifecycleService(tasks)
+        self._heartbeat_interval = timedelta(seconds=heartbeat_interval)
 
     def refresh(self, run_id: str, adapter: AgentAdapter) -> RunRefresh:
         """Collect ``run_id`` from ``adapter``, persist it and advance the task.
@@ -160,6 +163,11 @@ class RunTrackingService:
 
         if collection_failed:
             raise AgentCollectError(run.run_id, run.task_id)
+
+        if run.status in {RunStatus.PENDING, RunStatus.RUNNING}:
+            now = datetime.now(UTC)
+            if run.last_heartbeat is None or now - run.last_heartbeat >= self._heartbeat_interval:
+                run.last_heartbeat = now
 
         if run.status is RunStatus.SUCCEEDED:
             task = self._tasks.get(run.task_id)

@@ -11,6 +11,7 @@ See ``.env.example`` for the full, placeholder-only reference.
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -30,6 +31,8 @@ DEFAULT_RUN_TIMEOUT = 1800.0
 # Idle wait between watch iterations when no eligible work exists. Positive by
 # default so an unattended worker cannot spin against the GitHub API.
 DEFAULT_WATCH_IDLE_INTERVAL = 60.0
+DEFAULT_HEARTBEAT_INTERVAL = 180.0
+DEFAULT_MISSED_HEARTBEATS = 2
 
 
 class DatabaseScheme(StrEnum):
@@ -103,7 +106,7 @@ def _duration(value: str | None, default: float) -> float:
         parsed = float(cleaned)
     except ValueError:
         return default
-    return parsed if parsed >= 0 else default
+    return parsed if math.isfinite(parsed) and parsed >= 0 else default
 
 
 @dataclass(slots=True, frozen=True)
@@ -256,6 +259,11 @@ class FactoryConfig:
     # Idle wait between iterations of the automatic worker. Only ``factory watch``
     # reads it; ``factory run`` stays a single bounded pass.
     watch_idle_interval: float = DEFAULT_WATCH_IDLE_INTERVAL
+    heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL
+    missed_heartbeats: int = DEFAULT_MISSED_HEARTBEATS
+    trello_status_card_id: str | None = None
+    trello_key: str | None = field(default=None, repr=False)
+    trello_token: str | None = field(default=None, repr=False)
     # Command the OpenHands conversation runs as a shared-workspace hook. When
     # set, it is passed as ``hook_config`` on conversation creation: it
     # normalizes owner-side after ``file_editor`` writes and blocks completion
@@ -333,6 +341,27 @@ class FactoryConfig:
             watch_idle_interval=_duration(
                 source.get("FACTORY_WATCH_IDLE_INTERVAL"), DEFAULT_WATCH_IDLE_INTERVAL
             ),
+            heartbeat_interval=max(
+                120.0,
+                min(
+                    300.0,
+                    _duration(source.get("FACTORY_HEARTBEAT_INTERVAL"), DEFAULT_HEARTBEAT_INTERVAL),
+                ),
+            ),
+            missed_heartbeats=max(
+                1,
+                min(
+                    1000,
+                    int(
+                        _duration(
+                            source.get("FACTORY_MISSED_HEARTBEATS"), DEFAULT_MISSED_HEARTBEATS
+                        )
+                    ),
+                ),
+            ),
+            trello_status_card_id=_clean(source.get("FACTORY_TRELLO_STATUS_CARD_ID")),
+            trello_key=_clean(source.get("FACTORY_TRELLO_KEY")),
+            trello_token=_clean(source.get("FACTORY_TRELLO_TOKEN")),
             openhands_shared_workspace_hook_command=_clean(
                 source.get("OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND")
             ),
@@ -376,6 +405,11 @@ class FactoryConfig:
             "run_poll_interval": self.run_poll_interval,
             "run_timeout": self.run_timeout,
             "watch_idle_interval": self.watch_idle_interval,
+            "heartbeat_interval": self.heartbeat_interval,
+            "missed_heartbeats": self.missed_heartbeats,
+            "trello_status_card_id": self.trello_status_card_id,
+            "trello_key": "***" if self.trello_key else None,
+            "trello_token": "***" if self.trello_token else None,
             "openhands_shared_workspace_hook_command": (
                 self.openhands_shared_workspace_hook_command
             ),

@@ -1,0 +1,216 @@
+"""Operator status is derived from persisted, allowlisted evidence."""
+
+from __future__ import annotations
+
+import sqlite3
+import tempfile
+import unittest
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from urllib.parse import parse_qs
+
+from factory.domain.enums import AgentKind, RunStatus, TaskStatus
+from factory.domain.models import AgentRun, FactoryTask, PullRequest, StatusSnapshot, TaskSource
+from factory.infrastructure.config import FactoryConfig
+from factory.infrastructure.persistence import (
+    SqlitePullRequestRepository,
+    SqliteRunRepository,
+    SqliteTaskRepository,
+)
+from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
+from factory.integrations.status_http import render_status
+from factory.integrations.trello.status import TrelloStatusChannel
+from factory.orchestration.status import StatusService
+from factory.orchestration.status_events import StatusEventPublisher
+from factory.orchestration.tracking import RunTrackingService
+from tests.fake_adapter import FakeAgentAdapter
+
+
+class ControlTowerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        path = str(Path(self.temporary.name) / "factory.db")
+        self.tasks = SqliteTaskRepository(path)
+        self.runs = SqliteRunRepository(path)
+        self.prs = SqlitePullRequestRepository(path)
+        self.events = SqliteStatusEventStore(path)
+        for repository in (self.tasks, self.runs, self.prs, self.events):
+            repository.initialize()
+        self.service = StatusService(
+            self.tasks, self.runs, self.prs, heartbeat_interval=180, missed_heartbeats=2
+        )
+
+    def _task(self, status: TaskStatus) -> FactoryTask:
+        task = FactoryTask(
+            title="Secret-looking task title ghp_private",
+            target_repository="example/project",
+            source=TaskSource("github", "example/project", 53),
+            status=status,
+        )
+        self.tasks.save(task)
+        return task
+
+    def _run(self, task: FactoryTask, *, heartbeat: datetime | None = None) -> AgentRun:
+        run = AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.CODEX,
+            status=RunStatus.RUNNING,
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            last_heartbeat=heartbeat,
+        )
+        self.runs.save_run(run)
+        return run
+
+    def test_running_stall_healthy_heartbeat_and_recovery(self) -> None:
+        task = self._task(TaskStatus.RUNNING)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        run = self._run(task, heartbeat=start)
+        healthy = self.service.for_task(task.task_id, now=start + timedelta(seconds=359))
+        self.assertEqual(healthy.phase, "RUNNING")
+        stalled = self.service.for_task(task.task_id, now=start + timedelta(seconds=361))
+        self.assertEqual(stalled.phase, "STALLED")
+        self.assertEqual(stalled.evidence, "No verified heartbeat within the configured threshold")
+        self.events.observe(stalled)
+        self.events.observe(stalled)
+        self.assertEqual(len(self.events.pending()), 1)
+        run.last_heartbeat = start + timedelta(seconds=362)
+        self.runs.update_run(run)
+        recovered = self.service.for_task(task.task_id, now=start + timedelta(seconds=363))
+        self.assertEqual(recovered.phase, "RUNNING")
+        self.events.observe(recovered)
+        self.assertEqual(len(self.events.pending()), 2)
+
+    def test_config_masks_trello_credentials_and_bounds_heartbeat(self) -> None:
+        config = FactoryConfig.from_env(
+            {
+                "FACTORY_HEARTBEAT_INTERVAL": "9999",
+                "FACTORY_MISSED_HEARTBEATS": "3",
+                "FACTORY_TRELLO_KEY": "key-secret",
+                "FACTORY_TRELLO_TOKEN": "token-secret",
+            }
+        )
+        self.assertEqual(config.heartbeat_interval, 300.0)
+        self.assertEqual(config.missed_heartbeats, 3)
+        self.assertNotIn("key-secret", repr(config))
+        self.assertNotIn("token-secret", repr(config.redacted()))
+
+    def test_phone_view_escapes_dynamic_content(self) -> None:
+        page = render_status(StatusSnapshot(phase="<script>", evidence="<img src=x>"))
+        self.assertIn('name="viewport"', page)
+        self.assertIn("&lt;script&gt;", page)
+        self.assertNotIn("<img src=x>", page)
+
+    def test_successful_collection_persists_heartbeat_without_event(self) -> None:
+        task = self._task(TaskStatus.RUNNING)
+        stale = datetime.now(UTC) - timedelta(minutes=20)
+        run = self._run(task, heartbeat=stale)
+        adapter = FakeAgentAdapter(kind=AgentKind.CODEX, collect_status=RunStatus.RUNNING)
+        tracker = RunTrackingService(self.tasks, self.runs, heartbeat_interval=180)
+        tracker.refresh(run.run_id, adapter)
+        refreshed = self.runs.get_run(run.run_id)
+        self.assertIsNotNone(refreshed)
+        assert refreshed is not None
+        self.assertGreater(refreshed.last_heartbeat, stale)
+        self.assertEqual(self.service.for_task(task.task_id).phase, "RUNNING")
+        self.assertEqual(self.events.pending(), [])
+
+    def test_existing_run_table_gains_heartbeat_column(self) -> None:
+        path = str(Path(self.temporary.name) / "legacy.db")
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, "
+                "adapter TEXT NOT NULL, status TEXT NOT NULL, workspace_id TEXT, "
+                "summary TEXT, started_at TEXT, finished_at TEXT, "
+                "gates TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL)"
+            )
+        SqliteRunRepository(path).initialize()
+        with sqlite3.connect(path) as connection:
+            columns = [row[1] for row in connection.execute("PRAGMA table_info(agent_runs)")]
+        self.assertIn("last_heartbeat", columns)
+
+    def test_waiting_human_done_and_sanitized_failure(self) -> None:
+        task = self._task(TaskStatus.WAITING_HUMAN)
+        run = self._run(task)
+        self.prs.save(
+            PullRequest(
+                repository_slug="example/project",
+                head_branch="factory/task/run",
+                base_branch="main",
+                title="ghp_private",
+                number=17,
+                url="https://evil.example/ghp_private",
+                task_id=task.task_id,
+                run_id=run.run_id,
+            )
+        )
+        waiting = self.service.for_task(task.task_id)
+        self.assertEqual(waiting.action, "Review the pull request")
+        self.assertEqual(waiting.pr_url, "https://github.com/example/project/pull/17")
+        self.assertNotIn("ghp_private", render_status(waiting))
+        task.status = TaskStatus.DONE
+        self.tasks.update(task)
+        self.assertEqual(self.service.for_task(task.task_id).phase, "DONE")
+        task.status = TaskStatus.FAILED
+        self.tasks.update(task)
+        run.status = RunStatus.FAILED
+        run.summary = "token=ghp_private"
+        self.runs.update_run(run)
+        failure = self.service.for_task(task.task_id)
+        self.assertEqual(failure.evidence, "Agent reported failure")
+        self.assertNotIn("ghp_private", render_status(failure))
+
+    def test_transition_outbox_and_trello_payload_exclude_secret_prose(self) -> None:
+        task = self._task(TaskStatus.CLAIMED)
+        self.tasks.apply_transition(task.task_id, TaskStatus.CLAIMED, TaskStatus.RUNNING)
+        self.assertEqual(len(self.events.pending()), 1)
+        requests = []
+        channel = TrelloStatusChannel("abc123", "key-secret", "token-secret", send=requests.append)
+        publisher = StatusEventPublisher(self.service, self.events, channel)
+        publisher.flush()
+        publisher.flush()
+        self.assertEqual(len(requests), 1)
+        request = requests[0]
+        self.assertEqual(request.full_url, "https://api.trello.com/1/cards/abc123")
+        payload = parse_qs(request.data.decode("utf-8"))
+        self.assertNotIn("ghp_private", payload["desc"][0])
+        self.assertEqual(self.events.pending(), [])
+
+    def test_trello_alert_comment_is_filtered_and_sanitized(self) -> None:
+        requests = []
+        channel = TrelloStatusChannel("abc123", "key-secret", "token-secret", send=requests.append)
+        channel.alert(StatusSnapshot(phase="RUNNING", evidence="heartbeat"))
+        self.assertEqual(requests, [])
+        channel.alert(StatusSnapshot(phase="FAILED", evidence="Agent reported failure"))
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].get_method(), "POST")
+        payload = parse_qs(requests[0].data.decode("utf-8"))
+        self.assertEqual(payload["text"], ["Factory alert: FAILED\nAgent reported failure"])
+
+    def test_alert_channel_receives_only_actionable_transitions(self) -> None:
+        task = self._task(TaskStatus.CLAIMED)
+        self.tasks.apply_transition(task.task_id, TaskStatus.CLAIMED, TaskStatus.RUNNING)
+        snapshots = []
+
+        class Channel:
+            def sync(self, snapshot: StatusSnapshot) -> None:
+                snapshots.append(snapshot.phase)
+
+        class Alerts:
+            def alert(self, snapshot: StatusSnapshot) -> None:
+                alerts.append(snapshot.phase)
+
+        alerts: list[str] = []
+        publisher = StatusEventPublisher(self.service, self.events, Channel(), Alerts())
+        publisher.flush()
+        self.assertEqual(alerts, [])
+        self.tasks.apply_transition(task.task_id, TaskStatus.RUNNING, TaskStatus.WAITING_HUMAN)
+        publisher.flush()
+        self.assertEqual(alerts, ["WAITING_HUMAN"])
+        publisher.flush()
+        self.assertEqual(alerts, ["WAITING_HUMAN"])
+        self.assertEqual(snapshots, ["RUNNING", "WAITING_HUMAN"])
+
+
+if __name__ == "__main__":
+    unittest.main()
