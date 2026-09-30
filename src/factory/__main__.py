@@ -27,7 +27,7 @@ from typing import Any
 from uuid import UUID
 
 from factory import __version__
-from factory.domain.enums import RepositoryRole
+from factory.domain.enums import RepositoryRole, TaskStatus
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
 from factory.domain.models import AgentAdapter, Repository
 from factory.domain.ports import IssueSource
@@ -42,6 +42,7 @@ from factory.infrastructure.persistence import (
 from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 from factory.infrastructure.persistence.feedback_sqlite import SqliteFeedbackEventRepository
 from factory.infrastructure.persistence.metrics import SqliteSprintMetrics
+from factory.infrastructure.persistence.security import SqliteSecurityReviewGate
 from factory.infrastructure.persistence.sprint_sqlite import SqliteSprintRepository
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
@@ -71,6 +72,7 @@ from factory.integrations.project_routing import (
     ProjectSkillSource,
     ProjectWorkspaceProvisioner,
 )
+from factory.integrations.security.review import GitSecurityInspector
 from factory.integrations.status_http import serve_status
 from factory.integrations.trello.backlog import TrelloBacklogSource
 from factory.integrations.trello.feedback import TrelloWorkItemFeedbackSink
@@ -95,6 +97,7 @@ from factory.orchestration.terminal_recovery import (
     TerminalRecoveryRefused,
     TerminalRecoveryService,
 )
+from factory.orchestration.transitions import TaskLifecycleService
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
 
 EXIT_OK = 0
@@ -151,6 +154,13 @@ def build_parser() -> argparse.ArgumentParser:
         "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
     )
     retry.add_argument("--task-id", required=True, type=UUID, help="UUID of the task to recover.")
+    override = subparsers.add_parser(
+        "security-override", help="Record a human decision for one blocked security review."
+    )
+    override.add_argument("--task-id", required=True, type=UUID)
+    override.add_argument("--run-id", required=True, type=UUID)
+    override.add_argument("--actor", required=True)
+    override.add_argument("--reason-file", required=True)
     timeout_recovery = subparsers.add_parser(
         "recover-timeout",
         help="Operator-evidenced recovery of one FAILED Codex timeout; never dispatches.",
@@ -197,6 +207,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_sprint(config, args.action, args.manifest, args.sprint_id)
     if args.command == "retry":
         return _run_retry(config, str(args.task_id))
+    if args.command == "security-override":
+        return _security_override(
+            config, str(args.task_id), str(args.run_id), args.actor, args.reason_file
+        )
     if args.command == "recover-timeout":
         return _recover_terminal_timeout(
             config, str(args.task_id), str(args.run_id), args.acknowledge_timeout
@@ -610,6 +624,48 @@ def _recover_terminal_timeout(
     return EXIT_OK
 
 
+def _security_override(
+    config: FactoryConfig, task_id: str, run_id: str, actor: str, reason_file: str
+) -> int:
+    """Resume only the exact blocked revision after a recorded human decision."""
+    try:
+        tasks = SqliteTaskRepository(config.database.path)
+        runs = SqliteRunRepository(config.database.path)
+        tasks.initialize()
+        runs.initialize()
+        task = tasks.get(task_id)
+        run = runs.get_run(run_id)
+        if (
+            task is None
+            or run is None
+            or run.task_id != task_id
+            or task.status is not TaskStatus.BLOCKED
+            or task.blocked_reason != "security review blocked publication"
+            or not runs.list_runs(task_id)
+            or runs.list_runs(task_id)[-1].run_id != run_id
+        ):
+            raise ValueError("task is not blocked on this security review")
+        path = Path(reason_file)
+        if path.stat().st_size > 4096:
+            raise ValueError("decision reason too large")
+        reason = path.read_text(encoding="utf-8")
+        gate = SqliteSecurityReviewGate(
+            config.database.path,
+            GitSecurityInspector(
+                base_ref=config.workspace_base_ref or config.target_default_branch,
+                registry=config.project_registry,
+            ),
+        )
+        review = gate.review(task, run)
+        gate.record_override(task, run, review, actor=actor, reason=reason)
+        TaskLifecycleService(tasks).transition(task_id, TaskStatus.VALIDATING)
+    except Exception as exc:  # noqa: BLE001 - all source and path details are private
+        print(f"security override refused: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    print("Security override recorded; task returned to VALIDATING")
+    return EXIT_OK
+
+
 def _run_retry(config: FactoryConfig, task_id: str) -> int:
     """Recover only the requested task using local repositories; never run intake."""
     try:
@@ -855,6 +911,13 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         task_gate_specs=config.task_quality_gates,
         gate_runner=LocalQualityGateRunner(),
         revision_inspector=GitWorkspaceRevisionInspector(),
+        security_review=SqliteSecurityReviewGate(
+            config.database.path,
+            GitSecurityInspector(
+                base_ref=config.workspace_base_ref or config.target_default_branch,
+                registry=config.project_registry,
+            ),
+        ),
         publisher=GitWorkspacePublisher(
             write_token=config.github_write_token,
             write_username=config.github_write_username,

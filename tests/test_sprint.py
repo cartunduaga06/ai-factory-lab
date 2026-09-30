@@ -28,6 +28,7 @@ from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
 from tests.fake_workspace import (
     FakeQualityGateRunner,
     FakeRevisionInspector,
+    FakeSecurityReviewGate,
     FakeWorkspaceProvisioner,
     specs,
 )
@@ -288,6 +289,7 @@ def test_runtime_never_dispatches_issue_outside_authorized_sprint(tmp_path: Path
             return True
 
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(Issues(), tasks),
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=tasks,

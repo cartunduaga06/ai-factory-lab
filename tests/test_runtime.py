@@ -42,6 +42,7 @@ from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
 from tests.fake_workspace import (
     FakeQualityGateRunner,
     FakeRevisionInspector,
+    FakeSecurityReviewGate,
     FakeWorkspaceProvisioner,
     specs,
 )
@@ -111,6 +112,7 @@ def runtime_parts(tmp_path: Path):
     sink = FakePullRequestSink()
     gate_runner = FakeQualityGateRunner()
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=intake,
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=tasks,
@@ -173,6 +175,7 @@ def test_required_context_blocks_durably_without_dispatch(tmp_path: Path, failur
         (checkout / "README.md").write_text("Repository overview")
     budget = 10 if failure == "over_budget" else 48_000
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(FakeIssueSource(task), tasks),
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=tasks,
@@ -299,6 +302,7 @@ def test_stale_unstarted_task_is_cancelled_without_dispatch(
     restarted_tasks = SqliteTaskRepository(tasks.path)
     restarted_runs = SqliteRunRepository(tasks.path)
     restarted = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(source, restarted_tasks),
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=restarted_tasks,

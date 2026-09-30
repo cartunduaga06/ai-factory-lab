@@ -25,6 +25,7 @@ from factory.domain.ports import (
     PullRequestStateSource,
     QualityGateRunner,
     RunRepository,
+    SecurityReviewGate,
     TaskRepository,
     WorkspaceProvisioner,
     WorkspacePublisher,
@@ -35,7 +36,11 @@ from factory.orchestration.context import ContextBuildError, ContextPackBuilder
 from factory.orchestration.dispatch import DispatchService
 from factory.orchestration.feedback import FeedbackReconciliationService
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
-from factory.orchestration.publication import PublicationResult, PublicationService
+from factory.orchestration.publication import (
+    PublicationResult,
+    PublicationService,
+    SecurityReviewBlocked,
+)
 from factory.orchestration.reconciliation import ReconciliationService
 from factory.orchestration.recovery import FailureClass, RecoveryPolicy
 from factory.orchestration.sprint import SprintService
@@ -78,6 +83,7 @@ class FactoryRuntime:
         pull_request_sink: PullRequestSink,
         pull_requests: PullRequestRepository,
         base_branch: str,
+        security_review: SecurityReviewGate,
         pull_request_state: PullRequestStateSource | None = None,
         operational_policy: OperationalPolicy | None = None,
         operational_provisioner: WorkspaceProvisioner | None = None,
@@ -146,6 +152,7 @@ class FactoryRuntime:
             base_branch=base_branch,
             default_branch=base_branch,
             registry=registry,
+            security_review=security_review,
         )
         self._reconciliation = ReconciliationService(
             tasks,
@@ -424,7 +431,11 @@ class FactoryRuntime:
             current = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
             return self._result(current, refresh.run, refresh, "OPERATIONAL_DONE", intake)
 
-        published = self._publication.publish(task.task_id, refresh.run.run_id)
+        try:
+            published = self._publication.publish(task.task_id, refresh.run.run_id)
+        except SecurityReviewBlocked:
+            current = self._block(task.task_id, "security review blocked publication")
+            return self._result(current, refresh.run, refresh, "SECURITY_REVIEW_BLOCKED", intake)
         return self._result_from_publication(published, refresh.run, intake)
 
     def _reconcile_human_reviews(self) -> None:

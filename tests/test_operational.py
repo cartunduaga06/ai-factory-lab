@@ -40,6 +40,7 @@ from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
 from tests.fake_workspace import (
     FakeQualityGateRunner,
     FakeRevisionInspector,
+    FakeSecurityReviewGate,
     FakeWorkspaceProvisioner,
 )
 
@@ -182,6 +183,7 @@ def _runtime(
         else IssueSource(task)
     )
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(source, tasks),
         intake_repository=Repository("example/control", RepositoryRole.CONTROL_PLANE),
         tasks=tasks,

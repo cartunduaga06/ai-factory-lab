@@ -1,5 +1,50 @@
 # Security
 
+## Automatic security review before human handoff
+
+For code runs, the production runtime uses the Factory-owned
+`factory-security-v1` rules in `src/factory/integrations/security/review.py`.
+The rules were adapted after review of ECC's
+[`security-review` skill](https://github.com/affaan-m/ECC/blob/c9148d0bb239ed01a95724a5928b98cdf9c30658/skills/security-review/SKILL.md)
+and [`security-scan` skill](https://github.com/affaan-m/ECC/blob/c9148d0bb239ed01a95724a5928b98cdf9c30658/skills/security-scan/SKILL.md)
+at the same pinned commit used by the existing ECC registry spike. These
+sources informed the secret, permission, injection and sensitive surface
+checks. The Factory does not run ECC tools, install hooks, or grant agent
+permissions. Changes to the rule set require a new version and regression tests.
+
+The gate scans changed, publishable Git files and added lines against the
+approved project base commit, including agent commits and working tree edits,
+after quality validation and before commit, push, PR creation, or
+`WAITING_HUMAN`. It checks
+credential exposure, destructive commands, broad permissions, sandbox escapes,
+prompt injection, agent instruction or workflow changes, and unsafe Docker,
+n8n, infrastructure, auth and data access patterns. E7 project and repository
+identities must agree. The scan has file, byte and process time bounds; an
+unreadable workspace or scan failure stops publication. This deterministic rule
+set flags known patterns and does not replace a human code security review.
+
+The existing E1 task trace stores `SecurityReviewPassed`,
+`SecurityReviewBlocked`, and `SecurityReviewUnavailable` events. Critical
+findings contain only a rule ID, hashed path and line number; no source line,
+credential, raw path, process output, or environment value is stored. A critical
+result moves the task to `BLOCKED`. The review is bound to the validated
+revision and base commit, and the publisher independently verifies the
+validated revision before push.
+
+An operator may explicitly accept a critical finding for the exact blocked run:
+
+```bash
+python -m factory security-override --task-id <uuid> --run-id <uuid> \
+  --actor <reviewer-id> --reason-file <decision.txt>
+python -m factory run
+```
+
+The command rechecks the same review, records `SecurityReviewOverridden` in E1
+with hashes of the actor and reason, and returns the task to `VALIDATING`.
+The next run scans again; publication only proceeds when that exact review has
+the durable decision. A changed revision cannot reuse the decision. The command
+never merges or deploys.
+
 AI Factory Lab coordinates autonomous agents that write code. This document
 defines the boundaries those agents operate inside. It is policy, not
 suggestion: the boundaries are non-negotiable and must be enforced in code as

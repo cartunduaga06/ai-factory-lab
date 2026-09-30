@@ -1,0 +1,1 @@
+"""Concrete security inspection adapters."""

@@ -15,12 +15,26 @@ from pathlib import Path
 
 from factory.domain.enums import QualityGateStatus
 from factory.domain.errors import WorkspaceProvisioningError, WorkspaceRevisionError
-from factory.domain.models import FactoryTask, QualityGate, QualityGateSpec, Workspace
+from factory.domain.models import AgentRun, FactoryTask, QualityGate, QualityGateSpec, Workspace
 from factory.domain.ports import (
     QualityGateRunner,
+    SecurityReviewGate,
     WorkspaceProvisioner,
     WorkspaceRevisionInspector,
 )
+from factory.domain.security import SecurityReview
+
+
+class FakeSecurityReviewGate(SecurityReviewGate):
+    """A clean review boundary for tests focused on other runtime phases."""
+
+    def review(self, task: FactoryTask, run: AgentRun) -> SecurityReview:
+        del task
+        return SecurityReview("test-rules", run.validated_revision or "test", ())
+
+    def is_overridden(self, task: FactoryTask, run: AgentRun, review: SecurityReview) -> bool:
+        del task, run, review
+        return False
 
 
 class FakeWorkspaceProvisioner(WorkspaceProvisioner):

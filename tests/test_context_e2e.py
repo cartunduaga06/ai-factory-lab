@@ -27,6 +27,7 @@ from tests.fake_openhands import FakeTransport
 from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
 from tests.fake_workspace import (
     FakeRevisionInspector,
+    FakeSecurityReviewGate,
     FakeWorkspaceProvisioner,
 )
 from tests.test_runtime import FakeIssueSource
@@ -68,6 +69,7 @@ def test_issue_to_pack_to_codex_gates_and_pr(tmp_path: Path) -> None:
     sink = FakePullRequestSink()
     publisher = FakeWorkspacePublisher()
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(FakeIssueSource(task), tasks),
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=tasks,
