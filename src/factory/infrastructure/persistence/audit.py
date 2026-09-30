@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from factory.infrastructure.persistence.schema import AUDIT_EVENTS_TABLE, TASKS_TABLE
+from factory.infrastructure.persistence.schema import (
+    AUDIT_EVENTS_TABLE,
+    BACKLOG_LINKS_TABLE,
+    TASKS_TABLE,
+)
 from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 
 
@@ -52,6 +56,18 @@ class SqliteAuditEventStore(SqliteRepository):
                 (provider, repository, number),
             ).fetchone()
         return self.for_task(str(row["task_id"])) if row is not None else ()
+
+    def for_work_item(self, provider: str, external_id: str) -> tuple[AuditEvent, ...]:
+        """Follow a durable backlog link into the existing E1 task trace."""
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT repository_slug, issue_number FROM {BACKLOG_LINKS_TABLE} "
+                "WHERE provider = ? AND external_id = ? AND state = 'MATERIALIZED'",
+                (provider, external_id),
+            ).fetchone()
+        if row is None:
+            return ()
+        return self.for_issue("github", str(row["repository_slug"]), int(row["issue_number"]))
 
     @staticmethod
     def _event(row: object) -> AuditEvent:

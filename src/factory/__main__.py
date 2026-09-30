@@ -33,6 +33,7 @@ from factory.domain.models import AgentAdapter, Repository
 from factory.infrastructure.config import AgentEngine, FactoryConfig, UnsupportedDatabaseError
 from factory.infrastructure.logging import configure_logging
 from factory.infrastructure.persistence import (
+    SqliteBacklogLinkRepository,
     SqlitePullRequestRepository,
     SqliteRunRepository,
     SqliteTaskRepository,
@@ -47,6 +48,7 @@ from factory.integrations.github import (
     GitHubPullRequestSink,
     GitHubWriteClient,
 )
+from factory.integrations.github.backlog_issues import GitHubBacklogIssueSink
 from factory.integrations.github.pr_state import GitHubPullRequestStateSource
 from factory.integrations.openhands import (
     OpenHandsAdapter,
@@ -56,12 +58,14 @@ from factory.integrations.openhands import (
 )
 from factory.integrations.operational import ScratchAcceptance, ScratchWorkspaceProvisioner
 from factory.integrations.status_http import serve_status
+from factory.integrations.trello.backlog import TrelloBacklogSource
 from factory.integrations.trello.status import TrelloStatusChannel
 from factory.integrations.workspace import (
     GitWorkspacePublisher,
     GitWorkspaceRevisionInspector,
     GitWorktreeWorkspaceProvisioner,
 )
+from factory.orchestration.backlog import BacklogMaterializationService
 from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.retry import RetryService
 from factory.orchestration.rework import ReworkNotAllowedError, ReworkService
@@ -105,6 +109,10 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--host", default="127.0.0.1")
     status.add_argument("--port", type=int, default=8765)
     subparsers.add_parser("sync-status", help="Deliver queued status events to Trello.")
+    backlog = subparsers.add_parser(
+        "sync-backlog", help="Reconcile Trello Sprint cards into GitHub Issues."
+    )
+    backlog.add_argument("--card-id", help="Reconcile one card from a verified webhook event.")
     retry = subparsers.add_parser(
         "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
     )
@@ -138,6 +146,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "intake":
         return _run_intake(config)
+    if args.command == "sync-backlog":
+        return _run_backlog(config, args.card_id)
     if args.command == "retry":
         return _run_retry(config, str(args.task_id))
     if args.command == "request-changes":
@@ -207,6 +217,53 @@ def _run_intake(config: FactoryConfig) -> int:
     print(f"Existing: {summary.existing}")
     print(f"Errors: {summary.errors}")
     return EXIT_OK if summary.errors == 0 else EXIT_INTAKE_ERROR
+
+
+def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | None:
+    """Build optional backlog reconciliation without changing GitHub intake."""
+    list_id = config.trello_backlog_list_id
+    label_id = config.trello_ready_label_id
+    if list_id is None and label_id is None:
+        return None
+    if not all((list_id, label_id, config.trello_key, config.trello_token)):
+        raise ConfigurationError("Trello backlog list, READY label, key and token are required")
+    if config.github.control_plane_repo is None or config.github_write_token is None:
+        raise ConfigurationError("GitHub repository and write token are required for backlog")
+    assert list_id is not None and label_id is not None
+    assert config.trello_key is not None and config.trello_token is not None
+    links = SqliteBacklogLinkRepository(config.database.path)
+    links.initialize()
+    return BacklogMaterializationService(
+        TrelloBacklogSource(
+            config.trello_key,
+            config.trello_token,
+            list_id,
+            label_id,
+            config.github.control_plane_repo,
+        ),
+        GitHubBacklogIssueSink(GitHubWriteClient(config.github_write_token, config.github.api_url)),
+        links,
+    )
+
+
+def _run_backlog(config: FactoryConfig, card_id: str | None) -> int:
+    try:
+        service = _build_backlog(config)
+        if service is None:
+            raise ConfigurationError("Trello backlog adapter is not enabled")
+        summary = service.reconcile(card_id)
+    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except Exception as exc:  # noqa: BLE001 - provider failures may contain secrets
+        print(f"backlog sync failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    print(f"Examined: {summary.examined}")
+    print(f"Created: {summary.created}")
+    print(f"Existing: {summary.existing}")
+    print(f"Ineligible: {summary.ineligible}")
+    print(f"Uncertain: {summary.uncertain}")
+    return EXIT_OK if summary.uncertain == 0 else EXIT_INTAKE_ERROR
 
 
 def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) -> int:
@@ -426,6 +483,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     runs.initialize()
     pull_requests.initialize()
     status_publisher = _status_publisher(config)
+    backlog = _build_backlog(config)
 
     read_client = GitHubClient(token=config.github.token or "", api_url=config.github.api_url)
     intake = IssueIntakeService(
@@ -478,6 +536,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         timeout=config.run_timeout,
         heartbeat_interval=config.heartbeat_interval,
         status_pulse=status_publisher.flush if status_publisher else None,
+        backlog_reconcile=backlog.reconcile if backlog else None,
     )
 
 

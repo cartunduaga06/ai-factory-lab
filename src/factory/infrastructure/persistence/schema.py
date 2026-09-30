@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -45,6 +45,20 @@ PULL_REQUESTS_TABLE = "pull_requests"
 QA_REWORK_TABLE = "qa_rework"
 STATUS_EVENTS_TABLE = "status_events"
 AUDIT_EVENTS_TABLE = "audit_events"
+BACKLOG_LINKS_TABLE = "backlog_links"
+
+CREATE_BACKLOG_LINKS = f"""
+CREATE TABLE IF NOT EXISTS {BACKLOG_LINKS_TABLE} (
+    provider TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    repository_slug TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('RESERVED', 'POSTING', 'MATERIALIZED')),
+    issue_number INTEGER,
+    issue_url TEXT,
+    PRIMARY KEY (provider, external_id),
+    UNIQUE (repository_slug, issue_number)
+);
+"""
 
 # Audit rows are projections of committed facts, written by triggers in the same
 # transaction. A task id is the stable trace id; event_seq orders concurrent
@@ -379,6 +393,7 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
 #: Statements applied, in order, by :func:`initialize_schema`.
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS,
+    CREATE_BACKLOG_LINKS,
     CREATE_AUDIT_EVENTS,
     CREATE_TRANSITIONS,
     CREATE_STATUS_EVENTS,
@@ -409,6 +424,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 __all__ = [
+    "BACKLOG_LINKS_TABLE",
     "ACTIVE_RUN_STATUSES",
     "AGENT_RUNS_TABLE",
     "CREATE_AGENT_RUNS",

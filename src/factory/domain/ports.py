@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import StrEnum
 
+from factory.domain.backlog import MaterializedIssue, WorkItem
 from factory.domain.enums import TaskStatus
 from factory.domain.models import (
     AgentRun,
@@ -57,6 +58,50 @@ class IssueSource(ABC):
         rules. Any source read failure, including a missing/404 response, must
         propagate so the caller does not dispatch or cancel uncertain work.
         """
+
+
+class BacklogSource(ABC):
+    """Read provider-neutral backlog snapshots; reads must fail closed."""
+
+    @abstractmethod
+    def list_items(self) -> Sequence[WorkItem]:
+        """Return candidates for periodic reconciliation."""
+
+    @abstractmethod
+    def get_item(self, external_id: str) -> WorkItem:
+        """Read current eligibility and dependencies immediately before a write."""
+
+
+class BacklogSink(ABC):
+    """Materialize one issue; a stable marker supports crash recovery."""
+
+    @abstractmethod
+    def find_issue(self, item: WorkItem) -> MaterializedIssue | None:
+        """Find the uniquely marked issue, including closed issues."""
+
+    @abstractmethod
+    def create_issue(self, item: WorkItem) -> MaterializedIssue:
+        """Create a GitHub-ready issue carrying the stable marker."""
+
+
+class BacklogLinkRepository(ABC):
+    """Durable single-owner reservation and card-to-issue link."""
+
+    @abstractmethod
+    def reserve(self, item: WorkItem) -> bool:
+        """Claim the work item once; return false if already reserved or linked."""
+
+    @abstractmethod
+    def begin_write(self, item: WorkItem) -> bool:
+        """Atomically move a reservation into an uncertain external-write state."""
+
+    @abstractmethod
+    def get_issue(self, provider: str, external_id: str) -> MaterializedIssue | None:
+        """Return a completed link, if present."""
+
+    @abstractmethod
+    def complete(self, item: WorkItem, issue: MaterializedIssue) -> None:
+        """Commit the immutable link; refuse a conflicting identity."""
 
 
 class TaskRepository(ABC):
@@ -430,6 +475,9 @@ class PullRequestRepository(ABC):
 
 
 __all__ = [
+    "BacklogLinkRepository",
+    "BacklogSink",
+    "BacklogSource",
     "IssueSource",
     "OperationalAcceptance",
     "PullRequestRepository",

@@ -531,4 +531,5 @@ Repository conventions, layering rules and command reference live in
 [`AGENTS.md`](AGENTS.md). Architecture detail is in
 [`docs/architecture.md`](docs/architecture.md), security policy in
 [`docs/security.md`](docs/security.md), and the development workflow in
-[`docs/development.md`](docs/development.md).
+[`docs/development.md`](docs/development.md). Optional Trello backlog
+materialization is described in [`docs/backlog.md`](docs/backlog.md).
