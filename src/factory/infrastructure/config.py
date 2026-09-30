@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -52,6 +53,31 @@ class InvalidGateSpecError(ValueError):
     The message names only the environment variable and the offending gate, never
     a value it could not parse — configuration may be logged.
     """
+
+
+def _parse_database_targets(raw: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse the operator-owned SQLite allowlist without reflecting paths in errors."""
+    if not raw:
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("FACTORY_DATABASE_READONLY_TARGETS is invalid") from None
+    if (
+        not isinstance(value, dict)
+        or len(value) > 16
+        or any(
+            not isinstance(key, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", key) is None
+            or key in {".", ".."}
+            or not isinstance(path, str)
+            or not path.startswith("/")
+            or "\x00" in path
+            for key, path in value.items()
+        )
+    ):
+        raise ValueError("FACTORY_DATABASE_READONLY_TARGETS is invalid")
+    return tuple(sorted(value.items()))
 
 
 class Environment(StrEnum):
@@ -276,6 +302,7 @@ class FactoryConfig:
     # command local to the OpenHands container, not a factory process argument.
     openhands_shared_workspace_hook_command: str | None = None
     operational_scratch_root: str | None = None
+    database_readonly_targets: tuple[tuple[str, str], ...] = ()
     project_registry: ProjectRegistry | None = None
 
     @property
@@ -387,6 +414,9 @@ class FactoryConfig:
                 source.get("OPENHANDS_SHARED_WORKSPACE_HOOK_COMMAND")
             ),
             operational_scratch_root=_clean(source.get("FACTORY_OPERATIONAL_SCRATCH_ROOT")),
+            database_readonly_targets=_parse_database_targets(
+                source.get("FACTORY_DATABASE_READONLY_TARGETS")
+            ),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -459,6 +489,7 @@ class FactoryConfig:
                 self.openhands_shared_workspace_hook_command
             ),
             "operational_scratch_root": self.operational_scratch_root,
+            "database_readonly_target_ids": [name for name, _ in self.database_readonly_targets],
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
 
