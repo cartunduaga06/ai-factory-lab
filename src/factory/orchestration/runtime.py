@@ -30,6 +30,7 @@ from factory.domain.ports import (
     WorkspacePublisher,
     WorkspaceRevisionInspector,
 )
+from factory.orchestration.context import ContextPackBuilder
 from factory.orchestration.dispatch import DispatchService
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
 from factory.orchestration.publication import PublicationResult, PublicationService
@@ -90,6 +91,7 @@ class FactoryRuntime:
         backlog_reconcile: Callable[[], object] | None = None,
         sprint: SprintService | None = None,
         recovery_policy: RecoveryPolicy | None = None,
+        context_builder: ContextPackBuilder | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
@@ -101,6 +103,7 @@ class FactoryRuntime:
             runs,
             provisioner=provisioner,
             workspace_root=workspace_root,
+            context_builder=context_builder,
         )
         self._operational_dispatch = (
             DispatchService(

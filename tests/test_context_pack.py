@@ -1,0 +1,94 @@
+"""Canonical context identities and durable dispatch metadata."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from factory.domain.context import ContextFragment, build_pack, content_digest, pack_from_metadata
+from factory.domain.models import FactoryTask
+from factory.integrations.codex.context_source import ApprovedSkillSource
+from factory.orchestration.context import ContextPackBuilder
+
+
+def _fragment(name: str, content: str) -> ContextFragment:
+    return ContextFragment("test", "note", name, "1", content_digest(content), content)
+
+
+def test_pack_is_order_independent_deduplicated_and_verified() -> None:
+    first, second = _fragment("a", "alpha"), _fragment("b", "beta")
+    pack = build_pack((second, first, first), budget=9)
+    assert pack == build_pack((first, second), budget=9)
+    assert [item.id for item in pack.fragments] == ["a", "b"]
+    assert pack_from_metadata(json.dumps(pack.metadata())).sha256 == pack.sha256
+    assert "alpha" not in json.dumps(pack.metadata())
+    with pytest.raises(ValueError, match="budget"):
+        build_pack((first, second), budget=8)
+    with pytest.raises(ValueError, match="conflicting"):
+        build_pack((first, _fragment("a", "changed")))
+    with pytest.raises(ValueError, match="invalid context content"):
+        build_pack((ContextFragment("test", "note", "x", "1", "bad", "content"),))
+
+
+def test_rework_preserves_base_and_versions_feedback() -> None:
+    task = FactoryTask(title="Example", target_repository="owner/repo", body="Implement")
+    builder = ContextPackBuilder()
+    base = builder.build(task)
+    first = builder.build(task, feedback="Change one", previous=base)
+    second = builder.build(task, feedback="Change two", previous=first)
+    assert first.base_sha256 == base.sha256 == second.base_sha256
+    assert first.sha256 != second.sha256
+    assert first.fragments[0].id == base.sha256
+    with pytest.raises(ValueError, match="historical"):
+        builder.build(
+            FactoryTask(title="Other", target_repository="owner/repo"),
+            feedback="Change",
+            previous=base,
+        )
+
+
+def test_approved_skill_enters_neutral_pack() -> None:
+    task = FactoryTask(title="Example [type:verification]", target_repository="owner/repo")
+    pack = ContextPackBuilder((ApprovedSkillSource("auto"),)).build(task)
+    assert {item.source for item in pack.fragments} == {"factory", "ecc"}
+    assert "Verification Loop Skill" in pack.render()
+    with pytest.raises(ValueError):
+        ContextPackBuilder((ApprovedSkillSource("unsupported"),)).build(task)
+
+
+def test_pack_metadata_is_durable_and_audited_without_content(tmp_path: Path) -> None:
+    from factory.domain.enums import AgentKind, RunStatus, TaskStatus
+    from factory.domain.models import AgentRun
+    from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
+    from factory.infrastructure.persistence.audit import SqliteAuditEventStore
+
+    database = str(tmp_path / "factory.db")
+    tasks, runs = SqliteTaskRepository(database), SqliteRunRepository(database)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(
+        FactoryTask(
+            title="Context audit",
+            target_repository="owner/repo",
+            body="private issue text",
+            status=TaskStatus.READY,
+        )
+    )
+    pack = ContextPackBuilder().build(task)
+    run = runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.CODEX,
+            status=RunStatus.FAILED,
+            context_pack=pack,
+        )
+    )
+    restored = runs.get_run(run.run_id)
+    assert restored is not None and restored.context_pack == pack
+    assert restored.context_pack.sha256 == pack.sha256
+    assert [event.name for event in SqliteAuditEventStore(database).for_task(task.task_id)].count(
+        "ContextPackBuilt"
+    ) == 1
+    assert all(fragment.content == "" for fragment in restored.context_pack.fragments)

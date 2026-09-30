@@ -10,16 +10,13 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from factory.domain.context import ContextPack
 from factory.domain.enums import AgentKind, RunStatus, TaskKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.domain.operational import parse_scratch_artifact
 from factory.integrations.base import AgentAdapterBase
-from factory.integrations.codex.skill_registry import (
-    load_registered_skill,
-    load_registry,
-    select_skill,
-)
-from factory.integrations.openhands.execution import build_instruction
+from factory.integrations.codex.context_source import ApprovedSkillSource
+from factory.orchestration.context import ContextPackBuilder
 
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 _COLLECTION_GRACE_SECONDS = 5.0
@@ -62,7 +59,9 @@ class CodexAdapter(AgentAdapterBase):
     def kind(self) -> AgentKind:
         return AgentKind.CODEX
 
-    def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    def dispatch(
+        self, task: FactoryTask, workspace: Workspace, context_pack: ContextPack | None = None
+    ) -> AgentRun:
         """Start the worker in the exact checkout supplied by Factory.
 
         The worker owns the bounded CLI process and writes a small result outside
@@ -109,25 +108,10 @@ class CodexAdapter(AgentAdapterBase):
                         "Reply only with a short completion status.\n"
                     )
                 else:
-                    stream.write(build_instruction(task))
-                    if self._ecc_skill is not None:
-                        records = load_registry()
-                        if self._ecc_skill == "auto":
-                            selected = select_skill(task, records)
-                        else:
-                            matches = [
-                                record for record in records if record.name == self._ecc_skill
-                            ]
-                            if len(matches) != 1 or matches[0].approval_status != "APPROVED":
-                                raise ValueError("unsupported ECC skill")
-                            selected = matches[0]
-                        skill = load_registered_skill(selected)
-                        stream.write(
-                            f"\n\nOptional review guidance from pinned ECC {selected.name}. "
-                            "Use only applicable checks. Factory quality gates and human "
-                            "review remain authoritative. Do not enable hooks or deploy.\n\n"
-                        )
-                        stream.write(skill)
+                    pack = context_pack or ContextPackBuilder(
+                        (ApprovedSkillSource(self._ecc_skill),)
+                    ).build(task)
+                    stream.write(pack.render())
             environment = self._env()
             # Import the worker from trusted factory code. Python puts its cwd
             # first on sys.path for -m, so never start it in the target checkout.

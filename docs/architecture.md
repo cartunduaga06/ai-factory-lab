@@ -1071,3 +1071,28 @@ to existing databases and projects their saved task transition history once.
 | 4 | ✅ Isolated Git worktree workspace per run; quality-gate validation in `VALIDATING` |
 | 5 | ✅ Commit/push the isolated branch, open a PR, persist it, hand off at `WAITING_HUMAN` |
 | 6 | API / dashboard over the orchestrator; Codex CLI adapter added in Issue #28 |
+
+## E5 deterministic Context Pack
+
+Before claiming a READY code task, `DispatchService` asks `ContextPackBuilder` for a
+version 1 pack. Its mandatory task fragment contains the bounded issue instruction
+and factory boundaries. Additional `ContextSource` implementations can provide
+verified fragments; the configured ECC source admits only pinned, `APPROVED` skills
+whose file digest matches the registry. Sources return neutral `ContextFragment`
+records with `source`, `type`, `id`, `version`, `content_ref` (SHA-256 of content),
+and transient content. The builder rejects missing or changed content, conflicting
+fragment identities, and packs over its explicit character budget. It sorts and
+deduplicates fragments before hashing canonical JSON metadata.
+
+`AgentAdapter.dispatch(task, workspace, context_pack)` receives the resulting pack.
+Codex renders its content to the worker prompt and OpenHands renders it into the
+initial conversation message. The run row stores only pack metadata and its hash;
+fragment prose is absent from that column. The E1 `ContextPackBuilt` event links
+that durable run to the trace without copying issue text, feedback, or skill prose
+into audit events. Old run rows retain a null pack after migration.
+
+Human QA rework verifies that the task and selected skill still produce the
+original base hash, then adds a versioned feedback fragment. Each rework pack
+records the original base hash and derives a new hash for its feedback. A changed
+base fails closed. Operator-authorized timeout recovery for a run created before
+E5 binds a fresh base pack because no historical pack exists for that legacy run.

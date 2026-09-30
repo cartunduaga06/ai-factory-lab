@@ -22,6 +22,7 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
+from factory.domain.context import pack_from_metadata
 from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskKind
 from factory.domain.errors import DuplicateRunError, FactoryError, PersistenceError
 from factory.domain.models import AgentRun, QualityGate, Workspace
@@ -85,8 +86,8 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     INSERT INTO {AGENT_RUNS_TABLE} (
                         run_id, task_id, adapter, status, workspace_id,
                         summary, started_at, last_heartbeat, finished_at, gates,
-                        validated_revision, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        validated_revision, context_pack, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
@@ -100,6 +101,9 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                         encode_datetime(run.finished_at) if run.finished_at else None,
                         _encode_gates(run.gates),
                         run.validated_revision,
+                        json.dumps(run.context_pack.metadata(), sort_keys=True)
+                        if run.context_pack
+                        else None,
                         created_at,
                     ),
                 )
@@ -130,7 +134,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         with self._connect() as conn:
             existing = conn.execute(
                 f"""
-                SELECT task_id, workspace_id, created_at
+                SELECT task_id, workspace_id, created_at, context_pack
                   FROM {AGENT_RUNS_TABLE} WHERE run_id = ?
                 """,
                 (run.run_id,),
@@ -145,6 +149,13 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                 # Sanitized: the message names only the run id. Workspace paths,
                 # branches and storage details must not escape this boundary.
                 raise PersistenceError(f"run {run.run_id} cannot change its workspace")
+
+            if (
+                json.dumps(run.context_pack.metadata(), sort_keys=True)
+                if run.context_pack
+                else None
+            ) != existing["context_pack"]:
+                raise PersistenceError(f"run {run.run_id} cannot change its context pack")
 
             conn.execute(
                 f"""
@@ -331,6 +342,7 @@ def _row_to_run(row: sqlite3.Row, workspace: Workspace | None) -> AgentRun:
         finished_at=decode_datetime(finished_at) if finished_at else None,
         gates=_decode_gates(row["gates"]),
         validated_revision=row["validated_revision"],
+        context_pack=pack_from_metadata(row["context_pack"]) if row["context_pack"] else None,
     )
 
 

@@ -193,6 +193,7 @@ def build_creation_payload(
     task: FactoryTask,
     workspace_path: str,
     execution: OpenHandsExecution,
+    instruction: str | None = None,
 ) -> ConversationPayload:
     """Assemble the agent-server request for one factory task.
 
@@ -208,7 +209,12 @@ def build_creation_payload(
         "autotitle": execution.autotitle,
         "initial_message": {
             "role": "user",
-            "content": [{"type": "text", "text": build_instruction(task)}],
+            "content": [
+                {
+                    "type": "text",
+                    "text": instruction if instruction is not None else build_instruction(task),
+                }
+            ],
             "run": True,
         },
     }

@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from factory.domain.context import ContextPack
 from factory.domain.enums import AgentKind
 from factory.domain.models import AgentRun, FactoryTask, Workspace
 from factory.integrations.base import AgentAdapterBase
@@ -81,7 +82,9 @@ class OpenHandsAdapter(AgentAdapterBase):
 
     # -- dispatch ----------------------------------------------------------
 
-    def dispatch(self, task: FactoryTask, workspace: Workspace) -> AgentRun:
+    def dispatch(
+        self, task: FactoryTask, workspace: Workspace, context_pack: ContextPack | None = None
+    ) -> AgentRun:
         """Create the OpenHands conversation for ``task`` and return its run.
 
         The workspace path supplied by the factory is used verbatim as the
@@ -98,7 +101,12 @@ class OpenHandsAdapter(AgentAdapterBase):
             if self._workspace_paths is not None
             else workspace.path
         )
-        payload = build_creation_payload(task, agent_path, self._execution).as_dict()
+        payload = build_creation_payload(
+            task,
+            agent_path,
+            self._execution,
+            instruction=context_pack.render() if context_pack else None,
+        ).as_dict()
         descriptor = self._client.create_conversation(payload)
         conversation_id = self._conversation_id(descriptor)
         status = map_status(descriptor.get(_EXECUTION_STATUS_KEY))

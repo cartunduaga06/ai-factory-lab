@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -160,6 +160,14 @@ CREATE_AUDIT_RUN_INSERT_TRIGGER = f"""
 CREATE TRIGGER IF NOT EXISTS audit_run_insert AFTER INSERT ON {AGENT_RUNS_TABLE}
 BEGIN
 {_audit_insert("'RunStarted'", "'run:start:' || NEW.run_id", "NEW.task_id", "NEW.run_id", "run", "NEW.run_id", "COALESCE(NEW.started_at, NEW.created_at)", "NEW.run_id", "NEW.workspace_id")}
+END;
+"""
+
+CREATE_AUDIT_CONTEXT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_context_pack AFTER INSERT ON {AGENT_RUNS_TABLE}
+WHEN NEW.context_pack IS NOT NULL
+BEGIN
+{_audit_insert("'ContextPackBuilt'", "'context:' || NEW.run_id", "NEW.task_id", "NEW.run_id", "run", "NEW.run_id", "NEW.created_at", "NEW.run_id", "NEW.workspace_id")}
 END;
 """
 
@@ -291,6 +299,7 @@ CREATE TABLE IF NOT EXISTS {AGENT_RUNS_TABLE} (
     finished_at   TEXT,
     gates         TEXT NOT NULL DEFAULT '[]',
     validated_revision TEXT,
+    context_pack TEXT,
     created_at    TEXT NOT NULL,
     CONSTRAINT fk_agent_runs_task
         FOREIGN KEY (task_id) REFERENCES {TASKS_TABLE} (task_id) ON DELETE CASCADE,
@@ -405,6 +414,7 @@ CREATE TABLE IF NOT EXISTS {QA_REWORK_TABLE} (
 #: and a fresh database (which already has it) is unaffected.
 MIGRATION_STATEMENTS: tuple[str, ...] = (
     MIGRATE_AGENT_RUNS_VALIDATED_REVISION,
+    f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN context_pack TEXT;",
     f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN last_heartbeat TEXT;",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN blocked_reason TEXT;",
@@ -439,6 +449,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_AUDIT_TASK_TRIGGER,
     CREATE_AUDIT_TRANSITION_TRIGGER,
     CREATE_AUDIT_RUN_INSERT_TRIGGER,
+    CREATE_AUDIT_CONTEXT_TRIGGER,
     CREATE_AUDIT_VALIDATION_TRIGGER,
     CREATE_AUDIT_RUN_FINISH_TRIGGER,
     CREATE_AUDIT_PR_TRIGGER,
