@@ -25,6 +25,7 @@ class ProjectProfile:
     deploy_policy: str = "human-only"
     git_host: str = "github.com"
     deploy_required: bool = False
+    required_ci_checks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", self.project_id):
@@ -43,6 +44,10 @@ class ProjectProfile:
             raise ProjectRoutingError("unsupported deploy policy")
         if not isinstance(self.deploy_required, bool):
             raise ProjectRoutingError("invalid deploy requirement")
+        if any(not isinstance(name, str) or not name.strip() for name in self.required_ci_checks):
+            raise ProjectRoutingError("invalid required CI check")
+        if len(set(self.required_ci_checks)) != len(self.required_ci_checks):
+            raise ProjectRoutingError("duplicate required CI check")
         if not self.gates or not any(gate.required for gate in self.gates):
             raise ProjectRoutingError("project requires at least one quality gate")
         if not re.fullmatch(r"[A-Za-z0-9.-]+", self.git_host):

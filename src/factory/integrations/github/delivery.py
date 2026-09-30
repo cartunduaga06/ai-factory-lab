@@ -43,14 +43,18 @@ class GitHubDeliveryEvidenceSource(DeliveryEvidenceSource):
             merged_sha = str(pr["merge_commit_sha"])
             commit = self._client.get(f"{root}/commits/{merged_sha}")
             integrated = isinstance(commit, Mapping) and commit.get("sha") == merged_sha
-            required = self._required_checks(root, profile.base_ref)
+            required = self._required_checks(root, profile.base_ref, profile.required_ci_checks)
             ci = self._checks_pass(root, identity.commit_sha, required)
             deployed = not profile.deploy_required or self._deployment_passed(root, merged_sha)
             return DeliveryEvidence(True, integrated, ci, deployed)
         except (GitHubError, ProjectRoutingError, KeyError, TypeError, ValueError):
             return DeliveryEvidence(merged, False, False, False)
 
-    def _required_checks(self, root: str, branch: str) -> set[str] | None:
+    def _required_checks(
+        self, root: str, branch: str, configured: tuple[str, ...]
+    ) -> set[str] | None:
+        if configured:
+            return set(configured)
         try:
             payload = self._client.get(
                 f"{root}/branches/{branch}/protection/required_status_checks"
