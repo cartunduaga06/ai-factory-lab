@@ -32,6 +32,7 @@ def run(
     exit_code: int | None = None
     stdout_bytes = 0
     stderr_bytes = 0
+    timed_out = False
     try:
         if kind not in ("CODE", "OPERATIONAL"):
             raise ValueError("invalid Codex task kind")
@@ -59,7 +60,7 @@ def run(
                 start_new_session=True,
             ) as process:
                 try:
-                    status, output_exceeded = _drain_output(
+                    status, output_exceeded, timed_out = _drain_output(
                         process,
                         instruction.encode("utf-8"),
                         stdout_file,
@@ -98,6 +99,7 @@ def run(
                     "exit_code": exit_code,
                     "stdout_bytes": stdout_bytes,
                     "stderr_bytes": stderr_bytes,
+                    "timed_out": timed_out,
                 }
             ),
             encoding="ascii",
@@ -112,11 +114,12 @@ def _drain_output(
     stderr_file: BinaryIO,
     cancel: Path,
     timeout: float,
-) -> tuple[str, bool]:
-    """Capture bounded streams while feeding stdin and watching the run deadline."""
+) -> tuple[str, bool, bool]:
+    """Capture bounded streams and distinguish true deadline expiry from SIGKILL."""
     assert process.stdin is not None and process.stdout is not None and process.stderr is not None
     status = "FAILED"
     output_exceeded = False
+    timed_out = False
     pending = memoryview(instruction)
     deadline = time.monotonic() + timeout
     with selectors.DefaultSelector() as selector:
@@ -134,6 +137,7 @@ def _drain_output(
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                timed_out = process.poll() is None
                 break
             for key, _ in selector.select(min(_POLL_SECONDS, remaining)):
                 stream = cast(BinaryIO, key.fileobj)
@@ -160,7 +164,7 @@ def _drain_output(
                     output_exceeded = True
                     # Keep draining both pipes so logging volume cannot stall
                     # the child or shorten a CODE run.
-    return status, output_exceeded
+    return status, output_exceeded, timed_out
 
 
 def _valid_result(path: Path) -> bool:

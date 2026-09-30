@@ -60,6 +60,7 @@ print('ok')
         "exit_code": 0,
         "stdout_bytes": 3,
         "stderr_bytes": 0,
+        "timed_out": False,
     }
     assert (tmp_path / "workspace" / "large-artifact").stat().st_size == 2_000_000
 
@@ -95,6 +96,7 @@ for _ in range(20):
         "exit_code": 0,
         "stdout_bytes": worker.MAX_OUTPUT_BYTES,
         "stderr_bytes": worker.MAX_OUTPUT_BYTES,
+        "timed_out": False,
     }
 
 
@@ -130,6 +132,7 @@ time.sleep(10)
     assert monotonic() - started < 2
     assert result["status"] == ("CANCELLED" if cancel_after else "FAILED")
     assert result["exit_code"] == -9
+    assert result["timed_out"] is (cancel_after is None)
     assert result["stderr_bytes"] == worker.MAX_OUTPUT_BYTES
 
 
@@ -145,3 +148,15 @@ os.write({descriptor}, b'x' * {worker.MAX_OUTPUT_BYTES})
     )
     assert result["status"] == "SUCCEEDED"
     assert result[f"{stream}_bytes"] == worker.MAX_OUTPUT_BYTES
+
+
+def test_external_sigkill_is_not_mistaken_for_worker_timeout(tmp_path: Path) -> None:
+    result = _execute(
+        tmp_path,
+        """import os, signal
+os.kill(os.getpid(), signal.SIGKILL)
+""",
+    )
+    assert result["status"] == "FAILED"
+    assert result["exit_code"] == -9
+    assert result["timed_out"] is False

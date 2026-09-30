@@ -68,7 +68,13 @@ def timeout_case(tmp_path: Path):
     state.mkdir()
     (state / (run.run_id + ".result")).write_text(
         json.dumps(
-            {"status": "FAILED", "exit_code": -9, "stdout_bytes": 0, "stderr_bytes": 1048576}
+            {
+                "status": "FAILED",
+                "exit_code": -9,
+                "stdout_bytes": 0,
+                "stderr_bytes": 1048576,
+                "timed_out": True,
+            }
         )
     )
     sink = FakePullRequestSink()
@@ -118,13 +124,31 @@ def test_operator_recovery_preserves_workspace_history_and_audit(timeout_case) -
 
 
 @pytest.mark.parametrize(
-    "invalid", ["wrong_run", "bad_evidence", "ineligible", "provider_pr", "local_pr", "busy"]
+    "invalid",
+    [
+        "wrong_run",
+        "bad_evidence",
+        "no_deadline",
+        "legacy",
+        "ineligible",
+        "provider_pr",
+        "local_pr",
+        "busy",
+    ],
 )
 def test_recovery_fails_closed_without_mutating_existing_state(timeout_case, invalid: str) -> None:
     service, task, run, root, tasks, runs, prs, sink, availability = timeout_case
     if invalid == "bad_evidence":
         (root / ".factory-codex-runs" / (run.run_id + ".result")).write_text(
             json.dumps({"status": "FAILED", "exit_code": 1})
+        )
+    elif invalid == "legacy":
+        (root / ".factory-codex-runs" / (run.run_id + ".result")).write_text(
+            json.dumps({"status": "FAILED", "exit_code": -9})
+        )
+    elif invalid == "no_deadline":
+        (root / ".factory-codex-runs" / (run.run_id + ".result")).write_text(
+            json.dumps({"status": "FAILED", "exit_code": -9, "timed_out": False})
         )
     elif invalid == "ineligible":
         availability[0] = False

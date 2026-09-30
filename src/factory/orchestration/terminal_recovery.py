@@ -117,8 +117,8 @@ class TerminalRecoveryService:
             raise TerminalRecoveryRefused("invalid worker result evidence") from None
         if result.get("status") != "FAILED" or type(result.get("exit_code")) is not int:
             raise TerminalRecoveryRefused("worker did not record a failed process")
-        if result["exit_code"] != -9:
-            raise TerminalRecoveryRefused("timeout evidence is not consistent with SIGKILL")
+        if result["exit_code"] != -9 or result.get("timed_out") is not True:
+            raise TerminalRecoveryRefused("trusted worker deadline evidence is missing")
         if self._runs.find_active_run(task_id) is not None:
             raise TerminalRecoveryRefused("task has an active run")
         if self._sprint is not None and not self._sprint.allows_review(task):

@@ -257,3 +257,5 @@ A branch with an existing PR requires human PR review, not terminal timeout
 recovery. In particular, the manually published E4 PR #68 must be reviewed on
 its own merits; this feature must not alter E4's historical FAILED/PAUSED
 production records merely to make the dashboard appear complete.
+
+Terminal recovery requires the new worker's explicit `timed_out: true` result evidence as well as exit_code -9; SIGKILL alone is not proof of a timeout. Legacy results without that marker are not eligible for automatic operator recovery and require separate human review.
