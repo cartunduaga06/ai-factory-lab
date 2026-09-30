@@ -33,7 +33,7 @@ Design notes:
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -41,6 +41,7 @@ WORKSPACES_TABLE = "workspaces"
 AGENT_RUNS_TABLE = "agent_runs"
 PULL_REQUESTS_TABLE = "pull_requests"
 QA_REWORK_TABLE = "qa_rework"
+STATUS_EVENTS_TABLE = "status_events"
 
 #: Run statuses that count as "active" for the one-active-run-per-task guard.
 #: These must match the non-terminal members of
@@ -79,6 +80,29 @@ CREATE TABLE IF NOT EXISTS {TRANSITIONS_TABLE} (
 );
 """
 
+CREATE_STATUS_EVENTS = f"""
+CREATE TABLE IF NOT EXISTS {STATUS_EVENTS_TABLE} (
+    transition_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    delivered_at TEXT
+);
+"""
+
+CREATE_STATUS_EVENT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS queue_status_transition
+AFTER INSERT ON {TRANSITIONS_TABLE}
+WHEN NEW.to_status IN (
+    'CLAIMED', 'RUNNING', 'VALIDATING', 'PR_OPEN', 'WAITING_HUMAN',
+    'FAILED', 'BLOCKED', 'DONE', 'CANCELLED', 'CHANGES_REQUESTED'
+)
+BEGIN
+    INSERT INTO {STATUS_EVENTS_TABLE} (transition_id, task_id, phase, occurred_at)
+    VALUES (NEW.transition_id, NEW.task_id, NEW.to_status, NEW.occurred_at);
+END;
+"""
+
 CREATE_WORKSPACES = f"""
 CREATE TABLE IF NOT EXISTS {WORKSPACES_TABLE} (
     workspace_id     TEXT PRIMARY KEY,
@@ -99,6 +123,7 @@ CREATE TABLE IF NOT EXISTS {AGENT_RUNS_TABLE} (
     workspace_id  TEXT,
     summary       TEXT,
     started_at    TEXT,
+    last_heartbeat TEXT,
     finished_at   TEXT,
     gates         TEXT NOT NULL DEFAULT '[]',
     validated_revision TEXT,
@@ -216,6 +241,7 @@ CREATE TABLE IF NOT EXISTS {QA_REWORK_TABLE} (
 #: and a fresh database (which already has it) is unaffected.
 MIGRATION_STATEMENTS: tuple[str, ...] = (
     MIGRATE_AGENT_RUNS_VALIDATED_REVISION,
+    f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN last_heartbeat TEXT;",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN blocked_reason TEXT;",
     f"ALTER TABLE {WORKSPACES_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
@@ -225,6 +251,8 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS,
     CREATE_TRANSITIONS,
+    CREATE_STATUS_EVENTS,
+    CREATE_STATUS_EVENT_TRIGGER,
     CREATE_WORKSPACES,
     CREATE_AGENT_RUNS,
     CREATE_PULL_REQUESTS,
@@ -253,6 +281,7 @@ __all__ = [
     "QA_REWORK_TABLE",
     "SCHEMA_STATEMENTS",
     "SCHEMA_VERSION",
+    "STATUS_EVENTS_TABLE",
     "TASKS_TABLE",
     "TRANSITIONS_TABLE",
     "WORKSPACES_TABLE",

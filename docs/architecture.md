@@ -257,12 +257,20 @@ Transition table (authoritative: `factory/orchestration/lifecycle.py`):
 | `CLAIMED` | `RUNNING`, `BLOCKED`, `CANCELLED` |
 | `RUNNING` | `VALIDATING`, `BLOCKED`, `FAILED`, `CANCELLED` |
 | `VALIDATING` | `PR_OPEN`, `READY`, `BLOCKED`, `DONE`, `FAILED`, `CANCELLED` |
-
 | `PR_OPEN` | `WAITING_HUMAN`, `FAILED`, `CANCELLED` |
 | `WAITING_HUMAN` | `CHANGES_REQUESTED`, `DONE`, `FAILED`, `CANCELLED` |
 | `CHANGES_REQUESTED` | `READY`, `CANCELLED` |
 | `BLOCKED` | `READY`, `CANCELLED` |
 | `DONE` / `FAILED` / `CANCELLED` | — (terminal) |
+
+The Control Tower presents `STALLED` when a non-terminal run in `RUNNING` has
+missed the configured number of persisted heartbeats. This is a read-only
+observation, not a `TaskStatus` transition, so a later successful collection
+recovers the display to `RUNNING` without rewriting lifecycle history. The
+SQLite transition trigger records meaningful state changes in a durable status
+outbox. The orchestration status service projects only allowlisted identifiers,
+times, links and deterministic evidence; the Trello adapter consumes that same
+projection. Heartbeat writes create no transition event.
 
 `VALIDATING → DONE` is reserved for accepted `OPERATIONAL` scratch tasks;
 `VALIDATING → BLOCKED` records failed operational acceptance. `CODE` tasks

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 
 from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus, ValidationOutcome
@@ -75,8 +76,10 @@ class FactoryRuntime:
         code_capable: bool = True,
         poll_interval: float = 5.0,
         timeout: float = 1800.0,
+        heartbeat_interval: float = 180.0,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        status_pulse: Callable[[], None] | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
@@ -111,6 +114,7 @@ class FactoryRuntime:
             pull_request_sink=pull_request_sink,
             base_branch=base_branch,
             operational_acceptance=operational_acceptance,
+            heartbeat_interval=heartbeat_interval,
         )
         self._publication = PublicationService(
             tasks,
@@ -128,9 +132,17 @@ class FactoryRuntime:
         self._timeout = max(0.0, timeout)
         self._sleep = sleep
         self._monotonic = monotonic
+        self._status_pulse = status_pulse
 
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
+        try:
+            return self._run_once()
+        finally:
+            self._pulse_status()
+
+    def _run_once(self) -> RuntimeResult:
+        """Drive the existing one-shot lifecycle."""
         intake = self._intake.intake(self._intake_repository)
         self._reconcile_human_reviews()
         task = self._select_task()
@@ -349,12 +361,20 @@ class FactoryRuntime:
     def _poll_until_terminal(self, run_id: str) -> RunRefresh | None:
         deadline = self._monotonic() + self._timeout
         while True:
+            self._pulse_status()
             refresh = self._tracking.refresh(run_id, self._adapter)
+            self._pulse_status()
             if refresh.run.is_terminal:
                 return refresh
             if self._monotonic() >= deadline:
                 return None
             self._sleep(min(self._poll_interval, max(0.0, deadline - self._monotonic())))
+
+    def _pulse_status(self) -> None:
+        if self._status_pulse is None:
+            return
+        with suppress(Exception):  # delivery failure leaves events queued
+            self._status_pulse()
 
     def _latest_run(self, task_id: str) -> AgentRun | None:
         runs = self._runs.list_runs(task_id)

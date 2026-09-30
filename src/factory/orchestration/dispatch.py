@@ -221,6 +221,9 @@ class DispatchService:
             workspace=workspace,
             summary=produced.summary,
             started_at=produced.started_at or started_at,
+            last_heartbeat=(
+                started_at if produced.status in {RunStatus.PENDING, RunStatus.RUNNING} else None
+            ),
             finished_at=produced.finished_at,
             gates=produced.gates,
         )
