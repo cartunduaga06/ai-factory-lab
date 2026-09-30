@@ -33,7 +33,9 @@ Design notes:
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 6
+# ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
+
+SCHEMA_VERSION = 7
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -42,6 +44,133 @@ AGENT_RUNS_TABLE = "agent_runs"
 PULL_REQUESTS_TABLE = "pull_requests"
 QA_REWORK_TABLE = "qa_rework"
 STATUS_EVENTS_TABLE = "status_events"
+AUDIT_EVENTS_TABLE = "audit_events"
+
+# Audit rows are projections of committed facts, written by triggers in the same
+# transaction. A task id is the stable trace id; event_seq orders concurrent
+# facts within that trace without depending on wall-clock precision.
+CREATE_AUDIT_EVENTS = f"""
+CREATE TABLE IF NOT EXISTS {AUDIT_EVENTS_TABLE} (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL UNIQUE,
+    correlation_id TEXT NOT NULL,
+    event_seq INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    run_id TEXT,
+    workspace_id TEXT,
+    pull_request_id TEXT,
+    causation_id TEXT NOT NULL,
+    source_provider TEXT,
+    source_repository TEXT,
+    source_issue_number INTEGER,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    aggregate_version INTEGER NOT NULL,
+    occurred_at TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT '{{}}',
+    UNIQUE (correlation_id, event_seq)
+);
+"""
+
+CREATE_AUDIT_INDEX = f"""
+CREATE INDEX IF NOT EXISTS ix_{AUDIT_EVENTS_TABLE}_trace
+ON {AUDIT_EVENTS_TABLE} (correlation_id, event_seq);
+"""
+
+
+def _audit_insert(
+    name: str,
+    key: str,
+    task: str,
+    cause: str,
+    aggregate: str,
+    aggregate_id: str,
+    occurred: str,
+    run: str = "NULL",
+    workspace: str = "NULL",
+    pr: str = "NULL",
+    condition: str = "1",
+) -> str:
+    return f"""INSERT INTO {AUDIT_EVENTS_TABLE}
+    (event_key, correlation_id, event_seq, name, task_id, run_id, workspace_id,
+     pull_request_id, causation_id, source_provider, source_repository,
+     source_issue_number, aggregate_type, aggregate_id, aggregate_version, occurred_at)
+    SELECT {key}, {task},
+      (SELECT count(*) + 1 FROM {AUDIT_EVENTS_TABLE} WHERE correlation_id = {task}),
+      {name}, {task}, {run}, {workspace}, {pr}, {cause},
+      t.source_provider, t.source_repository, t.source_issue_number,
+      '{aggregate}', {aggregate_id},
+      (SELECT count(*) + 1 FROM {AUDIT_EVENTS_TABLE}
+       WHERE aggregate_type = '{aggregate}' AND aggregate_id = {aggregate_id}),
+      {occurred} FROM {TASKS_TABLE} t WHERE t.task_id = {task} AND ({condition});"""
+
+
+CREATE_AUDIT_TASK_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_task_materialized AFTER INSERT ON {TASKS_TABLE}
+BEGIN
+{_audit_insert("'IssueMaterialized'", "'task:' || NEW.task_id", "NEW.task_id", "NEW.task_id", "task", "NEW.task_id", "NEW.created_at")}
+{_audit_insert("'WorkItemReady'", "'task:ready:' || NEW.task_id", "NEW.task_id", "NEW.task_id", "task", "NEW.task_id", "NEW.created_at", condition="NEW.status = 'READY'")}
+END;
+"""
+
+CREATE_AUDIT_TRANSITION_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_transition AFTER INSERT ON {TRANSITIONS_TABLE}
+BEGIN
+{_audit_insert("CASE NEW.to_status WHEN 'READY' THEN 'WorkItemReady' WHEN 'CLAIMED' THEN 'TaskClaimed' WHEN 'PR_OPEN' THEN CASE WHEN (SELECT count(*) FROM transitions WHERE task_id = NEW.task_id AND to_status = 'PR_OPEN') > 1 THEN 'PRUpdated' ELSE 'TaskPR_OPEN' END WHEN 'WAITING_HUMAN' THEN 'HumanApprovalRequired' WHEN 'CHANGES_REQUESTED' THEN 'ChangesRequested' WHEN 'DONE' THEN 'TaskCompleted' ELSE 'Task' || NEW.to_status END", "'transition:' || NEW.transition_id", "NEW.task_id", "NEW.transition_id", "task", "NEW.task_id", "NEW.occurred_at", "(SELECT run_id FROM agent_runs WHERE task_id = NEW.task_id ORDER BY created_at DESC, rowid DESC LIMIT 1)", "(SELECT workspace_id FROM agent_runs WHERE task_id = NEW.task_id ORDER BY created_at DESC, rowid DESC LIMIT 1)", "(SELECT pull_request_id FROM pull_requests WHERE task_id = NEW.task_id ORDER BY rowid DESC LIMIT 1)")}
+END;
+"""
+
+CREATE_AUDIT_RUN_INSERT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_run_insert AFTER INSERT ON {AGENT_RUNS_TABLE}
+BEGIN
+{_audit_insert("'RunStarted'", "'run:start:' || NEW.run_id", "NEW.task_id", "NEW.run_id", "run", "NEW.run_id", "COALESCE(NEW.started_at, NEW.created_at)", "NEW.run_id", "NEW.workspace_id")}
+END;
+"""
+
+CREATE_AUDIT_RUN_FINISH_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_run_finish AFTER UPDATE OF status ON {AGENT_RUNS_TABLE}
+WHEN OLD.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+ AND NEW.status IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+BEGIN
+{_audit_insert("'RunFinished'", "'run:finish:' || NEW.run_id", "NEW.task_id", "NEW.run_id", "run", "NEW.run_id", "COALESCE(NEW.finished_at, strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))", "NEW.run_id", "NEW.workspace_id")}
+END;
+"""
+
+CREATE_AUDIT_VALIDATION_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_validation AFTER UPDATE ON {AGENT_RUNS_TABLE}
+WHEN NEW.status = 'SUCCEEDED' AND
+ (OLD.status != 'SUCCEEDED' OR OLD.gates != NEW.gates OR
+  OLD.validated_revision IS NOT NEW.validated_revision)
+BEGIN
+{_audit_insert("CASE WHEN EXISTS (SELECT 1 FROM json_each(NEW.gates) WHERE json_extract(value, '$.required') = 1 AND json_extract(value, '$.status') != 'PASSED') THEN 'ValidationFailed' ELSE 'ValidationPassed' END", "'validation:' || NEW.run_id || ':' || CASE WHEN EXISTS (SELECT 1 FROM json_each(NEW.gates) WHERE json_extract(value, '$.required') = 1 AND json_extract(value, '$.status') != 'PASSED') THEN 'failed' ELSE 'passed' END", "NEW.task_id", "NEW.run_id", "run", "NEW.run_id", "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')", "NEW.run_id", "NEW.workspace_id").replace("INSERT INTO", "INSERT OR IGNORE INTO", 1)}
+END;
+"""
+
+CREATE_AUDIT_PR_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_pr_insert AFTER INSERT ON {PULL_REQUESTS_TABLE}
+BEGIN
+{_audit_insert("'PRCreated'", "'pr:create:' || NEW.pull_request_id", "(SELECT task_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.run_id", "pull_request", "NEW.pull_request_id", "NEW.opened_at", "NEW.run_id", "(SELECT workspace_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.pull_request_id")}
+END;
+"""
+
+CREATE_AUDIT_PR_UPDATE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_pr_update AFTER UPDATE ON {PULL_REQUESTS_TABLE}
+WHEN OLD.number IS NOT NEW.number OR OLD.url IS NOT NEW.url OR OLD.merged IS NOT NEW.merged
+BEGIN
+{_audit_insert("'PRUpdated'", "'pr:update:' || NEW.pull_request_id || ':' || (SELECT count(*) + 1 FROM audit_events WHERE aggregate_type = 'pull_request' AND aggregate_id = NEW.pull_request_id)", "(SELECT task_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.run_id", "pull_request", "NEW.pull_request_id", "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')", "NEW.run_id", "(SELECT workspace_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.pull_request_id")}
+END;
+"""
+
+CREATE_AUDIT_NO_UPDATE = f"""
+CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON {AUDIT_EVENTS_TABLE}
+BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
+"""
+
+CREATE_AUDIT_NO_DELETE = f"""
+CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON {AUDIT_EVENTS_TABLE}
+BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
+"""
 
 #: Run statuses that count as "active" for the one-active-run-per-task guard.
 #: These must match the non-terminal members of
@@ -250,6 +379,7 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
 #: Statements applied, in order, by :func:`initialize_schema`.
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS,
+    CREATE_AUDIT_EVENTS,
     CREATE_TRANSITIONS,
     CREATE_STATUS_EVENTS,
     CREATE_STATUS_EVENT_TRIGGER,
@@ -266,6 +396,16 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_AGENT_RUNS_WORKSPACE_OWNER_TRIGGER,
     CREATE_PULL_REQUESTS_RUN_INDEX,
     CREATE_PULL_REQUESTS_BRANCH_INDEX,
+    CREATE_AUDIT_INDEX,
+    CREATE_AUDIT_TASK_TRIGGER,
+    CREATE_AUDIT_TRANSITION_TRIGGER,
+    CREATE_AUDIT_RUN_INSERT_TRIGGER,
+    CREATE_AUDIT_VALIDATION_TRIGGER,
+    CREATE_AUDIT_RUN_FINISH_TRIGGER,
+    CREATE_AUDIT_PR_TRIGGER,
+    CREATE_AUDIT_PR_UPDATE_TRIGGER,
+    CREATE_AUDIT_NO_UPDATE,
+    CREATE_AUDIT_NO_DELETE,
 )
 
 __all__ = [
