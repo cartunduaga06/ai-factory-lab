@@ -119,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     sprint.add_argument(
         "action",
         choices=("plan", "authorize", "status", "pause", "resume", "cancel", "request-human"),
+        help="Choose a sprint operation; pause and request-human require --sprint-id.",
     )
     sprint.add_argument("--manifest", help="JSON file with sprint_id and ordered items.")
     sprint.add_argument("--sprint-id", help="Authorized sprint id for a state decision.")

@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
+import factory.__main__ as cli
 from factory.domain.backlog import MaterializedIssue, WorkItem
 from factory.domain.enums import AgentKind, RepositoryRole, RunStatus, TaskStatus
 from factory.domain.models import FactoryTask, PullRequest, Repository, TaskSource
 from factory.domain.ports import PullRequestState, PullRequestStateSource
 from factory.domain.sprint import SprintState
+from factory.infrastructure.config import FactoryConfig
 from factory.infrastructure.persistence import SqlitePullRequestRepository, SqliteRunRepository
 from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 from factory.infrastructure.persistence.backlog_sqlite import SqliteBacklogLinkRepository
@@ -170,6 +172,62 @@ def test_dry_run_reports_ineligible_and_repeated_human_pauses_are_traced(tmp_pat
         "SprintPaused",
         "SprintResumed",
     ]
+
+
+@pytest.mark.parametrize("action", ["pause", "request-human"])
+def test_sprint_cli_human_decisions_pause_without_execution(
+    action: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    service, tasks = _service(path, source, sink)
+    service.authorize(service.draft("sprint-cli", (("a", ()),)))
+    config = FactoryConfig.from_env({"DATABASE_URL": f"sqlite:///{path}"})
+    monkeypatch.setattr(cli.FactoryConfig, "from_env", lambda: config)
+    monkeypatch.setattr(cli, "_build_sprint", lambda _config, _tasks: service)
+
+    def forbidden_runtime(_config: FactoryConfig) -> None:
+        raise AssertionError("a sprint decision must not start the factory runtime")
+
+    monkeypatch.setattr(cli, "_run_runtime", forbidden_runtime)
+    monkeypatch.setattr(cli, "_run_watch", forbidden_runtime)
+
+    parsed = cli.build_parser().parse_args(["sprint", action, "--sprint-id", "sprint-cli"])
+    assert parsed.action == action
+    assert cli.main(["sprint", action, "--sprint-id", "sprint-cli"]) == cli.EXIT_OK
+    assert "Sprint paused for human decision" in capsys.readouterr().out
+    assert SqliteSprintRepository(str(path)).current()[1:] == (SprintState.PAUSED, 0)  # type: ignore[index]
+    assert [event.name for event in SqliteAuditEventStore(str(path)).for_sprint("sprint-cli")] == [
+        "SprintAuthorized",
+        "SprintPaused",
+    ]
+    assert sink.posts == 0
+    assert tasks.list() == []
+    assert SqliteRunRepository(str(path)).list_runs() == []
+
+
+@pytest.mark.parametrize("action", ["pause", "request-human"])
+def test_sprint_cli_human_decisions_fail_closed_without_authorization(
+    action: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    service, tasks = _service(path, source, sink)
+    config = FactoryConfig.from_env({"DATABASE_URL": f"sqlite:///{path}"})
+    monkeypatch.setattr(cli.FactoryConfig, "from_env", lambda: config)
+    monkeypatch.setattr(cli, "_build_sprint", lambda _config, _tasks: service)
+
+    assert cli.main(["sprint", action, "--sprint-id", "unknown"]) == cli.EXIT_CONFIG_ERROR
+    assert "sprint refused: ValueError" in capsys.readouterr().out
+    assert SqliteSprintRepository(str(path)).current() is None
+    assert sink.posts == 0
+    assert tasks.list() == []
 
 
 def test_runtime_never_dispatches_issue_outside_authorized_sprint(tmp_path: Path) -> None:
