@@ -6,6 +6,7 @@ import html
 import json
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -61,10 +62,8 @@ def serve_status(
 
         def monitor() -> None:
             while not stop.is_set():
-                try:
+                with suppress(Exception):  # durable outbox retries on next pulse
                     callback()
-                except Exception:  # noqa: BLE001 - durable outbox retries on next pulse
-                    pass
                 stop.wait(60)
 
         threading.Thread(target=monitor, daemon=True).start()
@@ -105,12 +104,12 @@ def render_status(snapshot: StatusSnapshot) -> str:
     return (
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        '<title>Factory status</title><style>'
-        'body{font:16px system-ui;background:#101820;color:#f2f5f7;margin:0;padding:1rem}'
-        'main{max-width:36rem;margin:auto}h1{font-size:1.3rem}strong{font-size:2rem}'
-        'dt{color:#a7becb;margin-top:1rem}dd{margin:.2rem 0;overflow-wrap:anywhere}'
-        'a{display:inline-block;color:#8edaff;margin:1rem 1rem 0 0}li{margin:.5rem 0}'
-        '</style><main><h1>AI Factory Lab</h1>'
-        f'<strong>{escape(snapshot.phase)}</strong><dl>{details}</dl>{links}'
-        f'<h2>Recent transitions</h2><ol>{history}</ol></main></html>'
+        "<title>Factory status</title><style>"
+        "body{font:16px system-ui;background:#101820;color:#f2f5f7;margin:0;padding:1rem}"
+        "main{max-width:36rem;margin:auto}h1{font-size:1.3rem}strong{font-size:2rem}"
+        "dt{color:#a7becb;margin-top:1rem}dd{margin:.2rem 0;overflow-wrap:anywhere}"
+        "a{display:inline-block;color:#8edaff;margin:1rem 1rem 0 0}li{margin:.5rem 0}"
+        "</style><main><h1>AI Factory Lab</h1>"
+        f"<strong>{escape(snapshot.phase)}</strong><dl>{details}</dl>{links}"
+        f"<h2>Recent transitions</h2><ol>{history}</ol></main></html>"
     )

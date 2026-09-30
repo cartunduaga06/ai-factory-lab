@@ -75,8 +75,11 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                 "(transition_id, task_id, from_status, to_status, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (
-                    str(uuid.uuid4()), task_id, TaskStatus.WAITING_HUMAN.value,
-                    TaskStatus.CHANGES_REQUESTED.value, now,
+                    str(uuid.uuid4()),
+                    task_id,
+                    TaskStatus.WAITING_HUMAN.value,
+                    TaskStatus.CHANGES_REQUESTED.value,
+                    now,
                 ),
             )
             row = conn.execute(
@@ -89,7 +92,8 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         with self._connect() as conn:
             row = conn.execute(
                 f"SELECT feedback FROM {QA_REWORK_TABLE} WHERE task_id = ? "
-                "ORDER BY requested_at DESC, rowid DESC LIMIT 1", (task_id,)
+                "ORDER BY requested_at DESC, rowid DESC LIMIT 1",
+                (task_id,),
             ).fetchone()
         return str(row["feedback"]) if row is not None else None
 

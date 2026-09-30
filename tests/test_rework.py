@@ -105,8 +105,7 @@ def test_second_review_cycle_reuses_branch_and_pr(tmp_path: Path) -> None:
     requested = service.request(first.task_id or "", "Review 3-5 ECC skills; run ruff format.")
     assert requested.status is TaskStatus.CHANGES_REQUESTED
     assert (
-        tasks.latest_rework_feedback(requested.task_id)
-        == "Review 3-5 ECC skills; run ruff format."
+        tasks.latest_rework_feedback(requested.task_id) == "Review 3-5 ECC skills; run ruff format."
     )
     with pytest.raises(ReworkNotAllowedError):
         service.request(requested.task_id, "duplicate")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 
 from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus, ValidationOutcome
@@ -372,10 +373,8 @@ class FactoryRuntime:
     def _pulse_status(self) -> None:
         if self._status_pulse is None:
             return
-        try:
+        with suppress(Exception):  # delivery failure leaves events queued
             self._status_pulse()
-        except Exception:  # noqa: BLE001 - delivery failure leaves events queued
-            pass
 
     def _latest_run(self, task_id: str) -> AgentRun | None:
         runs = self._runs.list_runs(task_id)
