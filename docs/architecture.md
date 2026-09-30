@@ -8,6 +8,9 @@ manifest means no selection. The controller pauses on `WAITING_HUMAN`, `BLOCKED`
 and `FAILED`, and resumes only after an explicit human command and resolution
 of the task gate. Sprint facts are appended to the E1 trace, keyed by
 `sprint:<sprint_id>`. See [backlog.md](backlog.md) for the operator commands.
+The E4 dependency resolver checks every named predecessor against its linked
+task's durable `DONE` state immediately before materialization and on resume.
+An unresolved dependency pauses the sprint without creating another Issue.
 
 AI Factory Lab is the control plane of a software-development factory. It turns
 work items into verified Pull Requests produced by autonomous coding agents, and
@@ -583,7 +586,10 @@ Design intent:
   calls it. It contains no intake, dispatch, tracking or publication logic, so
   the phase boundaries and safety guards are exactly those of ``factory run``.
 - **WIP = 1 for active execution.** One runtime invocation runs at a time, and
-  the runtime itself completes at most one task. A CODE task at
+  the runtime itself completes at most one task. SQLite also guards
+  `READY → CLAIMED` against any other task in `CLAIMED`, `RUNNING`,
+  `VALIDATING` or `PR_OPEN`. The claim remains durable across process restarts;
+  a second worker waits instead of launching another agent. A CODE task at
   ``WAITING_HUMAN`` holds later CODE tasks until human review, but a separate
   OPERATIONAL scratch task may run while that review is pending.
 - **Cooperative stop.** The CLI installs ``SIGINT``/``SIGTERM`` handlers that only
@@ -666,8 +672,23 @@ other states and repeated requests are refused clearly. Concurrent retries
 cannot duplicate recovery transitions.
 Retry performs no intake or dispatch and never alters historical runs or
 workspaces. An ordinary retry creates a new workspace, branch and run identity;
-a QA rework retry keeps its reviewed checkout and branch. There is no automatic
-retry loop.
+a QA rework retry keeps its reviewed checkout and branch. The production
+retry policy allows at most three failed run attempts and waits 60 or 120
+seconds, capped at 300 seconds, based on the latest durable run timestamp. Automatic QA
+correction allows two new runs after the initial failed gate and uses the same
+bounded delay. A third failed validation blocks the task with a persisted
+reason and waits for human intervention. Terminal agent failure is not retried
+automatically. Active run collection failures preserve the existing run and
+claim, so the next pass observes that run rather than creating another.
+
+At the start of each runtime pass, reconciliation inspects persisted active
+tasks within the authorized sprint position (or all tasks when no sprint is
+configured). A latest terminal run can safely drive a missing lifecycle transition
+through the existing tracking service. A `CLAIMED` task with no run is reported
+as an unresolved interruption; no agent is launched because an external launch
+cannot be ruled out. Repeated reconciliation does not add runs, workspaces,
+Issues or PRs. PR publication and human QA still use their existing identity
+checks and stop at `WAITING_HUMAN`.
 
 ### Adapter boundary
 

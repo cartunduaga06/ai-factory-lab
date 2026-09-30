@@ -68,6 +68,7 @@ from factory.integrations.workspace import (
 )
 from factory.orchestration.backlog import BacklogMaterializationService
 from factory.orchestration.intake import IssueIntakeService
+from factory.orchestration.recovery import RecoveryPolicy
 from factory.orchestration.retry import RetryService
 from factory.orchestration.rework import ReworkNotAllowedError, ReworkService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
@@ -475,7 +476,7 @@ def _run_retry(config: FactoryConfig, task_id: str) -> int:
         runs = SqliteRunRepository(database.path)
         tasks.initialize()
         runs.initialize()
-        task = RetryService(tasks, runs).retry(task_id)
+        task = RetryService(tasks, runs, RecoveryPolicy()).retry(task_id)
     except UnsupportedDatabaseError as exc:
         print(f"configuration error: {exc}")
         return EXIT_CONFIG_ERROR
@@ -679,6 +680,7 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         heartbeat_interval=config.heartbeat_interval,
         status_pulse=status_publisher.flush if status_publisher else None,
         sprint=sprint,
+        recovery_policy=RecoveryPolicy(),
     )
 
 

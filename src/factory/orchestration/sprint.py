@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from factory.domain.backlog import WorkItem
 from factory.domain.enums import TaskStatus
-from factory.domain.models import FactoryTask
+from factory.domain.models import FactoryTask, TaskSource
 from factory.domain.ports import (
     BacklogLinkRepository,
     BacklogSource,
@@ -59,6 +59,36 @@ class AuthorizedBacklogSource(BacklogSource):
         return actual
 
 
+class DependencyResolver:
+    """Resolve named predecessors against durable task outcomes, not position alone."""
+
+    def __init__(self, links: BacklogLinkRepository, tasks: TaskRepository) -> None:
+        self._links = links
+        self._tasks = tasks
+
+    def complete(self, manifest: SprintManifest, position: int) -> bool:
+        step = manifest.steps[position]
+        if not step.item.dependencies_satisfied:
+            return False
+        preceding = {
+            f"{prior.item.provider}:{prior.item.external_id}": prior.item
+            for prior in manifest.steps[:position]
+        }
+        for dependency in step.dependencies:
+            item = preceding.get(dependency)
+            if item is None:
+                return False
+            issue = self._links.get_issue(item.provider, item.external_id)
+            if issue is None:
+                return False
+            task = self._tasks.find_by_source(
+                TaskSource("github", issue.repository_slug, issue.number)
+            )
+            if task is None or task.status is not TaskStatus.DONE:
+                return False
+        return True
+
+
 class SprintService:
     """Validate and advance a WIP=1 sprint without executing a second runtime."""
 
@@ -75,6 +105,7 @@ class SprintService:
         self._links = links
         self._tasks = tasks
         self._sprints = sprints
+        self._dependencies = DependencyResolver(links, tasks)
 
     def draft(
         self, sprint_id: str, entries: tuple[tuple[str, tuple[str, ...]], ...]
@@ -179,6 +210,9 @@ class SprintService:
             if self._source.get_item(item.external_id) != item:
                 self._sprints.move(manifest.sprint_id, SprintState.PAUSED, position, "SprintPaused")
                 return False
+            if not self._dependencies.complete(manifest, position):
+                self._sprints.move(manifest.sprint_id, SprintState.PAUSED, position, "SprintPaused")
+                return False
             if issue is None:
                 self._materializer.reconcile(item.external_id)
                 issue = self._links.get_issue(item.provider, item.external_id)
@@ -250,6 +284,10 @@ class SprintService:
             TaskStatus.CANCELLED,
         }:
             raise ValueError("human gate remains unresolved")
+        if self._source.get_item(item.external_id) != item or not self._dependencies.complete(
+            manifest, position
+        ):
+            raise ValueError("sprint dependencies remain unresolved")
         self._sprints.move(sprint_id, SprintState.ACTIVE, position, "SprintResumed")
 
     def cancel(self, sprint_id: str) -> None:
@@ -277,8 +315,6 @@ class SprintService:
         return current is not None and current[1] is SprintState.PAUSED
 
     def _task_for(self, item: WorkItem) -> FactoryTask | None:
-        from factory.domain.models import TaskSource
-
         issue = self._links.get_issue(item.provider, item.external_id)
         if issue is None:
             return None

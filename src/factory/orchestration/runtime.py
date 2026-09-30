@@ -7,8 +7,10 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from factory.domain.enums import AgentKind, RunStatus, TaskKind, TaskStatus, ValidationOutcome
+from factory.domain.errors import AgentCollectError
 from factory.domain.models import AgentAdapter, AgentRun, FactoryTask, QualityGateSpec, Repository
 from factory.domain.operational import (
     OperationalCapability,
@@ -31,6 +33,8 @@ from factory.domain.ports import (
 from factory.orchestration.dispatch import DispatchService
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
 from factory.orchestration.publication import PublicationResult, PublicationService
+from factory.orchestration.reconciliation import ReconciliationService
+from factory.orchestration.recovery import FailureClass, RecoveryPolicy
 from factory.orchestration.sprint import SprintService
 from factory.orchestration.tracking import RunRefresh, RunTrackingService
 
@@ -85,6 +89,7 @@ class FactoryRuntime:
         status_pulse: Callable[[], None] | None = None,
         backlog_reconcile: Callable[[], object] | None = None,
         sprint: SprintService | None = None,
+        recovery_policy: RecoveryPolicy | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
@@ -131,6 +136,9 @@ class FactoryRuntime:
             base_branch=base_branch,
             default_branch=base_branch,
         )
+        self._reconciliation = ReconciliationService(
+            tasks, runs, self._tracking, adapter, allows=sprint.allows if sprint else None
+        )
         self._pull_requests = pull_requests
         self._pull_request_state = pull_request_state
         self._operational_policy = operational_policy or OperationalPolicy()
@@ -141,10 +149,12 @@ class FactoryRuntime:
         self._status_pulse = status_pulse
         self._backlog_reconcile = backlog_reconcile
         self._sprint = sprint
+        self._recovery_policy = recovery_policy or RecoveryPolicy()
 
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
         try:
+            self._reconciliation.reconcile()
             if self._sprint is not None and self._sprint.is_paused():
                 self._reconcile_human_reviews()
                 return RuntimeResult(
@@ -173,6 +183,26 @@ class FactoryRuntime:
             return RuntimeResult(
                 None, None, None, None, None, None, None, "NO_ELIGIBLE_TASK", intake
             )
+        if task.status in {TaskStatus.DISCOVERED, TaskStatus.READY, TaskStatus.CHANGES_REQUESTED}:
+            active = self._runs.find_active_run(task.task_id)
+            if active is not None:
+                return self._result(task, active, None, "ACTIVE_RUN_STATE_MISMATCH", intake)
+            busy = any(
+                other.task_id != task.task_id
+                for status in (
+                    TaskStatus.CLAIMED,
+                    TaskStatus.RUNNING,
+                    TaskStatus.VALIDATING,
+                    TaskStatus.PR_OPEN,
+                )
+                for other in self._tasks.list(status)
+            )
+            busy = busy or any(
+                run.task_id != task.task_id and not run.is_terminal
+                for run in self._runs.list_runs()
+            )
+            if busy:
+                return self._result(task, self._latest_run(task.task_id), None, "WIP_BUSY", intake)
         if task.status is TaskStatus.WAITING_HUMAN:
             if not self._code_capable:
                 return self._result(
@@ -256,6 +286,16 @@ class FactoryRuntime:
                     and gate_source.validation_outcome is ValidationOutcome.GATES_FAILED
                     else None
                 )
+                if gate_feedback is not None and previous is not None:
+                    last_attempt = previous.finished_at or previous.started_at
+                    if last_attempt is None:
+                        return self._result(task, previous, None, "BACKOFF_PENDING", intake)
+                    elapsed = (datetime.now(UTC) - last_attempt).total_seconds()
+                    delay = self._recovery_policy.delay_for(
+                        max(1, self._gate_failure_streak(task.task_id))
+                    )
+                    if elapsed < delay:
+                        return self._result(task, previous, None, "BACKOFF_PENDING", intake)
                 if (feedback is not None or gate_feedback is not None) and previous is not None:
                     if feedback is not None and self._adapter.kind is not AgentKind.CODEX:
                         return self._result(task, previous, None, "ENGINE_MISMATCH", intake)
@@ -295,7 +335,14 @@ class FactoryRuntime:
             if task.kind is TaskKind.OPERATIONAL and current.status is TaskStatus.VALIDATING:
                 current = self._block(task.task_id, "operational acceptance gates failed")
             elif task.kind is TaskKind.CODE and current.status is TaskStatus.VALIDATING:
-                current = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
+                if (
+                    self._recovery_policy.classify(refresh.run) is FailureClass.CORRECTABLE
+                    and self._gate_failure_streak(task.task_id)
+                    > self._recovery_policy.correction_limit
+                ):
+                    current = self._block(task.task_id, "quality correction limit reached")
+                else:
+                    current = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.READY)
             return self._result(current, refresh.run, refresh, "QUALITY_GATES_FAILED", intake)
 
         if task.kind is TaskKind.OPERATIONAL:
@@ -429,7 +476,12 @@ class FactoryRuntime:
         deadline = self._monotonic() + self._timeout
         while True:
             self._pulse_status()
-            refresh = self._tracking.refresh(run_id, self._adapter)
+            try:
+                refresh = self._tracking.refresh(run_id, self._adapter)
+            except AgentCollectError:
+                # The engine may still be executing. Preserve the active run and
+                # its global claim, then observe the same run on the next pass.
+                return None
             self._pulse_status()
             if refresh.run.is_terminal:
                 return refresh
@@ -446,6 +498,14 @@ class FactoryRuntime:
     def _latest_run(self, task_id: str) -> AgentRun | None:
         runs = self._runs.list_runs(task_id)
         return runs[-1] if runs else None
+
+    def _gate_failure_streak(self, task_id: str) -> int:
+        streak = 0
+        for run in reversed(self._runs.list_runs(task_id)):
+            if run.validation_outcome is not ValidationOutcome.GATES_FAILED:
+                break
+            streak += 1
+        return streak
 
     @staticmethod
     def _gate_feedback(run: AgentRun) -> str:

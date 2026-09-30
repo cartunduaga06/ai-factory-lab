@@ -205,3 +205,21 @@ run, its workspace and all prior history. A `CLAIMED` task with no runs, a lates
 run other than `FAILED`, or any active run is refused without a retry transition.
 Concurrent retries use guarded lifecycle writes and cannot duplicate recovery
 edges or create runs.
+
+The production retry policy reads the failed run history and last attempt time
+from SQLite. It refuses a fourth failed run attempt and delays eligible retries
+by 60 seconds after the first failure and 120 seconds after the second.
+`BACKOFF_PENDING` means the watcher will wait; it has not created a run. A task
+with a successful agent run but failed quality gates enters the existing QA
+correction path on the same checkout. That path allows two correction runs,
+with the same delay, then records `BLOCKED` and a reason if the gates still
+fail. A human `request-changes` cycle continues to use the reviewed PR and
+branch. The worker never merges that PR.
+
+Each `run` or `watch` pass first reconciles persisted tasks against their latest
+run. It repairs a missing terminal lifecycle transition through the normal
+tracking service. A `CLAIMED` task with no run stays claimed and is reported as
+unresolved: the operator must verify that no external agent was started before
+choosing a recovery action. The durable claim prevents another task from
+starting in the meantime. An active run that cannot be collected stays active;
+the worker observes that same run on a later pass.

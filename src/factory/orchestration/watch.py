@@ -27,7 +27,7 @@ from factory.domain.enums import TaskStatus
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 
 # No eligible work means the worker waits before checking again.
-IDLE_OUTCOMES = frozenset({"NO_ELIGIBLE_TASK"})
+IDLE_OUTCOMES = frozenset({"NO_ELIGIBLE_TASK", "WIP_BUSY", "BACKOFF_PENDING"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -98,7 +98,7 @@ class FactoryWatcher:
             ):
                 stopped = True
                 break
-            if result.outcome in IDLE_OUTCOMES:
+            if result.outcome in IDLE_OUTCOMES | {"TIMEOUT_RESUMABLE"}:
                 self._sleep(self._idle_interval)
 
         return WatchOutcome(

@@ -31,6 +31,7 @@ from factory.domain.models import FactoryTask, TaskSource, TaskTransition
 from factory.domain.ports import TaskRepository
 from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
 from factory.infrastructure.persistence.schema import (
+    AGENT_RUNS_TABLE,
     QA_REWORK_TABLE,
     TASKS_TABLE,
     TRANSITIONS_TABLE,
@@ -212,13 +213,31 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         now = datetime.now(UTC)
         timestamp = encode_datetime(now)
         with self._connect() as conn:
+            # A claim is the durable global execution lease. SQLite evaluates
+            # this guard in the same write transaction as the status change,
+            # including when two worker processes race after a restart.
+            idle_guard = (
+                f"AND NOT EXISTS (SELECT 1 FROM {TASKS_TABLE} AS busy "
+                "WHERE busy.task_id != ? AND busy.status IN "
+                "('CLAIMED', 'RUNNING', 'VALIDATING', 'PR_OPEN')) "
+                f"AND NOT EXISTS (SELECT 1 FROM {AGENT_RUNS_TABLE} AS active "
+                "WHERE active.status IN ('PENDING', 'RUNNING'))"
+                if target is TaskStatus.CLAIMED
+                else ""
+            )
             cursor = conn.execute(
                 f"""
                 UPDATE {TASKS_TABLE}
                    SET status = ?, updated_at = ?
-                 WHERE task_id = ? AND status = ?
+                 WHERE task_id = ? AND status = ? {idle_guard}
                 """,
-                (target.value, timestamp, task_id, expected_from.value),
+                (
+                    target.value,
+                    timestamp,
+                    task_id,
+                    expected_from.value,
+                    *((task_id,) if target is TaskStatus.CLAIMED else ()),
+                ),
             )
             if cursor.rowcount == 0:
                 # The guarded write matched nothing: the task is either gone or its
