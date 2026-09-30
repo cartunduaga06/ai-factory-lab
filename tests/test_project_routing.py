@@ -146,6 +146,43 @@ def test_old_task_table_migrates_project_identity(tmp_path: Path) -> None:
     assert loaded is not None and loaded.project_id == "ai-factory-lab"
 
 
+def test_legacy_waiting_human_restart_matches_canonical_control_plane_profile(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "legacy-waiting.db")
+    old_schema = CREATE_TASKS.replace(
+        "    project_id           TEXT NOT NULL DEFAULT 'ai-factory-lab',\n", ""
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute(old_schema)
+        conn.execute(
+            "INSERT INTO tasks (task_id, title, target_repository, status, created_at, "
+            "updated_at) VALUES ('legacy-waiting', 'Legacy waiting', "
+            "'cartunduaga06/ai-factory-lab', 'WAITING_HUMAN', '2026-01-01', '2026-01-01')"
+        )
+
+    SqliteTaskRepository(path).initialize()
+    restarted = SqliteTaskRepository(path)
+    loaded = restarted.get("legacy-waiting")
+    assert loaded is not None
+    assert loaded.status.value == "WAITING_HUMAN"
+    assert loaded.project_id == "ai-factory-lab"
+
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "ai-factory-lab",
+                "cartunduaga06/ai-factory-lab",
+                str(tmp_path / "factory"),
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    profile = registry.resolve(loaded.project_id, loaded.target_repository)
+    assert profile.repository_slug == "cartunduaga06/ai-factory-lab"
+
+
 def test_operator_configuration_loads_two_project_profiles(tmp_path: Path) -> None:
     profiles = [
         {
