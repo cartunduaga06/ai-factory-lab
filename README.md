@@ -1,5 +1,19 @@
 # AI Factory Lab
 
+## Multi-project routing
+
+Set `FACTORY_PROJECTS` to an operator-owned JSON array of project profiles to
+route Sprint cards by `project_id`. Each profile provides a repository slug,
+local source checkout, base branch, quality gates, context profile and
+`human-only` deploy policy. The Trello card supplies one line such as
+`project_id: dulces-el-jericoano`; it cannot select a repository. Unknown ids
+and repository mismatches are rejected before Issue creation and recorded as
+sanitized routing rejections. Global WIP stays at one.
+
+The configured checkout must already exist with an HTTPS `origin` matching its
+registered repository. The Dulces E2E pilot requires its real repository and
+checkout; the Factory does not create them.
+
 AI Factory Lab is the **control plane** of a software-development factory. It
 coordinates autonomous coding agents (OpenHands, Codex and future engines) that
 work on *external* product repositories — starting with

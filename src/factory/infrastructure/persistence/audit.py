@@ -31,6 +31,7 @@ class AuditEvent:
     occurred_at: str
     source_provider: str | None
     source_issue_number: int | None
+    project_id: str | None = None
 
 
 def _safe_id(value: str | None) -> str | None:
@@ -43,7 +44,9 @@ class SqliteAuditEventStore(SqliteRepository):
     def for_task(self, task_id: str) -> tuple[AuditEvent, ...]:
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT * FROM {AUDIT_EVENTS_TABLE} WHERE task_id = ? ORDER BY event_seq",
+                f"SELECT a.*, t.project_id AS routing_project_id "
+                f"FROM {AUDIT_EVENTS_TABLE} a LEFT JOIN {TASKS_TABLE} t ON t.task_id = a.task_id "
+                "WHERE a.task_id = ? ORDER BY a.event_seq",
                 (task_id,),
             ).fetchall()
         return tuple(self._event(row) for row in rows)
@@ -98,6 +101,7 @@ class SqliteAuditEventStore(SqliteRepository):
             occurred_at=str(row["occurred_at"]),
             source_provider=row["source_provider"],
             source_issue_number=row["source_issue_number"],
+            project_id=row["routing_project_id"],
         )
 
 

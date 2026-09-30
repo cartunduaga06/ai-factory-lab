@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from factory.domain.backlog import WorkItem
 from factory.domain.ports import BacklogSource
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 
 
 class TrelloBacklogError(RuntimeError):
@@ -44,6 +45,7 @@ class TrelloBacklogSource(BacklogSource):
         ready_label_id: str,
         target_repository: str,
         transport: TrelloTransport | None = None,
+        registry: ProjectRegistry | None = None,
     ) -> None:
         if not all(
             re.fullmatch(r"[A-Za-z0-9]+", value) for value in (sprint_list_id, ready_label_id)
@@ -54,6 +56,7 @@ class TrelloBacklogSource(BacklogSource):
         self._list = sprint_list_id
         self._label = ready_label_id
         self._repository = target_repository
+        self._registry = registry
         self._transport = transport or UrllibTrelloTransport()
 
     def list_items(self) -> Sequence[WorkItem]:
@@ -92,12 +95,25 @@ class TrelloBacklogSource(BacklogSource):
             or not isinstance(card.get("idList"), str)
         ):
             raise TrelloBacklogError("invalid Trello card fields")
+        project_id = "ai-factory-lab"
+        repository = self._repository
+        if self._registry is not None:
+            declarations = re.findall(r"(?im)^project_id\s*[:=]\s*([^\s]+)\s*$", body)
+            forged = re.search(r"(?im)^target_repository\s*[:=]", body)
+            project_id = declarations[0] if len(declarations) == 1 else "invalid"
+            try:
+                repository = self._registry.resolve(project_id).repository_slug
+            except ProjectRoutingError:
+                repository = "invalid/invalid"
+            if forged:
+                repository = "invalid/invalid"
         return WorkItem(
             provider="trello",
             external_id=external_id,
             title=title,
             body=body,
-            target_repository=self._repository,
+            target_repository=repository,
+            project_id=project_id,
             eligible=(
                 card["idList"] == self._list and not card["closed"] and self._label in labels
             ),

@@ -107,16 +107,17 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                 conn.execute(
                     f"""
                     INSERT INTO {TASKS_TABLE} (
-                        task_id, title, body, target_repository,
+                        task_id, title, body, target_repository, project_id,
                         source_provider, source_repository, source_issue_number,
                         status, labels, kind, blocked_reason, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.task_id,
                         task.title,
                         task.body,
                         task.target_repository,
+                        task.project_id,
                         source.provider if source else None,
                         source.repository_slug if source else None,
                         source.issue_number if source else None,
@@ -140,16 +141,18 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
             cursor = conn.execute(
                 f"""
                 UPDATE {TASKS_TABLE}
-                   SET title = ?, body = ?, target_repository = ?,
+                   SET title = ?, body = ?, target_repository = ?, project_id = ?,
                        source_provider = ?, source_repository = ?,
                        source_issue_number = ?, status = ?, labels = ?, kind = ?,
                        blocked_reason = ?, updated_at = ?
-                 WHERE task_id = ? AND kind = ?
+                 WHERE task_id = ? AND kind = ? AND project_id = ?
+                   AND target_repository = ?
                 """,
                 (
                     task.title,
                     task.body,
                     task.target_repository,
+                    task.project_id,
                     source.provider if source else None,
                     source.repository_slug if source else None,
                     source.issue_number if source else None,
@@ -160,6 +163,8 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                     encode_datetime(task.updated_at),
                     task.task_id,
                     task.kind.value,
+                    task.project_id,
+                    task.target_repository,
                 ),
             )
             if cursor.rowcount == 0:
@@ -373,6 +378,7 @@ def _row_to_task(row: sqlite3.Row) -> FactoryTask:
     return FactoryTask(
         title=row["title"],
         target_repository=row["target_repository"],
+        project_id=row["project_id"],
         source=source,
         task_id=row["task_id"],
         body=row["body"],

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from factory.domain.enums import TaskStatus
 from factory.domain.models import AgentAdapter, FactoryTask
 from factory.domain.ports import RunRepository, TaskRepository
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 from factory.orchestration.tracking import RunTrackingService
 
 
@@ -30,18 +31,26 @@ class ReconciliationService:
         tracking: RunTrackingService,
         adapter: AgentAdapter,
         allows: Callable[[FactoryTask], bool] | None = None,
+        registry: ProjectRegistry | None = None,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
         self._tracking = tracking
         self._adapter = adapter
         self._allows = allows
+        self._registry = registry
 
     def reconcile(self) -> ReconciliationReport:
         repaired = missing = mismatch = 0
         for task in self._tasks.list():
             if self._allows is not None and not self._allows(task):
                 continue
+            if self._registry is not None:
+                try:
+                    self._registry.resolve(task.project_id, task.target_repository)
+                except ProjectRoutingError:
+                    mismatch += 1
+                    continue
             if task.status is TaskStatus.READY:
                 if self._runs.find_active_run(task.task_id) is not None:
                     mismatch += 1
@@ -58,6 +67,12 @@ class ReconciliationService:
                 missing += 1
                 continue
             run = history[-1]
+            if run.project_id != task.project_id or (
+                run.workspace is not None
+                and run.workspace.repository_slug != task.target_repository
+            ):
+                mismatch += 1
+                continue
             if not run.is_terminal:
                 if task.status is not TaskStatus.RUNNING:
                     mismatch += 1

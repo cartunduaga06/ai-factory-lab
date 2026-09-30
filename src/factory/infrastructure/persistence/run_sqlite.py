@@ -73,6 +73,19 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         created_at = encode_datetime(datetime.now(UTC))
         try:
             with self._connect() as conn:
+                owner = conn.execute(
+                    "SELECT project_id, target_repository FROM tasks WHERE task_id = ?",
+                    (run.task_id,),
+                ).fetchone()
+                if (
+                    owner is None
+                    or owner["project_id"] != run.project_id
+                    or (
+                        run.workspace is not None
+                        and owner["target_repository"] != run.workspace.repository_slug
+                    )
+                ):
+                    raise PersistenceError("run project identity mismatch")
                 if run.workspace is not None:
                     self._ensure_workspace(conn, run.workspace)
                     owner = conn.execute(
@@ -84,14 +97,15 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                 conn.execute(
                     f"""
                     INSERT INTO {AGENT_RUNS_TABLE} (
-                        run_id, task_id, adapter, status, workspace_id,
+                        run_id, task_id, project_id, adapter, status, workspace_id,
                         summary, started_at, last_heartbeat, finished_at, gates,
                         validated_revision, context_pack, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
                         run.task_id,
+                        run.project_id,
                         run.adapter.value,
                         run.status.value,
                         run.workspace.workspace_id if run.workspace else None,
@@ -134,14 +148,14 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         with self._connect() as conn:
             existing = conn.execute(
                 f"""
-                SELECT task_id, workspace_id, created_at, context_pack
+                SELECT task_id, project_id, workspace_id, created_at, context_pack
                   FROM {AGENT_RUNS_TABLE} WHERE run_id = ?
                 """,
                 (run.run_id,),
             ).fetchone()
             if existing is None:
                 raise KeyError(run.run_id)
-            if existing["task_id"] != run.task_id:
+            if existing["task_id"] != run.task_id or existing["project_id"] != run.project_id:
                 raise PersistenceError(f"run {run.run_id} belongs to another task")
 
             new_workspace_id = run.workspace.workspace_id if run.workspace is not None else None
@@ -332,6 +346,7 @@ def _row_to_run(row: sqlite3.Row, workspace: Workspace | None) -> AgentRun:
     finished_at = row["finished_at"]
     return AgentRun(
         task_id=row["task_id"],
+        project_id=row["project_id"],
         adapter=AgentKind(row["adapter"]),
         run_id=row["run_id"],
         status=RunStatus(row["status"]),

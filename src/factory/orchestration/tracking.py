@@ -56,6 +56,7 @@ from factory.domain.ports import (
     WorkspaceProvisioner,
     WorkspaceRevisionInspector,
 )
+from factory.domain.projects import ProjectRegistry
 from factory.orchestration.machine import InvalidTransitionError
 from factory.orchestration.transitions import TaskLifecycleService
 
@@ -105,6 +106,7 @@ class RunTrackingService:
         pull_requests: PullRequestRepository | None = None,
         pull_request_sink: PullRequestSink | None = None,
         base_branch: str = "main",
+        registry: ProjectRegistry | None = None,
         operational_acceptance: OperationalAcceptance | None = None,
         heartbeat_interval: float = 180.0,
     ) -> None:
@@ -120,6 +122,7 @@ class RunTrackingService:
         self._pull_requests = pull_requests
         self._pull_request_sink = pull_request_sink
         self._base_branch = base_branch
+        self._registry = registry
         self._operational_acceptance = operational_acceptance
         self._lifecycle = TaskLifecycleService(tasks)
         self._heartbeat_interval = timedelta(seconds=heartbeat_interval)
@@ -248,7 +251,9 @@ class RunTrackingService:
             self._pull_request_sink.find_open_pull_request(
                 Repository(task.target_repository, role=RepositoryRole.TARGET),
                 workspace.branch,
-                self._base_branch,
+                self._registry.resolve(task.project_id, task.target_repository).base_ref
+                if self._registry is not None
+                else self._base_branch,
             )
             is None
         )
@@ -381,9 +386,15 @@ class RunTrackingService:
 
     def _specs_for(self, run: AgentRun) -> tuple[QualityGateSpec, ...]:
         task = self._tasks.get(run.task_id)
+        if self._registry is not None:
+            if task is None or run.project_id != task.project_id:
+                raise ValueError("run project identity mismatch")
+            common = self._registry.resolve(task.project_id, task.target_repository).gates
+        else:
+            common = self._gate_specs
         ref = task.source.external_ref if task is not None and task.source is not None else None
         specific = self._task_gate_specs.get(ref, ()) if ref is not None else ()
-        return (*self._gate_specs, *specific)
+        return (*common, *specific)
 
     def _run_gate(self, spec: QualityGateSpec, workspace: Workspace) -> QualityGate:
         runner = self._gate_runner

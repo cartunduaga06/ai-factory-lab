@@ -104,6 +104,10 @@ class BacklogLinkRepository(ABC):
     def complete(self, item: WorkItem, issue: MaterializedIssue) -> None:
         """Commit the immutable link; refuse a conflicting identity."""
 
+    @abstractmethod
+    def record_rejection(self, item: WorkItem, reason: str) -> None:
+        """Store sanitized evidence of a rejected routing declaration."""
+
 
 class SprintRepository(ABC):
     """Durable authorization and position, with orchestration facts in E1."""

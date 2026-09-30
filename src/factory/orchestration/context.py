@@ -36,7 +36,8 @@ class TaskContextSource:
         )
         content = (
             "You are executing a task dispatched by AI Factory Lab.\n\n"
-            f"Target repository: {task.target_repository}\n"
+            + (f"Project ID: {task.project_id}\n" if task.project_id != "ai-factory-lab" else "")
+            + f"Target repository: {task.target_repository}\n"
             f"Task reference: {task.external_ref or task.task_id}\n"
             f"Task title: {task.title}\n\nTask description:\n{body[:8000]}\n\n" + _BOUNDARIES
         )
@@ -44,6 +45,7 @@ class TaskContextSource:
         identity = json.dumps(
             {
                 "target_repository": task.target_repository,
+                **({"project_id": task.project_id} if task.project_id != "ai-factory-lab" else {}),
                 "source": (
                     [task.source.provider, task.source.repository_slug, task.source.issue_number]
                     if task.source

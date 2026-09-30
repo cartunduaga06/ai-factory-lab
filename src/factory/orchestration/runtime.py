@@ -30,6 +30,7 @@ from factory.domain.ports import (
     WorkspacePublisher,
     WorkspaceRevisionInspector,
 )
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 from factory.orchestration.context import ContextBuildError, ContextPackBuilder
 from factory.orchestration.dispatch import DispatchService
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
@@ -92,9 +93,11 @@ class FactoryRuntime:
         sprint: SprintService | None = None,
         recovery_policy: RecoveryPolicy | None = None,
         context_builder: ContextPackBuilder | None = None,
+        registry: ProjectRegistry | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
+        self._registry = registry
         self._tasks = tasks
         self._runs = runs
         self._adapter = adapter
@@ -127,6 +130,7 @@ class FactoryRuntime:
             pull_requests=pull_requests,
             pull_request_sink=pull_request_sink,
             base_branch=base_branch,
+            registry=registry,
             operational_acceptance=operational_acceptance,
             heartbeat_interval=heartbeat_interval,
         )
@@ -138,9 +142,15 @@ class FactoryRuntime:
             sink=pull_request_sink,
             base_branch=base_branch,
             default_branch=base_branch,
+            registry=registry,
         )
         self._reconciliation = ReconciliationService(
-            tasks, runs, self._tracking, adapter, allows=sprint.allows if sprint else None
+            tasks,
+            runs,
+            self._tracking,
+            adapter,
+            allows=sprint.allows if sprint else None,
+            registry=registry,
         )
         self._pull_requests = pull_requests
         self._pull_request_state = pull_request_state
@@ -186,6 +196,28 @@ class FactoryRuntime:
             return RuntimeResult(
                 None, None, None, None, None, None, None, "NO_ELIGIBLE_TASK", intake
             )
+        if self._registry is not None and task.kind is TaskKind.CODE:
+            try:
+                self._registry.resolve(task.project_id, task.target_repository)
+            except ProjectRoutingError:
+                blocked = (
+                    self._block(task.task_id, "project routing rejected")
+                    if task.status
+                    in {
+                        TaskStatus.READY,
+                        TaskStatus.CLAIMED,
+                        TaskStatus.RUNNING,
+                        TaskStatus.VALIDATING,
+                    }
+                    else task
+                )
+                return self._result(
+                    blocked,
+                    self._latest_run(task.task_id),
+                    None,
+                    "PROJECT_ROUTING_REJECTED",
+                    intake,
+                )
         if task.status in {TaskStatus.DISCOVERED, TaskStatus.READY, TaskStatus.CHANGES_REQUESTED}:
             active = self._runs.find_active_run(task.task_id)
             if active is not None:
@@ -348,6 +380,10 @@ class FactoryRuntime:
             if run is None:
                 return self._result(task, None, None, "RESUMABLE_STATE_MISSING_RUN", intake)
 
+        if run.project_id != task.project_id or (
+            run.workspace is not None and run.workspace.repository_slug != task.target_repository
+        ):
+            return self._result(task, run, None, "PROJECT_ROUTING_REJECTED", intake)
         if run.adapter is not self._adapter.kind:
             return self._result(task, run, None, "ENGINE_MISMATCH", intake)
 
@@ -395,19 +431,28 @@ class FactoryRuntime:
             *self._tasks.list(TaskStatus.VALIDATING),
         ]
         for task in review_tasks:
+            if self._registry is not None:
+                try:
+                    self._registry.resolve(task.project_id, task.target_repository)
+                except ProjectRoutingError:
+                    continue
             if self._sprint is not None and not self._sprint.allows_review(task):
                 continue
             if task.kind is not TaskKind.CODE:
                 continue
             run = self._latest_run(task.task_id)
-            if run is None:
+            if run is None or run.project_id != task.project_id:
                 continue
             pr = self._pull_requests.get_for_run(run.run_id)
             if pr is None and run.workspace is not None:
                 pr = self._pull_requests.find_by_branch(
                     run.workspace.repository_slug, run.workspace.branch
                 )
-            if pr is None or pr.task_id != task.task_id:
+            if (
+                pr is None
+                or pr.task_id != task.task_id
+                or pr.repository_slug != task.target_repository
+            ):
                 continue
             state = self._pull_request_state.state(pr)
             if state is PullRequestState.MERGED:

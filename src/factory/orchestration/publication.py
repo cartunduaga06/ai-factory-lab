@@ -54,6 +54,7 @@ from factory.domain.ports import (
     TaskRepository,
     WorkspacePublisher,
 )
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 from factory.orchestration.machine import InvalidTransitionError
 from factory.orchestration.transitions import TaskLifecycleService
 
@@ -100,6 +101,7 @@ class PublicationService:
         sink: PullRequestSink,
         base_branch: str = "main",
         default_branch: str = "main",
+        registry: ProjectRegistry | None = None,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
@@ -108,6 +110,7 @@ class PublicationService:
         self._sink = sink
         self._base_branch = base_branch
         self._default_branch = default_branch
+        self._registry = registry
         self._lifecycle = TaskLifecycleService(tasks)
 
     def publish(self, task_id: str, run_id: str) -> PublicationResult:
@@ -134,7 +137,7 @@ class PublicationService:
                 found = self._sink.find_open_pull_request(
                     Repository(workspace.repository_slug, role=RepositoryRole.TARGET),
                     workspace.branch,
-                    self._base_branch,
+                    self._base_for(task),
                 )
                 if found is None or found.number != rework.number or found.url != rework.url:
                     raise PullRequestIdentityError(task.task_id, run.run_id)
@@ -209,10 +212,28 @@ class PublicationService:
         workspace = run.workspace
         if workspace is None:
             raise TaskNotPublishableError(task.task_id, run.run_id, "run has no workspace")
-        if workspace.branch in _PROTECTED_BRANCHES or workspace.branch == self._default_branch:
+        try:
+            if (
+                run.project_id != task.project_id
+                or workspace.repository_slug != task.target_repository
+            ):
+                raise ProjectRoutingError("run project identity mismatch")
+            self._base_for(task)
+        except ProjectRoutingError:
+            raise TaskNotPublishableError(
+                task.task_id, run.run_id, "project identity mismatch"
+            ) from None
+        if workspace.branch in _PROTECTED_BRANCHES or workspace.branch == self._base_for(task):
             raise TaskNotPublishableError(
                 task.task_id, run.run_id, "workspace is on a default branch"
             )
+
+    def _base_for(self, task: FactoryTask) -> str:
+        return (
+            self._registry.resolve(task.project_id, task.target_repository).base_ref
+            if self._registry is not None
+            else self._base_branch
+        )
 
     def _is_latest_run(self, run: AgentRun) -> bool:
         """Whether ``run`` is the newest run for its task (durable ordering)."""
@@ -253,7 +274,7 @@ class PublicationService:
             prior.task_id != task.task_id
             or prior.repository_slug != task.target_repository
             or prior.head_branch != workspace.branch
-            or prior.base_branch != self._base_branch
+            or prior.base_branch != self._base_for(task)
             or prior.number is None
             or prior.run_id is None
         ):
@@ -272,7 +293,7 @@ class PublicationService:
         if (
             pull_request.repository_slug != workspace.repository_slug
             or pull_request.head_branch != workspace.branch
-            or pull_request.base_branch != self._base_branch
+            or pull_request.base_branch != self._base_for(task)
             or (pull_request.run_id is not None and pull_request.run_id != run.run_id)
             or (pull_request.task_id is not None and pull_request.task_id != task.task_id)
         ):
@@ -286,17 +307,17 @@ class PublicationService:
         assert workspace is not None  # guarded by _require_publishable
         repository = Repository(slug=workspace.repository_slug, role=RepositoryRole.TARGET)
 
-        found = self._sink.find_open_pull_request(repository, head_branch, self._base_branch)
+        found = self._sink.find_open_pull_request(repository, head_branch, self._base_for(task))
         if found is not None:
             # Defense in depth: the sink contract promises exact identity, but the
             # service must not re-label a recovered PR with the configured base.
             self._require_provider_identity(task, run, found, head_branch)
-            return _with_factory_metadata(found, task, run, self._base_branch)
+            return _with_factory_metadata(found, task, run, self._base_for(task))
 
         requested = PullRequest(
             repository_slug=workspace.repository_slug,
             head_branch=head_branch,
-            base_branch=self._base_branch,
+            base_branch=self._base_for(task),
             title=_bounded_title(task.title),
             body=build_pull_request_body(task, run),
             task_id=task.task_id,
@@ -306,7 +327,7 @@ class PublicationService:
         # The same bar applies to a created PR: a provider response that does not
         # confirm the expected identity must not be persisted or advance the task.
         self._require_provider_identity(task, run, opened, head_branch)
-        return _with_factory_metadata(opened, task, run, self._base_branch)
+        return _with_factory_metadata(opened, task, run, self._base_for(task))
 
     def _require_provider_identity(
         self,
@@ -321,7 +342,7 @@ class PublicationService:
         if (
             pull_request.repository_slug != workspace.repository_slug
             or pull_request.head_branch != head_branch
-            or pull_request.base_branch != self._base_branch
+            or pull_request.base_branch != self._base_for(task)
         ):
             raise PullRequestIdentityError(task.task_id, run.run_id)
 

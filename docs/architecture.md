@@ -1107,3 +1107,26 @@ original base hash, then adds a versioned feedback fragment. Each rework pack
 records the original base hash and derives a new hash for its feedback. A changed
 base fails closed. Operator-authorized timeout recovery for a run created before
 E5 binds a fresh base pack because no historical pack exists for that legacy run.
+# Multi-project routing (E7)
+
+`FACTORY_PROJECTS` is an operator-owned registry of immutable project ids.
+Each profile binds one repository, source checkout, base branch, gate set,
+context profile and human-only deploy policy. A Trello Sprint card declares
+`project_id: <id>` on its own line. The registry resolves that id before E2
+looks up or writes an Issue; a `target_repository:` declaration in card text is
+rejected. Unknown and mismatched declarations leave a sanitized durable row in
+`routing_rejections` and cause no GitHub write. Sprint authorization also records
+such rejections. One registry profile owns each repository.
+
+GitHub intake assigns project identity from the Issue's registered repository,
+not Issue text. Tasks and runs persist `project_id`; backlog links persist it
+and refuse a changed identity. E1 task traces expose the persisted project id.
+Context and worktree creation verify that the approved checkout's HTTPS origin
+matches the profile repository. Validation uses that profile's gates, and
+publication checks task, run and workspace identity before using the profile's
+base branch. The global execution claim remains WIP=1. Existing database rows
+gain the legacy `ai-factory-lab` project id on migration; operators must register
+the historical repository under that id when resuming those rows.
+
+The Dulces pilot requires the real `cartunduaga06/dulces-el-jericoano-web`
+repository and checkout. E7 does not create or simulate them.

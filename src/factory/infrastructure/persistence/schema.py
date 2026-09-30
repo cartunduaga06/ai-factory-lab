@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -73,11 +73,51 @@ CREATE TABLE IF NOT EXISTS {BACKLOG_LINKS_TABLE} (
     provider TEXT NOT NULL,
     external_id TEXT NOT NULL,
     repository_slug TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'ai-factory-lab',
     state TEXT NOT NULL CHECK (state IN ('RESERVED', 'POSTING', 'MATERIALIZED')),
     issue_number INTEGER,
     issue_url TEXT,
     PRIMARY KEY (provider, external_id),
     UNIQUE (repository_slug, issue_number)
+);
+"""
+
+CREATE_BACKLOG_TASK_PROJECT_GUARD = f"""
+CREATE TRIGGER IF NOT EXISTS backlog_task_project_guard
+BEFORE INSERT ON {TASKS_TABLE}
+WHEN NEW.source_provider = 'github' AND EXISTS (
+    SELECT 1 FROM {BACKLOG_LINKS_TABLE} link
+    WHERE link.state = 'MATERIALIZED'
+      AND link.project_id != 'ai-factory-lab'
+      AND link.repository_slug = NEW.source_repository
+      AND link.issue_number = NEW.source_issue_number
+      AND (link.project_id != NEW.project_id OR link.repository_slug != NEW.target_repository)
+)
+BEGIN SELECT RAISE(ABORT, 'backlog project identity mismatch'); END;
+"""
+
+CREATE_TASK_PROJECT_IMMUTABLE = f"""
+CREATE TRIGGER IF NOT EXISTS task_project_immutable
+BEFORE UPDATE ON {TASKS_TABLE}
+WHEN OLD.project_id != NEW.project_id OR OLD.target_repository != NEW.target_repository
+BEGIN SELECT RAISE(ABORT, 'task project identity is immutable'); END;
+"""
+
+CREATE_LINK_PROJECT_IMMUTABLE = f"""
+CREATE TRIGGER IF NOT EXISTS backlog_link_project_immutable
+BEFORE UPDATE ON {BACKLOG_LINKS_TABLE}
+WHEN OLD.project_id != NEW.project_id OR OLD.repository_slug != NEW.repository_slug
+BEGIN SELECT RAISE(ABORT, 'backlog project identity is immutable'); END;
+"""
+
+CREATE_ROUTING_REJECTIONS = """
+CREATE TABLE IF NOT EXISTS routing_rejections (
+    provider TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    rejected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (provider, external_id, project_id, reason)
 );
 """
 
@@ -226,6 +266,7 @@ CREATE TABLE IF NOT EXISTS {TASKS_TABLE} (
     title                TEXT NOT NULL,
     body                 TEXT NOT NULL DEFAULT '',
     target_repository    TEXT NOT NULL,
+    project_id           TEXT NOT NULL DEFAULT 'ai-factory-lab',
     source_provider      TEXT,
     source_repository    TEXT,
     source_issue_number  INTEGER,
@@ -290,6 +331,7 @@ CREATE_AGENT_RUNS = f"""
 CREATE TABLE IF NOT EXISTS {AGENT_RUNS_TABLE} (
     run_id        TEXT PRIMARY KEY,
     task_id       TEXT NOT NULL,
+    project_id    TEXT NOT NULL DEFAULT 'ai-factory-lab',
     adapter       TEXT NOT NULL,
     status        TEXT NOT NULL,
     workspace_id  TEXT,
@@ -419,6 +461,9 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN blocked_reason TEXT;",
     f"ALTER TABLE {WORKSPACES_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
+    f"ALTER TABLE {TASKS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
+    f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
+    f"ALTER TABLE {BACKLOG_LINKS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
 )
 
 #: Statements applied, in order, by :func:`initialize_schema`.
@@ -428,6 +473,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_ACTIVE_SPRINT_INDEX,
     CREATE_SPRINT_IMMUTABLE_TRIGGER,
     CREATE_BACKLOG_LINKS,
+    CREATE_TASK_PROJECT_IMMUTABLE,
+    CREATE_LINK_PROJECT_IMMUTABLE,
+    CREATE_BACKLOG_TASK_PROJECT_GUARD,
+    CREATE_ROUTING_REJECTIONS,
     CREATE_AUDIT_EVENTS,
     CREATE_TRANSITIONS,
     CREATE_STATUS_EVENTS,

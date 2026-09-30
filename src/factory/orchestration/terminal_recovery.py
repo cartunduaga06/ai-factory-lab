@@ -21,6 +21,7 @@ from factory.domain.ports import (
     RunRepository,
     WorkspaceProvisioner,
 )
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 from factory.orchestration.recovery import RecoveryPolicy
 from factory.orchestration.sprint import SprintService
 
@@ -53,6 +54,7 @@ class TerminalRecoveryService:
         source_is_eligible: Callable[[FactoryTask], bool],
         sprint: SprintService | None = None,
         policy: RecoveryPolicy | None = None,
+        registry: ProjectRegistry | None = None,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
@@ -64,6 +66,7 @@ class TerminalRecoveryService:
         self._eligible = source_is_eligible
         self._sprint = sprint
         self._policy = policy or RecoveryPolicy()
+        self._registry = registry
 
     def authorize(
         self, task_id: str, expected_run_id: str, *, acknowledge_timeout: bool
@@ -74,6 +77,14 @@ class TerminalRecoveryService:
         task = self._tasks.get(task_id)
         if task is None:
             raise KeyError(task_id)
+        try:
+            base = (
+                self._registry.resolve(task.project_id, task.target_repository).base_ref
+                if self._registry is not None
+                else self._base
+            )
+        except ProjectRoutingError:
+            raise TerminalRecoveryRefused("project identity mismatch") from None
         if task.status is not TaskStatus.FAILED or task.kind is not TaskKind.CODE:
             raise TerminalRecoveryRefused("task must be terminal FAILED CODE")
         history = self._runs.list_runs(task_id)
@@ -88,6 +99,7 @@ class TerminalRecoveryService:
         workspace = last.workspace
         if (
             last.status is not RunStatus.FAILED
+            or last.project_id != task.project_id
             or last.adapter is not AgentKind.CODEX
             or workspace is None
             or workspace.kind is not TaskKind.CODE
@@ -101,7 +113,7 @@ class TerminalRecoveryService:
             or not path.is_dir()
             or path.resolve(strict=True).parent != root
             or workspace.branch != f"factory/{task.task_id}/{workspace.workspace_id}"
-            or workspace.branch == self._base
+            or workspace.branch == base
         ):
             raise TerminalRecoveryRefused("factory workspace identity is not valid")
         evidence = root / ".factory-codex-runs" / (expected_run_id + ".result")
@@ -132,7 +144,7 @@ class TerminalRecoveryService:
         remote = self._sink.find_open_pull_request(
             Repository(task.target_repository, role=RepositoryRole.TARGET),
             workspace.branch,
-            self._base,
+            base,
         )
         if remote is not None:
             raise TerminalRecoveryRefused("existing provider PR requires human review")

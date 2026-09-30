@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from factory.domain.backlog import MaterializedIssue, WorkItem
 from factory.domain.ports import BacklogLinkRepository, BacklogSink, BacklogSource
+from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,11 +22,16 @@ class BacklogMaterializationService:
     """Reconcile backlog items into Issues without dispatching or importing providers."""
 
     def __init__(
-        self, source: BacklogSource, sink: BacklogSink, links: BacklogLinkRepository
+        self,
+        source: BacklogSource,
+        sink: BacklogSink,
+        links: BacklogLinkRepository,
+        registry: ProjectRegistry | None = None,
     ) -> None:
         self._source = source
         self._sink = sink
         self._links = links
+        self._registry = registry
 
     def reconcile(self, external_id: str | None = None) -> BacklogSummary:
         """Process one event-selected item or a full periodic backlog snapshot.
@@ -40,6 +46,13 @@ class BacklogMaterializationService:
         )
         created = existing = ineligible = uncertain = 0
         for candidate in items:
+            if self._registry is not None:
+                try:
+                    self._registry.resolve(candidate.project_id, candidate.target_repository)
+                except ProjectRoutingError:
+                    self._links.record_rejection(candidate, "PROJECT_ROUTING_REJECTED")
+                    ineligible += 1
+                    continue
             if not candidate.eligible or not candidate.dependencies_satisfied:
                 ineligible += 1
                 continue
@@ -56,6 +69,13 @@ class BacklogMaterializationService:
                 existing += 1
                 continue
             current = self._source.get_item(candidate.external_id)
+            if self._registry is not None:
+                try:
+                    self._registry.resolve(current.project_id, current.target_repository)
+                except ProjectRoutingError:
+                    self._links.record_rejection(current, "PROJECT_ROUTING_REJECTED")
+                    ineligible += 1
+                    continue
             if not _still_eligible(candidate, current):
                 ineligible += 1
                 continue
@@ -75,6 +95,7 @@ def _still_eligible(candidate: WorkItem, current: WorkItem) -> bool:
         current.provider == candidate.provider
         and current.external_id == candidate.external_id
         and current.target_repository == candidate.target_repository
+        and current.project_id == candidate.project_id
         and current.eligible
         and current.dependencies_satisfied
     )
