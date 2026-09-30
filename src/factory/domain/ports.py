@@ -30,6 +30,7 @@ from factory.domain.models import (
     TaskTransition,
     Workspace,
 )
+from factory.domain.security import SecurityReview
 from factory.domain.sprint import SprintManifest, SprintState
 
 
@@ -429,6 +430,26 @@ class WorkspaceRevisionInspector(ABC):
         """
 
 
+class SecurityInspector(ABC):
+    """Read the publishable workspace and return safe, bound review facts."""
+
+    @abstractmethod
+    def inspect(self, task: FactoryTask, run: AgentRun) -> SecurityReview:
+        """Fail closed when the exact workspace or project cannot be inspected."""
+
+
+class SecurityReviewGate(ABC):
+    """Inspect a validated code revision and append safe facts to the E1 trace."""
+
+    @abstractmethod
+    def review(self, task: FactoryTask, run: AgentRun) -> SecurityReview:
+        """Return a bound review; raise on unreadable or untrusted evidence."""
+
+    @abstractmethod
+    def is_overridden(self, task: FactoryTask, run: AgentRun, review: SecurityReview) -> bool:
+        """Require a durable, explicit human decision for this exact review."""
+
+
 class WorkspacePublisher(ABC):
     """Publishes a validated run's workspace revision to an isolated branch.
 
@@ -556,6 +577,8 @@ __all__ = [
     "PullRequestSink",
     "QualityGateRunner",
     "RunRepository",
+    "SecurityReviewGate",
+    "SecurityInspector",
     "TaskRepository",
     "WorkspaceProvisioner",
     "WorkspacePublisher",

@@ -33,6 +33,7 @@ from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
 from tests.fake_workspace import (
     FakeQualityGateRunner,
     FakeRevisionInspector,
+    FakeSecurityReviewGate,
     FakeWorkspaceProvisioner,
     specs,
 )
@@ -79,6 +80,7 @@ def test_second_review_cycle_reuses_branch_and_pr(tmp_path: Path) -> None:
     publisher = FakeWorkspacePublisher()
     state = OpenState()
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(FakeIssueSource(task), tasks),
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=tasks,
@@ -212,6 +214,7 @@ def test_rework_validating_reconciles_provider_closed_pr(
     publisher = FakeWorkspacePublisher()
     state = OpenState()
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(FakeIssueSource(task), tasks),
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=tasks,

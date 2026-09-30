@@ -28,6 +28,7 @@ from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
 from tests.fake_workspace import (
     FakeQualityGateRunner,
     FakeRevisionInspector,
+    FakeSecurityReviewGate,
     FakeWorkspaceProvisioner,
     specs,
 )
@@ -196,6 +197,7 @@ def _runtime_with(
     adapter = FakeAgentAdapter(kind=AgentKind.OTHER, status=RunStatus.SUCCEEDED)
     sink = FakePullRequestSink()
     runtime = FactoryRuntime(
+        security_review=FakeSecurityReviewGate(),
         intake=IssueIntakeService(StaticSource(), tasks),
         intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
         tasks=tasks,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 
 from factory.infrastructure.persistence.schema import (
@@ -32,6 +33,7 @@ class AuditEvent:
     source_provider: str | None
     source_issue_number: int | None
     project_id: str | None = None
+    evidence: dict[str, object] | None = None
 
 
 def _safe_id(value: str | None) -> str | None:
@@ -102,6 +104,7 @@ class SqliteAuditEventStore(SqliteRepository):
             source_provider=row["source_provider"],
             source_issue_number=row["source_issue_number"],
             project_id=row["routing_project_id"],
+            evidence=json.loads(str(row["evidence"])),
         )
 
 

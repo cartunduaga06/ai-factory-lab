@@ -33,6 +33,7 @@ from factory.infrastructure.persistence import (
 )
 from factory.orchestration import PublicationService
 from tests.fake_publish import FakePullRequestSink, FakeWorkspacePublisher
+from tests.fake_workspace import FakeSecurityReviewGate
 
 
 @pytest.fixture
@@ -118,6 +119,7 @@ def _service(
         _prs(db_path),
         publisher=publisher or FakeWorkspacePublisher(),
         sink=sink or FakePullRequestSink(),
+        security_review=FakeSecurityReviewGate(),
         base_branch="main",
         default_branch="main",
     )

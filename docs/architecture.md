@@ -277,10 +277,10 @@ Transition table (authoritative: `factory/orchestration/lifecycle.py`):
 | `CLAIMED` | `RUNNING`, `BLOCKED`, `CANCELLED` |
 | `RUNNING` | `VALIDATING`, `BLOCKED`, `FAILED`, `CANCELLED` |
 | `VALIDATING` | `PR_OPEN`, `READY`, `BLOCKED`, `DONE`, `FAILED`, `CANCELLED` |
-| `PR_OPEN` | `WAITING_HUMAN`, `FAILED`, `CANCELLED` |
+| `PR_OPEN` | `WAITING_HUMAN`, `BLOCKED`, `FAILED`, `CANCELLED` |
 | `WAITING_HUMAN` | `CHANGES_REQUESTED`, `DONE`, `FAILED`, `CANCELLED` |
 | `CHANGES_REQUESTED` | `READY`, `CANCELLED` |
-| `BLOCKED` | `READY`, `CANCELLED` |
+| `BLOCKED` | `READY`, `VALIDATING` (security override path), `CANCELLED` |
 | `DONE` / `FAILED` / `CANCELLED` | — (terminal) |
 
 The Control Tower presents `STALLED` when a non-terminal run in `RUNNING` has

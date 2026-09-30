@@ -41,7 +41,7 @@ TRANSITIONS: MappingProxyType[TaskStatus, frozenset[TaskStatus]] = MappingProxyT
             }
         ),
         TaskStatus.PR_OPEN: frozenset(
-            {TaskStatus.WAITING_HUMAN, TaskStatus.FAILED, TaskStatus.CANCELLED}
+            {TaskStatus.WAITING_HUMAN, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED}
         ),
         TaskStatus.WAITING_HUMAN: frozenset(
             {TaskStatus.CHANGES_REQUESTED, TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}
@@ -49,7 +49,9 @@ TRANSITIONS: MappingProxyType[TaskStatus, frozenset[TaskStatus]] = MappingProxyT
         TaskStatus.CHANGES_REQUESTED: frozenset({TaskStatus.READY, TaskStatus.CANCELLED}),
         # BLOCKED is the only non-terminal recovery state: it must be able to
         # re-enter the pipeline once the blocker is removed.
-        TaskStatus.BLOCKED: frozenset({TaskStatus.READY, TaskStatus.CANCELLED}),
+        TaskStatus.BLOCKED: frozenset(
+            {TaskStatus.READY, TaskStatus.VALIDATING, TaskStatus.CANCELLED}
+        ),
         TaskStatus.DONE: frozenset(),
         TaskStatus.FAILED: frozenset(),
         TaskStatus.CANCELLED: frozenset(),

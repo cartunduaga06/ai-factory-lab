@@ -34,7 +34,7 @@ from factory.integrations.workspace.revision import GitWorkspaceRevisionInspecto
 from factory.orchestration import PublicationService, RunTrackingService
 from tests.fake_adapter import FakeAgentAdapter
 from tests.fake_publish import FakePullRequestSink
-from tests.fake_workspace import FakeQualityGateRunner, specs
+from tests.fake_workspace import FakeQualityGateRunner, FakeSecurityReviewGate, specs
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "Test",
@@ -153,6 +153,7 @@ def _publish(
         SqlitePullRequestRepository(db_path),
         publisher=GitWorkspacePublisher(),
         sink=sink,
+        security_review=FakeSecurityReviewGate(),
         base_branch="main",
         default_branch="main",
     )
@@ -214,6 +215,7 @@ def test_post_validation_mutation_blocks_publication(tmp_path: Path) -> None:
         SqlitePullRequestRepository(db_path),
         publisher=GitWorkspacePublisher(),
         sink=sink,
+        security_review=FakeSecurityReviewGate(),
         base_branch="main",
         default_branch="main",
     )
@@ -270,6 +272,7 @@ def test_publishable_requires_a_bound_revision(tmp_path: Path) -> None:
         SqlitePullRequestRepository(db_path),
         publisher=GitWorkspacePublisher(),
         sink=sink,
+        security_review=FakeSecurityReviewGate(),
         base_branch="main",
         default_branch="main",
     )

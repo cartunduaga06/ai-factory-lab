@@ -51,6 +51,7 @@ from factory.domain.ports import (
     PullRequestRepository,
     PullRequestSink,
     RunRepository,
+    SecurityReviewGate,
     TaskRepository,
     WorkspacePublisher,
 )
@@ -80,6 +81,10 @@ class PublicationResult:
     opened_now: bool
 
 
+class SecurityReviewBlocked(Exception):
+    """A critical or incomplete security review stopped publication."""
+
+
 class PublicationService:
     """Publishes a validated run and stops at ``WAITING_HUMAN``.
 
@@ -99,6 +104,7 @@ class PublicationService:
         *,
         publisher: WorkspacePublisher,
         sink: PullRequestSink,
+        security_review: SecurityReviewGate,
         base_branch: str = "main",
         default_branch: str = "main",
         registry: ProjectRegistry | None = None,
@@ -111,6 +117,7 @@ class PublicationService:
         self._base_branch = base_branch
         self._default_branch = default_branch
         self._registry = registry
+        self._security_review = security_review
         self._lifecycle = TaskLifecycleService(tasks)
 
     def publish(self, task_id: str, run_id: str) -> PublicationResult:
@@ -126,6 +133,15 @@ class PublicationService:
         task = self._require(task_id)
         run = self._require_run(run_id, task_id)
         self._require_publishable(task, run)
+        if task.status is not TaskStatus.WAITING_HUMAN:
+            try:
+                review = self._security_review.review(task, run)
+                if review.critical and not self._security_review.is_overridden(task, run, review):
+                    raise SecurityReviewBlocked("critical security review finding")
+            except SecurityReviewBlocked:
+                raise
+            except Exception:
+                raise SecurityReviewBlocked("security review unavailable") from None
 
         rework = self._rework_pull_request(task, run)
         if rework is not None:
