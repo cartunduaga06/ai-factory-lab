@@ -31,6 +31,12 @@ result moves the task to `BLOCKED`. The review is bound to the validated
 revision and base commit, and the publisher independently verifies the
 validated revision before push.
 
+### Production verification
+
+The post-deploy safe-change pilot verifies that the production pipeline records
+`SecurityReviewPassed` in E1 before `HumanApprovalRequired`, then opens a
+same-repository PR and stops at `WAITING_HUMAN`.
+
 An operator may explicitly accept a critical finding for the exact blocked run:
 
 ```bash
