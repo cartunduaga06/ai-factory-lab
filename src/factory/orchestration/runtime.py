@@ -82,6 +82,7 @@ class FactoryRuntime:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         status_pulse: Callable[[], None] | None = None,
+        backlog_reconcile: Callable[[], object] | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
@@ -136,6 +137,7 @@ class FactoryRuntime:
         self._sleep = sleep
         self._monotonic = monotonic
         self._status_pulse = status_pulse
+        self._backlog_reconcile = backlog_reconcile
 
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
@@ -146,6 +148,8 @@ class FactoryRuntime:
 
     def _run_once(self) -> RuntimeResult:
         """Drive the existing one-shot lifecycle."""
+        if self._backlog_reconcile is not None:
+            self._backlog_reconcile()
         intake = self._intake.intake(self._intake_repository)
         self._reconcile_human_reviews()
         task = self._select_task()
