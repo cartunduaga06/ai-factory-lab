@@ -1014,6 +1014,23 @@ by source issue reference. The example profile configures pytest, Ruff check,
 Ruff format check and mypy as required checks. Gate statuses and allowlisted
 execution details are persisted on each run and shown in Control Tower.
 
+## Execution trace
+
+`audit_events` is an append-only projection of committed task, transition, run,
+and pull-request rows. SQLite triggers insert it in the same transaction as each
+fact. The task id is the stable `correlation_id`; `event_seq` orders facts for a
+task, while `aggregate_version` orders facts for an individual task, run, or PR.
+`causation_id` refers to the persisted transition, run, or PR involved. A unique
+`event_key` and existing lifecycle compare-and-swap prevent duplicate semantic
+events on watcher retries. The state machine and `transitions` remain the source
+of truth; `status_events` remains the delivery outbox for status consumers.
+
+`GET /factory/trace?task_id=<id>` serves a read-only JSON trace on the loopback
+Control Tower server. Provider run identifiers are hashed in this projection.
+No task body, run summary, gate detail, PR title/body, workspace path, or provider
+payload is stored as audit evidence. Initialization adds the table and triggers
+to existing databases and projects their saved task transition history once.
+
 ## Planned evolution
 
 | Phase | Addition |

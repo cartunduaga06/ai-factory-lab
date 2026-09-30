@@ -37,6 +37,7 @@ from factory.infrastructure.persistence import (
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
 from factory.integrations.gates import LocalQualityGateRunner
@@ -230,7 +231,13 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
         )
         if serve:
             publisher = _status_publisher(config)
-            serve_status(service, host, port, publisher.flush if publisher else None)
+            serve_status(
+                service,
+                host,
+                port,
+                publisher.flush if publisher else None,
+                SqliteAuditEventStore(path),
+            )
         else:
             from dataclasses import asdict
 

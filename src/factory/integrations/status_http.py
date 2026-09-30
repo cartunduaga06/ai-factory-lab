@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from factory.domain.models import StatusSnapshot
+from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 from factory.orchestration.status import StatusService
 
 
@@ -20,16 +21,34 @@ def serve_status(
     host: str = "127.0.0.1",
     port: int = 8765,
     pulse: Callable[[], None] | None = None,
+    audit: SqliteAuditEventStore | None = None,
 ) -> None:
-    """Serve GET /factory/status; the server offers no write method."""
+    """Serve read-only status and trace views on the trusted operator endpoint."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
             parsed = urlsplit(self.path)
-            if parsed.path != "/factory/status":
+            if parsed.path not in {"/factory/status", "/factory/trace"}:
                 self.send_error(404)
                 return
             task_id = parse_qs(parsed.query).get("task_id", [None])[0]
+            if parsed.path == "/factory/trace":
+                if audit is None or not task_id:
+                    self.send_error(404)
+                    return
+                events = audit.for_task(task_id)
+                if not events:
+                    self.send_error(404)
+                    return
+                body = json.dumps([asdict(event) for event in events]).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             try:
                 snapshot = service.for_task(task_id) if task_id else service.current()
             except KeyError:
