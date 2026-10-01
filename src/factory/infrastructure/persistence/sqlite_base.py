@@ -65,6 +65,22 @@ class SqliteRepository:
                     # The column already exists (a fresh database, or a repeat
                     # initialization). Nothing to migrate; leave the data alone.
                     continue
+            # Capture existing backlog provenance once. Later link damage must
+            # never turn a Trello task into a GitHub-direct delivery.
+            conn.execute(
+                "UPDATE tasks SET reconciliation_origin = CASE WHEN EXISTS ("
+                "SELECT 1 FROM backlog_links b WHERE b.repository_slug = tasks.source_repository "
+                "AND b.issue_number = tasks.source_issue_number "
+                "AND b.project_id = tasks.project_id "
+                "AND b.provider = 'trello' AND b.state = 'MATERIALIZED') "
+                "THEN 'trello' ELSE 'github-direct' END, "
+                "expected_work_item_id = (SELECT b.external_id FROM backlog_links b "
+                "WHERE b.repository_slug = tasks.source_repository "
+                "AND b.issue_number = tasks.source_issue_number "
+                "AND b.project_id = tasks.project_id "
+                "AND b.provider = 'trello' AND b.state = 'MATERIALIZED') "
+                "WHERE reconciliation_origin IS NULL"
+            )
             self._backfill_audit(conn)
 
     @staticmethod

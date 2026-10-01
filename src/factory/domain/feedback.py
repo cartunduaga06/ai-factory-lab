@@ -15,6 +15,7 @@ class FeedbackIdentity:
     workspace_id: str
     commit_sha: str
     pull_request_number: int
+    branch: str
     sprint_id: str | None = None
     work_item_provider: str | None = None
     work_item_id: str | None = None

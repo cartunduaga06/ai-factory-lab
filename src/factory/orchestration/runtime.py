@@ -529,6 +529,7 @@ class FactoryRuntime:
                 self._sprint is not None
                 and task.status is not TaskStatus.DONE
                 and not self._sprint.allows_review(task)
+                and (self._feedback is None or not self._feedback.is_github_direct(task))
             ):
                 continue
             if task.kind is not TaskKind.CODE:

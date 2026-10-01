@@ -11,6 +11,7 @@ from factory.domain.ports import (
     FeedbackEventRepository,
     IssueCompletionSink,
     PullRequestRepository,
+    RunRepository,
     SprintRepository,
     TaskRepository,
     WorkItemFeedbackSink,
@@ -25,16 +26,18 @@ class FeedbackReconciliationService:
     def __init__(
         self,
         tasks: TaskRepository,
+        runs: RunRepository,
         pull_requests: PullRequestRepository,
         evidence: DeliveryEvidenceSource,
         issues: IssueCompletionSink,
-        cards: WorkItemFeedbackSink,
+        cards: WorkItemFeedbackSink | None,
         events: FeedbackEventRepository,
         links: BacklogLinkRepository,
         registry: ProjectRegistry,
         sprints: SprintRepository | None = None,
     ) -> None:
         self._tasks = tasks
+        self._runs = runs
         self._prs = pull_requests
         self._evidence = evidence
         self._issues = issues
@@ -61,24 +64,35 @@ class FeedbackReconciliationService:
             if task.status is not TaskStatus.DONE:
                 return False
             self._issues.complete(identity)
-            self._cards.sync(identity, "DONE")
+            if identity.work_item_provider == "trello" and self._cards is not None:
+                self._cards.sync(identity, "DONE")
             self._events.record_completed(identity)
             return True
         if task.status is TaskStatus.DONE:
             return False
-        self._cards.sync(identity, "MERGED" if facts.merged else task.status.value)
+        if identity.work_item_provider == "trello" and self._cards is not None:
+            self._cards.sync(identity, "MERGED" if facts.merged else task.status.value)
         return False
 
     def sync(self, task: FactoryTask, run: AgentRun, phase: str) -> None:
         matched = self._identity(task, run)
-        if matched is not None:
+        if (
+            matched is not None
+            and matched[0].work_item_provider == "trello"
+            and self._cards is not None
+        ):
             self._cards.sync(matched[0], phase)
+
+    def is_github_direct(self, task: FactoryTask) -> bool:
+        """Allow a persisted direct task to bypass only Sprint review routing."""
+        return self._links.reconciliation_origin(task.task_id) == ("github-direct", None)
 
     def _identity(
         self, task: FactoryTask, run: AgentRun
     ) -> tuple[FeedbackIdentity, PullRequest] | None:
         source = task.source
         workspace = run.workspace
+        stored_run = self._runs.get_run(run.run_id)
         if (
             task.kind is not TaskKind.CODE
             or source is None
@@ -88,6 +102,11 @@ class FeedbackReconciliationService:
             or run.project_id != task.project_id
             or workspace is None
             or workspace.repository_slug != task.target_repository
+            or stored_run is None
+            or stored_run.task_id != task.task_id
+            or stored_run.project_id != task.project_id
+            or stored_run.workspace != workspace
+            or stored_run.status is not RunStatus.SUCCEEDED
         ):
             return None
         try:
@@ -98,14 +117,21 @@ class FeedbackReconciliationService:
         if not self._matches_pr(task, run, workspace.branch, pr, profile.base_ref):
             return None
         assert pr is not None and pr.number is not None and pr.commit_sha is not None
+        origin = self._links.reconciliation_origin(task.task_id)
+        if origin is None:
+            return None
+        if origin[0] == "trello" and self._cards is None:
+            return None
         link = self._links.find_work_item(
             task.project_id, source.repository_slug, source.issue_number
         )
-        if link is None or link[0] != "trello":
+        if origin[0] == "trello" and link != origin:
+            return None
+        if origin[0] == "github-direct" and link is not None:
             return None
         sprint_id = (
             self._sprints.find_for_work_item(task.project_id, link[0], link[1])
-            if self._sprints is not None
+            if self._sprints is not None and link is not None
             else None
         )
         identity = FeedbackIdentity(
@@ -117,9 +143,10 @@ class FeedbackReconciliationService:
             workspace_id=workspace.workspace_id,
             commit_sha=pr.commit_sha,
             pull_request_number=pr.number,
+            branch=workspace.branch,
             sprint_id=sprint_id,
-            work_item_provider=link[0],
-            work_item_id=link[1],
+            work_item_provider=link[0] if link is not None else None,
+            work_item_id=link[1] if link is not None else None,
         )
         return identity, pr
 
