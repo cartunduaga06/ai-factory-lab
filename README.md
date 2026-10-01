@@ -221,7 +221,8 @@ python -m factory watch
   restart re-observes the same task/run/branch/PR rather
   than creating a duplicate.
 * **No auto-merge, no deploy.** The worker stops at `WAITING_HUMAN` exactly as
-  `factory run` does.
+  `factory run` does. Even when multiple code workers run concurrently, each
+  stops at `WAITING_HUMAN` and never merges or deploys autonomously.
 
 `factory run` is unchanged: it remains a single bounded pass an operator or a
 health check can invoke. There is still no scheduler; `watch` is a foreground
