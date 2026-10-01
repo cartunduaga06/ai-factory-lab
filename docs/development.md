@@ -173,6 +173,20 @@ gh pr create --fill
 Then stop. A human reviews and merges. The agent that opened a PR never merges
 it.
 
+### Inspecting a change before review
+
+Before requesting review, inspect the local change with:
+
+```bash
+git status --short
+git diff --stat
+git diff --check
+```
+
+`git status --short` lists pending files, `git diff --stat` summarizes the
+change's scope, and `git diff --check` detects whitespace errors. Confirm that
+the diff matches the scope of the Issue.
+
 ## Definition of done
 
 - All four checks pass.
