@@ -6,6 +6,7 @@ Each test uses a temporary SQLite file and real repositories. No mocks.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from factory.infrastructure.persistence import (
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 
 
 @pytest.fixture
@@ -238,3 +240,42 @@ def test_task_status_is_not_mutated_by_pr_persistence(db_path: str) -> None:
     repo.initialize()
     repo.save(_pr(run_id, task_id))
     assert tasks.get(task_id).status is TaskStatus.DISCOVERED
+
+
+def test_record_merged_is_exact_durable_and_idempotent(db_path: str) -> None:
+    _, _, task_id, run_id = _seed(db_path)
+    repo = SqlitePullRequestRepository(db_path)
+    repo.initialize()
+    pr = replace(_pr(run_id, task_id), commit_sha="a" * 40)
+    repo.save(pr)
+
+    assert repo.record_merged(pr).merged
+    reopened = SqlitePullRequestRepository(db_path)
+    assert reopened.record_merged(pr).merged
+    assert reopened.get_for_run(run_id).merged  # type: ignore[union-attr]
+    names = [event.name for event in SqliteAuditEventStore(db_path).for_task(task_id)]
+    assert names.count("PRUpdated") == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("task_id", "other-task"),
+        ("run_id", "other-run"),
+        ("repository_slug", "example/other"),
+        ("head_branch", "factory/other"),
+        ("base_branch", "other"),
+        ("number", 99),
+        ("commit_sha", "b" * 40),
+    ],
+)
+def test_record_merged_refuses_identity_mismatch(db_path: str, field: str, value: object) -> None:
+    _, _, task_id, run_id = _seed(db_path)
+    repo = SqlitePullRequestRepository(db_path)
+    repo.initialize()
+    pr = replace(_pr(run_id, task_id), commit_sha="a" * 40)
+    repo.save(pr)
+
+    with pytest.raises(ValueError, match="identity mismatch"):
+        repo.record_merged(replace(pr, **{field: value}))
+    assert not repo.get_for_run(run_id).merged  # type: ignore[union-attr]

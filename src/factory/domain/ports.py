@@ -578,6 +578,10 @@ class PullRequestRepository(ABC):
     def record_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
         """Bind a reviewed PR to a new validated rework commit on its same branch."""
 
+    @abstractmethod
+    def record_merged(self, pull_request: PullRequest) -> PullRequest:
+        """Record a provider-verified merge for this exact persisted PR, idempotently."""
+
 
 __all__ = [
     "BacklogLinkRepository",

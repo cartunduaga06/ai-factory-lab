@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from factory.domain.backlog import MaterializedIssue, WorkItem
@@ -30,11 +31,12 @@ from factory.orchestration.feedback import FeedbackReconciliationService
 
 
 class Evidence(DeliveryEvidenceSource):
-    def __init__(self, complete: bool) -> None:
+    def __init__(self, complete: bool, merged: bool = True) -> None:
         self.complete = complete
+        self.merged = merged
 
     def evidence(self, identity: FeedbackIdentity) -> DeliveryEvidence:
-        return DeliveryEvidence(True, True, self.complete, True)
+        return DeliveryEvidence(self.merged, True, self.complete, True)
 
 
 class Issues(IssueCompletionSink):
@@ -159,6 +161,7 @@ def test_completion_repairs_done_issue_and_is_idempotent_across_restart(tmp_path
         )
     )
     issues, cards = Issues(), Cards()
+    assert not SqlitePullRequestRepository(str(path)).get_for_run(first_run.run_id).merged  # type: ignore[union-attr]
 
     def service(complete: bool) -> FeedbackReconciliationService:
         database = str(path)
@@ -177,6 +180,7 @@ def test_completion_repairs_done_issue_and_is_idempotent_across_restart(tmp_path
     assert not service(False).reconcile(first, first_run)
     assert SqliteTaskRepository(str(path)).get(first.task_id).status is TaskStatus.WAITING_HUMAN  # type: ignore[union-attr]
     assert cards.phases == {"carda": "MERGED"}
+    assert SqlitePullRequestRepository(str(path)).get_for_run(first_run.run_id).merged  # type: ignore[union-attr]
     assert service(True).reconcile(first, first_run)
     assert issues.closed == {("example/project-a", 5)}
     assert cards.phases["carda"] == "DONE"
@@ -185,6 +189,8 @@ def test_completion_repairs_done_issue_and_is_idempotent_across_restart(tmp_path
     assert service(True).reconcile(first, first_run)
     names = [event.name for event in SqliteAuditEventStore(str(path)).for_task(first.task_id)]
     assert names.count("DeliveryReconciled") == 1
+    assert names.count("PRUpdated") == 1
+    assert SqlitePullRequestRepository(str(path)).get_for_run(first_run.run_id).merged  # type: ignore[union-attr]
     report = SqliteSprintMetrics(str(path)).report()
     assert report[0].throughput == 2
     assert {row.project_id: row.throughput for row in report[1:]} == {
@@ -210,3 +216,40 @@ def test_project_identity_cannot_reconcile_another_project_card(tmp_path: Path) 
     assert not wrong.reconcile(task, run)
     assert issues.closed == set()
     assert cards.phases == {}
+
+
+def test_unverified_merge_does_not_change_local_pr(tmp_path: Path) -> None:
+    path = tmp_path / "factory.db"
+    task, run = _records(path, "project-a", 7, "carda")
+    service = FeedbackReconciliationService(
+        SqliteTaskRepository(str(path)),
+        SqlitePullRequestRepository(str(path)),
+        Evidence(True, merged=False),
+        Issues(),
+        Cards(),
+        SqliteFeedbackEventRepository(str(path)),
+        SqliteBacklogLinkRepository(str(path)),
+        _registry(),
+    )
+    assert not service.reconcile(task, run)
+    assert not SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]
+    assert "PRUpdated" not in [
+        event.name for event in SqliteAuditEventStore(str(path)).for_task(task.task_id)
+    ]
+
+
+def test_mismatched_run_cannot_record_merge(tmp_path: Path) -> None:
+    path = tmp_path / "factory.db"
+    task, run = _records(path, "project-a", 7, "carda")
+    service = FeedbackReconciliationService(
+        SqliteTaskRepository(str(path)),
+        SqlitePullRequestRepository(str(path)),
+        Evidence(True),
+        Issues(),
+        Cards(),
+        SqliteFeedbackEventRepository(str(path)),
+        SqliteBacklogLinkRepository(str(path)),
+        _registry(),
+    )
+    assert not service.reconcile(task, replace(run, run_id="other-run"))
+    assert not SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]

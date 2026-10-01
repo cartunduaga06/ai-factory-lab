@@ -115,6 +115,58 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
         assert result is not None
         return result
 
+    def record_merged(self, pull_request: PullRequest) -> PullRequest:
+        if (
+            pull_request.run_id is None
+            or pull_request.task_id is None
+            or pull_request.number is None
+            or not pull_request.commit_sha
+        ):
+            raise ValueError("invalid pull request merge identity")
+        identity = (
+            pull_request.run_id,
+            pull_request.task_id,
+            pull_request.repository_slug,
+            pull_request.head_branch,
+            pull_request.base_branch,
+            pull_request.number,
+            pull_request.commit_sha,
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE {PULL_REQUESTS_TABLE} SET merged = 1 "
+                "WHERE run_id = ? AND task_id = ? AND repository_slug = ? "
+                "AND head_branch = ? AND base_branch = ? AND number = ? "
+                "AND commit_sha = ? AND merged = 0",
+                identity,
+            )
+            if cursor.rowcount == 0:
+                row = conn.execute(
+                    f"SELECT * FROM {PULL_REQUESTS_TABLE} WHERE run_id = ?",
+                    (pull_request.run_id,),
+                ).fetchone()
+                if (
+                    row is None
+                    or (
+                        row["run_id"],
+                        row["task_id"],
+                        row["repository_slug"],
+                        row["head_branch"],
+                        row["base_branch"],
+                        row["number"],
+                        row["commit_sha"],
+                    )
+                    != identity
+                    or not row["merged"]
+                ):
+                    raise ValueError("pull request merge identity mismatch")
+            row = conn.execute(
+                f"SELECT * FROM {PULL_REQUESTS_TABLE} WHERE run_id = ?",
+                (pull_request.run_id,),
+            ).fetchone()
+        assert row is not None
+        return _row_to_pull_request(row)
+
     # -- internals ---------------------------------------------------------
 
     @staticmethod

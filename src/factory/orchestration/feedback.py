@@ -48,10 +48,13 @@ class FeedbackReconciliationService:
     def reconcile(self, task: FactoryTask, run: AgentRun) -> bool:
         """Return true only after the final Issue and card state is confirmed."""
         task = self._tasks.get(task.task_id) or task
-        identity = self._identity(task, run)
-        if identity is None or run.status is not RunStatus.SUCCEEDED:
+        matched = self._identity(task, run)
+        if matched is None or run.status is not RunStatus.SUCCEEDED:
             return False
+        identity, pr = matched
         facts = self._evidence.evidence(identity)
+        if facts.merged:
+            self._prs.record_merged(pr)
         if facts.complete:
             if task.status in {TaskStatus.WAITING_HUMAN, TaskStatus.VALIDATING}:
                 task = self._lifecycle.transition(task.task_id, TaskStatus.DONE)
@@ -67,11 +70,13 @@ class FeedbackReconciliationService:
         return False
 
     def sync(self, task: FactoryTask, run: AgentRun, phase: str) -> None:
-        identity = self._identity(task, run)
-        if identity is not None:
-            self._cards.sync(identity, phase)
+        matched = self._identity(task, run)
+        if matched is not None:
+            self._cards.sync(matched[0], phase)
 
-    def _identity(self, task: FactoryTask, run: AgentRun) -> FeedbackIdentity | None:
+    def _identity(
+        self, task: FactoryTask, run: AgentRun
+    ) -> tuple[FeedbackIdentity, PullRequest] | None:
         source = task.source
         workspace = run.workspace
         if (
@@ -90,7 +95,7 @@ class FeedbackReconciliationService:
         except ProjectRoutingError:
             return None
         pr = self._prs.find_by_branch(task.target_repository, workspace.branch)
-        if not self._matches_pr(task, workspace.branch, pr, profile.base_ref):
+        if not self._matches_pr(task, run, workspace.branch, pr, profile.base_ref):
             return None
         assert pr is not None and pr.number is not None and pr.commit_sha is not None
         link = self._links.find_work_item(
@@ -103,7 +108,7 @@ class FeedbackReconciliationService:
             if self._sprints is not None
             else None
         )
-        return FeedbackIdentity(
+        identity = FeedbackIdentity(
             project_id=task.project_id,
             repository_slug=task.target_repository,
             issue_number=source.issue_number,
@@ -116,9 +121,12 @@ class FeedbackReconciliationService:
             work_item_provider=link[0],
             work_item_id=link[1],
         )
+        return identity, pr
 
     @staticmethod
-    def _matches_pr(task: FactoryTask, branch: str, pr: PullRequest | None, base: str) -> bool:
+    def _matches_pr(
+        task: FactoryTask, run: AgentRun, branch: str, pr: PullRequest | None, base: str
+    ) -> bool:
         return bool(
             pr is not None
             and pr.task_id == task.task_id
@@ -127,5 +135,5 @@ class FeedbackReconciliationService:
             and pr.head_branch == branch
             and pr.number is not None
             and pr.commit_sha
-            and pr.run_id is not None
+            and pr.run_id == run.run_id
         )
