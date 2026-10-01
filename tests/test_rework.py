@@ -131,12 +131,19 @@ def test_second_review_cycle_reuses_branch_and_pr(tmp_path: Path) -> None:
     assert len(runs.list_runs(requested.task_id)) == 2
     assert sink.create_calls == 1
     assert publisher.calls == 2
+    final_pr = prs.find_by_branch("example/target", first.branch or "")
+    assert final_pr is not None
+    assert final_pr.run_id == second.run_id
+    assert final_pr.commit_sha == f"sha-{second.branch}"
+    assert prs.get_for_run(first.run_id) is None
+    assert prs.get_for_run(second.run_id) == final_pr
     assert adapter.dispatched[0][1] == adapter.dispatched[1][1]
     assert "Review 3-5 ECC skills" in adapter.instructions[1]
     assert "Review 3-5 ECC skills" not in adapter.instructions[0]
     assert [item.to_status for item in tasks.history(requested.task_id)].count(
         TaskStatus.WAITING_HUMAN
     ) == 2
+
     service.request(requested.task_id, "One more QA correction")
     adapter._status = RunStatus.FAILED
     failed = runtime.run_once()

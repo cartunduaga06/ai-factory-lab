@@ -579,8 +579,10 @@ class PullRequestRepository(ABC):
         """Return the PR persisted for ``repository_slug`` + ``head_branch``."""
 
     @abstractmethod
-    def record_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
-        """Bind a reviewed PR to a new validated rework commit on its same branch."""
+    def record_revision(
+        self, pull_request: PullRequest, run_id: str, commit_sha: str
+    ) -> PullRequest:
+        """Bind a reviewed PR to a new validated run and commit on its same branch."""
 
     @abstractmethod
     def record_merged(self, pull_request: PullRequest) -> PullRequest:

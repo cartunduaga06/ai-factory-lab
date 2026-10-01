@@ -91,15 +91,18 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
             ).fetchone()
         return _row_to_pull_request(row) if row is not None else None
 
-    def record_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
-        if not commit_sha.strip() or pull_request.run_id is None:
+    def record_revision(
+        self, pull_request: PullRequest, run_id: str, commit_sha: str
+    ) -> PullRequest:
+        if not commit_sha.strip() or not run_id.strip() or pull_request.run_id is None:
             raise ValueError("invalid published revision")
         with self._connect() as conn:
             cursor = conn.execute(
-                f"UPDATE {PULL_REQUESTS_TABLE} SET commit_sha = ? "
+                f"UPDATE {PULL_REQUESTS_TABLE} SET run_id = ?, commit_sha = ?, merged = 0 "
                 "WHERE run_id = ? AND task_id = ? AND repository_slug = ? "
                 "AND head_branch = ? AND base_branch = ? AND number = ?",
                 (
+                    run_id,
                     commit_sha,
                     pull_request.run_id,
                     pull_request.task_id,
@@ -111,7 +114,7 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
             )
             if cursor.rowcount != 1:
                 raise ValueError("pull request revision identity mismatch")
-        result = self.get_for_run(pull_request.run_id)
+        result = self.get_for_run(run_id)
         assert result is not None
         return result
 

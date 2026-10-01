@@ -107,6 +107,7 @@ class FeedbackReconciliationService:
             or stored_run.project_id != task.project_id
             or stored_run.workspace != workspace
             or stored_run.status is not RunStatus.SUCCEEDED
+            or not self._is_latest_run(task.task_id, run.run_id)
         ):
             return None
         try:
@@ -164,3 +165,7 @@ class FeedbackReconciliationService:
             and pr.commit_sha
             and pr.run_id == run.run_id
         )
+
+    def _is_latest_run(self, task_id: str, run_id: str) -> bool:
+        runs = self._runs.list_runs(task_id)
+        return bool(runs) and runs[-1].run_id == run_id

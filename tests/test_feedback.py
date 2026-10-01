@@ -177,6 +177,39 @@ def test_github_direct_merge_then_complete_is_idempotent_across_restart(tmp_path
     assert names.count("DeliveryReconciled") == 1
 
 
+def test_superseded_run_cannot_reconcile_reworked_pr(tmp_path: Path) -> None:
+    path = tmp_path / "rework.db"
+    first_task, first = _records(path, "project-a", 86, None)
+    runs = SqliteRunRepository(str(path))
+    prs = SqlitePullRequestRepository(str(path))
+    first_pr = prs.get_for_run(first.run_id)
+    assert first_pr is not None
+    second = runs.save_run(
+        AgentRun(
+            first.task_id,
+            AgentKind.CODEX,
+            status=RunStatus.SUCCEEDED,
+            workspace=first.workspace,
+            project_id=first.project_id,
+        )
+    )
+    final_pr = prs.record_revision(first_pr, second.run_id, "b" * 40)
+    issues, cards = Issues(), Cards()
+
+    assert not _service(path, True, issues, cards).reconcile(first_task, first)
+    assert not prs.get_for_run(second.run_id).merged  # type: ignore[union-attr]
+    assert issues.closed == set()
+
+    # Simulate provider-confirmed merge with complete required CI evidence.
+    assert _service(path, True, issues, cards).reconcile(first_task, runs.get_run(second.run_id))  # type: ignore[arg-type]
+    assert prs.get_for_run(second.run_id).merged  # type: ignore[union-attr]
+    assert SqliteTaskRepository(str(path)).get(first_task.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+    assert issues.closed == {("example/project-a", 86)}
+    assert not _service(path, True, issues, cards).reconcile(first_task, runs.get_run(first.run_id))  # type: ignore[arg-type]
+    assert SqliteFeedbackEventRepository(str(path)).is_completed(first_task.task_id)
+    assert final_pr.commit_sha == "b" * 40
+
+
 def test_trello_task_with_lost_link_cannot_downgrade(tmp_path: Path) -> None:
     path = tmp_path / "lost-link.db"
     task, run = _records(path, "project-a", 7, "carda")

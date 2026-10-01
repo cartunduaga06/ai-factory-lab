@@ -257,6 +257,32 @@ def test_record_merged_is_exact_durable_and_idempotent(db_path: str) -> None:
     assert names.count("PRUpdated") == 1
 
 
+def test_record_revision_rebinds_single_pr_to_latest_run(db_path: str) -> None:
+    tasks, runs, task_id, first_run_id = _seed(db_path)
+    second = AgentRun(
+        task_id=task_id,
+        adapter=AgentKind.OTHER,
+        run_id="run-2",
+        status=RunStatus.SUCCEEDED,
+        workspace=Workspace(
+            repository_slug="example/target", branch="factory/task-1/ws-1", path="/tmp/ws-2"
+        ),
+    )
+    runs.save_run(second)
+    repo = SqlitePullRequestRepository(db_path)
+    original = replace(_pr(first_run_id, task_id), commit_sha="a" * 40)
+    repo.save(original)
+
+    updated = repo.record_revision(original, second.run_id, "b" * 40)
+    reopened = SqlitePullRequestRepository(db_path)
+
+    assert updated.run_id == second.run_id
+    assert updated.commit_sha == "b" * 40
+    assert reopened.find_by_branch("example/target", original.head_branch) == updated
+    assert reopened.get_for_run(first_run_id) is None
+    assert reopened.get_for_run(second.run_id) == updated
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
