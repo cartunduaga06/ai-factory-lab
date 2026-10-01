@@ -33,8 +33,18 @@ DEFAULT_RUN_TIMEOUT = 1800.0
 # Idle wait between watch iterations when no eligible work exists. Positive by
 # default so an unattended worker cannot spin against the GitHub API.
 DEFAULT_WATCH_IDLE_INTERVAL = 60.0
+DEFAULT_MAX_CONCURRENCY = 2
 DEFAULT_HEARTBEAT_INTERVAL = 180.0
 DEFAULT_MISSED_HEARTBEATS = 2
+
+
+def _max_concurrency(raw: str | None) -> int:
+    value = _clean(raw)
+    if value is None:
+        return DEFAULT_MAX_CONCURRENCY
+    if value not in {"1", "2"}:
+        raise ValueError("FACTORY_MAX_CONCURRENCY must be 1 or 2")
+    return int(value)
 
 
 class DatabaseScheme(StrEnum):
@@ -287,6 +297,7 @@ class FactoryConfig:
     # Idle wait between iterations of the automatic worker. Only ``factory watch``
     # reads it; ``factory run`` stays a single bounded pass.
     watch_idle_interval: float = DEFAULT_WATCH_IDLE_INTERVAL
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL
     missed_heartbeats: int = DEFAULT_MISSED_HEARTBEATS
     trello_status_card_id: str | None = None
@@ -386,6 +397,7 @@ class FactoryConfig:
             watch_idle_interval=_duration(
                 source.get("FACTORY_WATCH_IDLE_INTERVAL"), DEFAULT_WATCH_IDLE_INTERVAL
             ),
+            max_concurrency=_max_concurrency(source.get("FACTORY_MAX_CONCURRENCY")),
             heartbeat_interval=max(
                 120.0,
                 min(
@@ -477,6 +489,7 @@ class FactoryConfig:
             "run_poll_interval": self.run_poll_interval,
             "run_timeout": self.run_timeout,
             "watch_idle_interval": self.watch_idle_interval,
+            "max_concurrency": self.max_concurrency,
             "heartbeat_interval": self.heartbeat_interval,
             "missed_heartbeats": self.missed_heartbeats,
             "trello_status_card_id": self.trello_status_card_id,

@@ -101,6 +101,7 @@ from factory.orchestration.terminal_recovery import (
 )
 from factory.orchestration.transitions import TaskLifecycleService
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
+from factory.orchestration.worker_pool import WorkerPool, WorkerSession
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
@@ -132,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         "watch",
         help="Automatic worker: sequential one-task iterations (WIP=1) with idle waits.",
     )
+    subparsers.add_parser("pool", help="Run up to two isolated task workers concurrently.")
     status = subparsers.add_parser("status", help="Read the current factory status.")
     status.add_argument("--serve", action="store_true", help="Serve a read-only phone view.")
     status.add_argument("--host", default="127.0.0.1")
@@ -223,6 +225,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_runtime(config)
     if args.command == "watch":
         return _run_watch(config)
+    if args.command == "pool":
+        return _run_pool(config)
     if args.command == "status":
         return _show_status(config, serve=args.serve, host=args.host, port=args.port)
     if args.command == "sync-status":
@@ -788,6 +792,43 @@ def _run_watch(config: FactoryConfig) -> int:
 
     _print_watch_outcome(outcome)
     return EXIT_OK
+
+
+def _run_pool(config: FactoryConfig) -> int:
+    """Run independent task sessions while preserving durable human gates."""
+    try:
+        _build_runtime(config)
+    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except Exception as exc:  # noqa: BLE001 - no provider details in output
+        print(f"pool failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    stop = threading.Event()
+    previous_handlers = _install_stop_handlers(stop)
+    try:
+        WorkerPool(
+            lambda: _build_runtime(config),
+            max_concurrency=config.max_concurrency,
+            idle_interval=config.watch_idle_interval,
+            should_stop=stop.is_set,
+            on_session=_print_worker_session,
+        ).run()
+    except Exception as exc:  # noqa: BLE001 - no provider details in output
+        print(f"pool failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return EXIT_OK
+
+
+def _print_worker_session(session: WorkerSession) -> None:
+    """Expose only worker identity and sanitized lifecycle facts."""
+    if session.result is not None:
+        _print_runtime_result(session.result)
+    else:
+        print(f"Worker {session.task_id} failed: {session.error_type}")
 
 
 def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:

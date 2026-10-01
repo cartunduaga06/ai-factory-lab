@@ -215,13 +215,52 @@ class FactoryRuntime:
         finally:
             self._pulse_status()
 
-    def _run_once(self) -> RuntimeResult:
-        """Drive the existing one-shot lifecycle."""
+    def prepare_pool(self) -> IntakeSummary:
+        """Refresh durable state and intake once before a pool scheduling pass."""
+        self._reconciliation.reconcile()
+        self._reconcile_human_reviews()
+        if self._sprint is not None:
+            self._sprint.resume_completed()
+            self._sprint.prepare()
         if self._backlog_reconcile is not None and self._sprint is None:
             self._backlog_reconcile()
-        intake = self._intake.intake(self._intake_repository)
-        self._reconcile_human_reviews()
-        task = self._select_task()
+        return self._intake.intake(self._intake_repository)
+
+    def pool_candidates(self) -> tuple[str, ...]:
+        """Return unfinished task identities in recovery-first order."""
+        statuses = (
+            TaskStatus.PR_OPEN,
+            TaskStatus.VALIDATING,
+            TaskStatus.RUNNING,
+            TaskStatus.CLAIMED,
+            TaskStatus.CHANGES_REQUESTED,
+            TaskStatus.READY,
+            TaskStatus.DISCOVERED,
+        )
+        return tuple(task.task_id for status in statuses for task in self._selectable(status))
+
+    def run_task(self, task_id: str) -> RuntimeResult:
+        """Resume exactly one named task; dispatch still claims it atomically."""
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if self._sprint is not None and not self._sprint.allows(task):
+            raise ValueError("task is not authorized by the active sprint")
+        try:
+            return self._run_once(selected_task=task, do_intake=False)
+        finally:
+            self._pulse_status()
+
+    def _run_once(
+        self, selected_task: FactoryTask | None = None, *, do_intake: bool = True
+    ) -> RuntimeResult:
+        """Drive the existing one-shot lifecycle."""
+        if do_intake and self._backlog_reconcile is not None and self._sprint is None:
+            self._backlog_reconcile()
+        intake = self._intake.intake(self._intake_repository) if do_intake else IntakeSummary()
+        if do_intake:
+            self._reconcile_human_reviews()
+        task = selected_task or self._select_task()
         if task is None:
             return RuntimeResult(
                 None, None, None, None, None, None, None, "NO_ELIGIBLE_TASK", intake
@@ -252,7 +291,7 @@ class FactoryRuntime:
             active = self._runs.find_active_run(task.task_id)
             if active is not None:
                 return self._result(task, active, None, "ACTIVE_RUN_STATE_MISMATCH", intake)
-            busy = any(
+            busy = do_intake and any(
                 other.task_id != task.task_id
                 for status in (
                     TaskStatus.CLAIMED,
@@ -262,9 +301,12 @@ class FactoryRuntime:
                 )
                 for other in self._tasks.list(status)
             )
-            busy = busy or any(
-                run.task_id != task.task_id and not run.is_terminal
-                for run in self._runs.list_runs()
+            busy = busy or (
+                do_intake
+                and any(
+                    run.task_id != task.task_id and not run.is_terminal
+                    for run in self._runs.list_runs()
+                )
             )
             if busy:
                 return self._result(task, self._latest_run(task.task_id), None, "WIP_BUSY", intake)

@@ -1,5 +1,18 @@
 # AI Factory Lab
 
+## Parallel worker pool (MVP3)
+
+`python -m factory pool` schedules up to `FACTORY_MAX_CONCURRENCY=2` task
+sessions at once. Each session owns one durable task and run; dispatch creates
+its own worktree and branch, and publication stops at `WAITING_HUMAN`. The pool
+prioritizes persisted in-flight tasks after restart. A worker timeout remains
+resumable on its task, and an exception in one session does not stop another.
+Set the concurrency to `1` to serialize pool execution. `factory run` and
+`factory watch` retain their existing one-task behavior.
+
+See [the worker pool runbook](docs/parallel-worker-runtime.md) for operation,
+traceability and current acceptance limits.
+
 ## Multi-project routing
 
 Set `FACTORY_PROJECTS` to an operator-owned JSON array of project profiles to
