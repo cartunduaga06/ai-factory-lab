@@ -30,6 +30,8 @@ def test_defaults_are_safe_with_empty_environment() -> None:
     assert config.openhands.enabled is False
     assert config.codex.enabled is False
     assert config.agent_engine is AgentEngine.CODEX
+    assert config.codex_model == "gpt-6-luna"
+    assert config.codex_reasoning_effort == "low"
     assert config.database_url is None
     assert config.workspace_root == DEFAULT_WORKSPACE_ROOT
     assert config.logging.level == "INFO"
@@ -79,6 +81,18 @@ def test_engine_selection_is_explicit_and_rejects_typos() -> None:
     )
     with pytest.raises(ValueError, match="FACTORY_AGENT_ENGINE"):
         FactoryConfig.from_env({"FACTORY_AGENT_ENGINE": "unknown"})
+
+
+def test_codex_policy_is_explicit_and_validated() -> None:
+    config = FactoryConfig.from_env(
+        {"FACTORY_CODEX_MODEL": "gpt-6-luna", "FACTORY_CODEX_REASONING_EFFORT": "high"}
+    )
+    assert config.codex_model == "gpt-6-luna"
+    assert config.codex_reasoning_effort == "high"
+    with pytest.raises(ValueError, match="FACTORY_CODEX_MODEL"):
+        FactoryConfig.from_env({"FACTORY_CODEX_MODEL": "bad model"})
+    with pytest.raises(ValueError, match="FACTORY_CODEX_REASONING_EFFORT"):
+        FactoryConfig.from_env({"FACTORY_CODEX_REASONING_EFFORT": "extreme"})
 
 
 def test_ecc_selection_is_explicit_and_closed() -> None:

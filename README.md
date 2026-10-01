@@ -511,9 +511,18 @@ Present today:
 
 Also present: `CodexAdapter` runs the authenticated Codex CLI noninteractively
 in the factory workspace. `FACTORY_AGENT_ENGINE=codex|openhands` selects one
-engine (default `codex`); a stored run never changes engines. Codex runs in a
-bounded worker and leaves a durable result for collection before validation.
-The opt-in pinned ECC verification skill is documented in [docs/ecc-spike.md](docs/ecc-spike.md).
+engine (default `codex`); a stored run never changes engines. Factory Codex
+workers ignore the personal `~/.codex/config.toml` and use the explicit
+`FACTORY_CODEX_MODEL` and `FACTORY_CODEX_REASONING_EFFORT` policy while keeping
+the service user's existing Codex authentication. Codex runs in a bounded worker
+and leaves a durable result for collection before validation. A reviewed
+non-timeout worker exit that produced no PR, no workspace changes and no commits
+ahead of the approved base can be authorized with the explicit
+`factory recover-worker-failure` command using `--task-id`, `--run-id`, and
+`--acknowledge-worker-failure`; this only moves the terminal task to `BLOCKED`.
+An explicit `factory retry --task-id <uuid>` is still required before another
+attempt. The opt-in pinned ECC verification skill is documented in
+[docs/ecc-spike.md](docs/ecc-spike.md).
 
 Not present yet — deliberately deferred:
 

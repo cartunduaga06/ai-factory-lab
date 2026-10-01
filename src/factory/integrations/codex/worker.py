@@ -19,7 +19,14 @@ _READ_BYTES = 65_536
 
 
 def run(
-    executable: str, workspace: str, state_dir: Path, run_id: str, timeout: float, kind: str
+    executable: str,
+    workspace: str,
+    state_dir: Path,
+    run_id: str,
+    timeout: float,
+    kind: str,
+    model: str = "gpt-6-luna",
+    reasoning_effort: str = "low",
 ) -> None:
     """Execute Codex and atomically record a sanitized terminal status."""
     prompt = state_dir / f"{run_id}.prompt"
@@ -41,6 +48,11 @@ def run(
         command = [
             executable,
             "exec",
+            "--ignore-user-config",
+            "--model",
+            model,
+            "-c",
+            f'model_reasoning_effort="{reasoning_effort}"',
             "--sandbox",
             "workspace-write",
             "--cd",
@@ -178,4 +190,13 @@ def _valid_result(path: Path) -> bool:
 
 
 if __name__ == "__main__":
-    run(sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4], float(sys.argv[5]), sys.argv[6])
+    run(
+        sys.argv[1],
+        sys.argv[2],
+        Path(sys.argv[3]),
+        sys.argv[4],
+        float(sys.argv[5]),
+        sys.argv[6],
+        sys.argv[7],
+        sys.argv[8],
+    )

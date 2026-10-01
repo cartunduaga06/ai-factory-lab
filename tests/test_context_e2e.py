@@ -48,7 +48,7 @@ def test_issue_to_pack_to_codex_gates_and_pr(tmp_path: Path) -> None:
         "assert 'Follow repository rules.' in prompt\n"
         "assert 'FEATURE = 1' in prompt\n"
         "pathlib.Path('result.txt').write_text('done')\n"
-        "pathlib.Path(sys.argv[7]).write_text('Done')\n"
+        "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')\n"
     )
     executable.chmod(0o755)
     db = str(tmp_path / "factory.db")

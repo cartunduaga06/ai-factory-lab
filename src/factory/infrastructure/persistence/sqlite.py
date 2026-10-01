@@ -297,14 +297,22 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         return _row_to_task(updated)
 
     def authorize_terminal_timeout_recovery(self, task_id: str, run_id: str) -> FactoryTask:
-        """Exceptional operator-approved FAILED -> BLOCKED, atomically audited.
+        """Exceptional operator-approved timeout recovery, atomically audited."""
+        return self._authorize_terminal_recovery(
+            task_id, run_id, marker="terminal-timeout-recovery:" + run_id
+        )
 
-        The normal state machine still treats FAILED as terminal. This special
-        CAS requires the exact latest failed CODE run, no active run anywhere,
-        and no locally persisted PR. Provider/workspace checks happen above.
-        """
+    def authorize_terminal_worker_recovery(self, task_id: str, run_id: str) -> FactoryTask:
+        """Exceptional operator-approved clean worker recovery, atomically audited."""
+        return self._authorize_terminal_recovery(
+            task_id, run_id, marker="terminal-worker-recovery:" + run_id
+        )
+
+    def _authorize_terminal_recovery(
+        self, task_id: str, run_id: str, *, marker: str
+    ) -> FactoryTask:
+        """Atomically record one exceptional FAILED -> BLOCKED recovery."""
         timestamp = encode_datetime(datetime.now(UTC))
-        marker = "terminal-timeout-recovery:" + run_id
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""

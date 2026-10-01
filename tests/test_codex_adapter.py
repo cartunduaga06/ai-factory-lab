@@ -88,7 +88,7 @@ instruction = sys.stdin.read()
 assert {heading!r} in instruction
 assert 'Factory quality gates and human review remain authoritative' in instruction
 pathlib.Path('result.txt').write_text('reviewed')
-pathlib.Path(sys.argv[7]).write_text('Done')
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')
 """,
     )
     workspace = _workspace(checkout)
@@ -141,15 +141,20 @@ def test_codex_uses_assigned_workspace_and_authenticated_home(tmp_path: Path) ->
         tmp_path,
         """import os, pathlib, sys
 args = sys.argv[1:]
-assert args[:4] == ['exec', '--sandbox', 'workspace-write', '--cd']
-assert args[4] == os.getcwd()
-assert args[5] == '--output-last-message' and args[-1] == '-'
+expected_policy = [
+    'exec', '--ignore-user-config', '--model', 'gpt-6-luna',
+    '-c', 'model_reasoning_effort="low"'
+]
+assert args[:6] == expected_policy
+assert args[6:10] == ['--sandbox', 'workspace-write', '--cd', os.getcwd()]
+assert args[-1] == '-'
 assert '--skip-git-repo-check' not in args
 assert 'Implement a feature' in sys.stdin.read()
 assert os.environ['HOME'] == '/test/chatgpt-home'
 assert os.environ['CODEX_HOME'] == '/test/codex-home'
 assert 'OPENAI_API_KEY' not in os.environ
-pathlib.Path(args[6]).write_text('Done')
+message = pathlib.Path(args[args.index('--output-last-message') + 1])
+message.write_text('Done')
 """,
     )
     environment = {
@@ -176,7 +181,7 @@ def test_code_can_write_large_workspace_file_and_last_message(tmp_path: Path) ->
         """import pathlib, sys
 args = sys.argv[1:]
 pathlib.Path('generated.bin').write_bytes(b'x' * 1_048_577)
-pathlib.Path(args[6]).write_text('Done')
+pathlib.Path(args[args.index('--output-last-message') + 1]).write_text('Done')
 print('complete')
 """,
     )
@@ -193,7 +198,7 @@ def test_oversized_code_output_succeeds_and_capture_is_bounded(tmp_path: Path, s
     executable = _executable(
         tmp_path,
         f"""import pathlib, sys
-pathlib.Path(sys.argv[7]).write_text('Done')
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')
 sys.{stream}.buffer.write(b'x' * {MAX_OUTPUT_BYTES + 1})
 sys.{stream}.flush()
 """,
@@ -253,7 +258,11 @@ def test_malformed_result_fails_closed(tmp_path: Path, payload: str) -> None:
     checkout.mkdir()
     executable = _executable(
         tmp_path,
-        f"import pathlib, sys\npathlib.Path(sys.argv[7]).write_text({payload!r})\n",
+        (
+            "import pathlib, sys\n"
+            "message = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+            f"message.write_text({payload!r})\n"
+        ),
     )
     adapter = CodexAdapter(executable=executable)
     run = _collect(adapter, _dispatch(adapter, _task(), _workspace(checkout)))
