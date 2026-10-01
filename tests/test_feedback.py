@@ -210,6 +210,44 @@ def test_superseded_run_cannot_reconcile_reworked_pr(tmp_path: Path) -> None:
     assert final_pr.commit_sha == "b" * 40
 
 
+def test_reworked_pr_revision_reconciles_after_service_restart(tmp_path: Path) -> None:
+    path = tmp_path / "rework-restart.db"
+    task, first = _records(path, "project-a", 87, None)
+    runs = SqliteRunRepository(str(path))
+    prs = SqlitePullRequestRepository(str(path))
+    original = prs.get_for_run(first.run_id)
+    assert original is not None
+    second = runs.save_run(
+        AgentRun(
+            task.task_id,
+            AgentKind.CODEX,
+            status=RunStatus.SUCCEEDED,
+            workspace=first.workspace,
+            project_id=first.project_id,
+        )
+    )
+    published_sha = "c" * 40
+    prs.record_revision(original, second.run_id, published_sha)
+
+    # Reconstruct every persistence-backed service after the rebind is durable.
+    restarted_prs = SqlitePullRequestRepository(str(path))
+    restarted_runs = SqliteRunRepository(str(path))
+    durable_pr = restarted_prs.get_for_run(second.run_id)
+    assert durable_pr is not None
+    assert durable_pr.number == original.number
+    assert durable_pr.commit_sha == published_sha
+    assert restarted_prs.get_for_run(first.run_id) is None
+
+    issues, cards = Issues(), Cards()
+    service = _service(path, True, issues, cards)
+    assert not service.reconcile(task, first)
+    assert service.reconcile(task, restarted_runs.get_run(second.run_id))  # type: ignore[arg-type]
+    assert SqliteTaskRepository(str(path)).get(task.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+    assert issues.closed == {("example/project-a", 87)}
+    assert not service.reconcile(task, restarted_runs.get_run(first.run_id))  # type: ignore[arg-type]
+    assert SqliteFeedbackEventRepository(str(path)).is_completed(task.task_id)
+
+
 def test_trello_task_with_lost_link_cannot_downgrade(tmp_path: Path) -> None:
     path = tmp_path / "lost-link.db"
     task, run = _records(path, "project-a", 7, "carda")
