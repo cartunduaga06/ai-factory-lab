@@ -46,6 +46,12 @@ from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 class SqliteTaskRepository(SqliteRepository, TaskRepository):
     """Durable task and transition storage backed by a SQLite file."""
 
+    def __init__(self, path: str, *, max_active_claims: int = 1) -> None:
+        super().__init__(path)
+        if not 1 <= max_active_claims <= 2:
+            raise ValueError("max_active_claims must be 1 or 2")
+        self._max_active_claims = max_active_claims
+
     def __repr__(self) -> str:
         return f"SqliteTaskRepository(path={self._path!r})"
 
@@ -232,15 +238,17 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         now = datetime.now(UTC)
         timestamp = encode_datetime(now)
         with self._connect() as conn:
-            # A claim is the durable global execution lease. SQLite evaluates
-            # this guard in the same write transaction as the status change,
-            # including when two worker processes race after a restart.
+            # Count distinct task identities, including orphaned active runs.
+            # The count and transition share SQLite's serialized write transaction.
             idle_guard = (
-                f"AND NOT EXISTS (SELECT 1 FROM {TASKS_TABLE} AS busy "
+                "AND (SELECT COUNT(*) FROM ("
+                f"SELECT busy.task_id FROM {TASKS_TABLE} AS busy "
                 "WHERE busy.task_id != ? AND busy.status IN "
-                "('CLAIMED', 'RUNNING', 'VALIDATING', 'PR_OPEN')) "
-                f"AND NOT EXISTS (SELECT 1 FROM {AGENT_RUNS_TABLE} AS active "
-                "WHERE active.status IN ('PENDING', 'RUNNING'))"
+                "('CLAIMED', 'RUNNING', 'VALIDATING', 'PR_OPEN') "
+                "UNION "
+                f"SELECT active.task_id FROM {AGENT_RUNS_TABLE} AS active "
+                "WHERE active.task_id != ? AND active.status IN ('PENDING', 'RUNNING')"
+                ")) < ?"
                 if target is TaskStatus.CLAIMED
                 else ""
             )
@@ -255,7 +263,11 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                     timestamp,
                     task_id,
                     expected_from.value,
-                    *((task_id,) if target is TaskStatus.CLAIMED else ()),
+                    *(
+                        (task_id, task_id, self._max_active_claims)
+                        if target is TaskStatus.CLAIMED
+                        else ()
+                    ),
                 ),
             )
             if cursor.rowcount == 0:

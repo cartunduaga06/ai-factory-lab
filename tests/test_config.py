@@ -377,6 +377,13 @@ def test_watch_idle_interval_placeholder_falls_back_to_default() -> None:
     assert config.watch_idle_interval == DEFAULT_WATCH_IDLE_INTERVAL
 
 
+def test_pool_concurrency_defaults_to_two_and_is_bounded() -> None:
+    assert FactoryConfig.from_env({}).max_concurrency == 2
+    assert FactoryConfig.from_env({"FACTORY_MAX_CONCURRENCY": "1"}).max_concurrency == 1
+    with pytest.raises(ValueError, match="FACTORY_MAX_CONCURRENCY"):
+        FactoryConfig.from_env({"FACTORY_MAX_CONCURRENCY": "3"})
+
+
 def test_write_token_placeholder_is_treated_as_unset() -> None:
     config = FactoryConfig.from_env({"GITHUB_WRITE_TOKEN": "<your-write-token>"})
     assert config.github_write_token is None

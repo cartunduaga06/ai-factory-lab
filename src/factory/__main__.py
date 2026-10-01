@@ -101,6 +101,7 @@ from factory.orchestration.terminal_recovery import (
 )
 from factory.orchestration.transitions import TaskLifecycleService
 from factory.orchestration.watch import FactoryWatcher, WatchOutcome
+from factory.orchestration.worker_pool import WorkerPool, WorkerSession
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
@@ -132,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         "watch",
         help="Automatic worker: sequential one-task iterations (WIP=1) with idle waits.",
     )
+    subparsers.add_parser("pool", help="Run up to two isolated task workers concurrently.")
     status = subparsers.add_parser("status", help="Read the current factory status.")
     status.add_argument("--serve", action="store_true", help="Serve a read-only phone view.")
     status.add_argument("--host", default="127.0.0.1")
@@ -223,6 +225,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_runtime(config)
     if args.command == "watch":
         return _run_watch(config)
+    if args.command == "pool":
+        return _run_pool(config)
     if args.command == "status":
         return _show_status(config, serve=args.serve, host=args.host, port=args.port)
     if args.command == "sync-status":
@@ -790,6 +794,43 @@ def _run_watch(config: FactoryConfig) -> int:
     return EXIT_OK
 
 
+def _run_pool(config: FactoryConfig) -> int:
+    """Run independent task sessions while preserving durable human gates."""
+    try:
+        _build_runtime(config, pool_mode=True)
+    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except Exception as exc:  # noqa: BLE001 - no provider details in output
+        print(f"pool failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    stop = threading.Event()
+    previous_handlers = _install_stop_handlers(stop)
+    try:
+        WorkerPool(
+            lambda: _build_runtime(config, pool_mode=True),
+            max_concurrency=config.max_concurrency,
+            idle_interval=config.watch_idle_interval,
+            should_stop=stop.is_set,
+            on_session=_print_worker_session,
+        ).run()
+    except Exception as exc:  # noqa: BLE001 - no provider details in output
+        print(f"pool failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return EXIT_OK
+
+
+def _print_worker_session(session: WorkerSession) -> None:
+    """Expose only worker identity and sanitized lifecycle facts."""
+    if session.result is not None:
+        _print_runtime_result(session.result)
+    else:
+        print(f"Worker {session.task_id} failed: {session.error_type}")
+
+
 def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
     """Install SIGINT/SIGTERM handlers that request a cooperative stop.
 
@@ -808,7 +849,7 @@ def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
     return installed
 
 
-def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
+def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> FactoryRuntime:
     """Validate the run prerequisites and build the production runtime graph."""
     repository = _resolve_repository(config)
     if (
@@ -833,7 +874,9 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
     database = config.database
-    tasks = SqliteTaskRepository(database.path)
+    tasks = SqliteTaskRepository(
+        database.path, max_active_claims=config.max_concurrency if pool_mode else 1
+    )
     runs = SqliteRunRepository(database.path)
     pull_requests = SqlitePullRequestRepository(database.path)
     tasks.initialize()
@@ -928,6 +971,8 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         gate_specs=config.quality_gates,
         registry=config.project_registry,
         feedback=feedback,
+        pool_mode=pool_mode,
+        pool_backlog_links=(SqliteBacklogLinkRepository(database.path) if pool_mode else None),
         task_gate_specs=config.task_quality_gates,
         gate_runner=LocalQualityGateRunner(),
         revision_inspector=GitWorkspaceRevisionInspector(),

@@ -33,6 +33,7 @@ from factory.domain.operational import (
     parse_scratch_artifact,
 )
 from factory.domain.ports import (
+    BacklogLinkRepository,
     DatabaseReadonlyInspector,
     OperationalAcceptance,
     PullRequestRepository,
@@ -119,11 +120,14 @@ class FactoryRuntime:
         context_builder: ContextPackBuilder | None = None,
         registry: ProjectRegistry | None = None,
         feedback: FeedbackReconciliationService | None = None,
+        pool_mode: bool = False,
+        pool_backlog_links: BacklogLinkRepository | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
         self._registry = registry
         self._feedback = feedback
+        self._pool_backlog_links = pool_backlog_links
         self._tasks = tasks
         self._runs = runs
         self._adapter = adapter
@@ -176,7 +180,9 @@ class FactoryRuntime:
             runs,
             self._tracking,
             adapter,
-            allows=sprint.allows if sprint else None,
+            allows=self._pool_allows
+            if pool_mode and sprint
+            else (sprint.allows if sprint else None),
             registry=registry,
         )
         self._pull_requests = pull_requests
@@ -191,6 +197,7 @@ class FactoryRuntime:
         self._backlog_reconcile = backlog_reconcile
         self._sprint = sprint
         self._recovery_policy = recovery_policy or RecoveryPolicy()
+        self._pool_mode = pool_mode
 
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
@@ -215,13 +222,54 @@ class FactoryRuntime:
         finally:
             self._pulse_status()
 
-    def _run_once(self) -> RuntimeResult:
-        """Drive the existing one-shot lifecycle."""
+    def prepare_pool(self) -> IntakeSummary:
+        """Refresh durable state and intake once before a pool scheduling pass."""
+        self._reconciliation.reconcile()
+        self._reconcile_human_reviews()
+        if self._sprint is not None:
+            self._sprint.resume_completed()
+            self._sprint.prepare()
         if self._backlog_reconcile is not None and self._sprint is None:
             self._backlog_reconcile()
-        intake = self._intake.intake(self._intake_repository)
-        self._reconcile_human_reviews()
-        task = self._select_task()
+        return self._intake.intake(self._intake_repository)
+
+    def pool_candidates(self) -> tuple[str, ...]:
+        """Return unfinished task identities in recovery-first order."""
+        statuses = (
+            TaskStatus.PR_OPEN,
+            TaskStatus.VALIDATING,
+            TaskStatus.RUNNING,
+            TaskStatus.CLAIMED,
+            TaskStatus.CHANGES_REQUESTED,
+            TaskStatus.READY,
+            TaskStatus.DISCOVERED,
+        )
+        return tuple(
+            task.task_id for status in statuses for task in self._selectable(status, pool=True)
+        )
+
+    def run_task(self, task_id: str) -> RuntimeResult:
+        """Resume exactly one named task; dispatch still claims it atomically."""
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if not self._pool_allows(task):
+            raise ValueError("task is not authorized for pool execution")
+        try:
+            return self._run_once(selected_task=task, do_intake=False)
+        finally:
+            self._pulse_status()
+
+    def _run_once(
+        self, selected_task: FactoryTask | None = None, *, do_intake: bool = True
+    ) -> RuntimeResult:
+        """Drive the existing one-shot lifecycle."""
+        if do_intake and self._backlog_reconcile is not None and self._sprint is None:
+            self._backlog_reconcile()
+        intake = self._intake.intake(self._intake_repository) if do_intake else IntakeSummary()
+        if do_intake:
+            self._reconcile_human_reviews()
+        task = selected_task or self._select_task()
         if task is None:
             return RuntimeResult(
                 None, None, None, None, None, None, None, "NO_ELIGIBLE_TASK", intake
@@ -252,7 +300,7 @@ class FactoryRuntime:
             active = self._runs.find_active_run(task.task_id)
             if active is not None:
                 return self._result(task, active, None, "ACTIVE_RUN_STATE_MISMATCH", intake)
-            busy = any(
+            busy = do_intake and any(
                 other.task_id != task.task_id
                 for status in (
                     TaskStatus.CLAIMED,
@@ -262,9 +310,12 @@ class FactoryRuntime:
                 )
                 for other in self._tasks.list(status)
             )
-            busy = busy or any(
-                run.task_id != task.task_id and not run.is_terminal
-                for run in self._runs.list_runs()
+            busy = busy or (
+                do_intake
+                and any(
+                    run.task_id != task.task_id and not run.is_terminal
+                    for run in self._runs.list_runs()
+                )
             )
             if busy:
                 return self._result(task, self._latest_run(task.task_id), None, "WIP_BUSY", intake)
@@ -460,7 +511,34 @@ class FactoryRuntime:
         except SecurityReviewBlocked:
             current = self._block(task.task_id, "security review blocked publication")
             return self._result(current, refresh.run, refresh, "SECURITY_REVIEW_BLOCKED", intake)
+        except Exception:
+            if self._pool_mode:
+                self._block_failed_publication(task.task_id, refresh.run)
+            raise
         return self._result_from_publication(published, refresh.run, intake)
+
+    def _block_failed_publication(self, task_id: str, run: AgentRun) -> None:
+        """Keep a failed pool publication out of automatic restart selection."""
+        task = self._tasks.get(task_id)
+        workspace = run.workspace
+        latest = self._latest_run(task_id)
+        if (
+            task is None
+            or task.status is not TaskStatus.VALIDATING
+            or workspace is None
+            or latest is None
+            or latest.run_id != run.run_id
+            or latest.status is not RunStatus.SUCCEEDED
+            or latest.validation_outcome is not ValidationOutcome.READY_FOR_NEXT_PHASE
+            or latest.workspace is None
+            or latest.workspace.workspace_id != workspace.workspace_id
+            or self._pull_requests.get_for_run(run.run_id) is not None
+        ):
+            return
+        self._block(
+            task_id,
+            f"publication failed: run {run.run_id}, workspace {workspace.workspace_id}",
+        )
 
     def _run_database(
         self, task: FactoryTask, target_id: str, intake: IntakeSummary
@@ -632,11 +710,27 @@ class FactoryRuntime:
                 return tasks[0]
         return None
 
-    def _selectable(self, status: TaskStatus) -> list[FactoryTask]:
+    def _pool_allows(self, task: FactoryTask) -> bool:
+        if self._sprint is None:
+            return True
+        return self._sprint.allows(task) or (
+            task.source is not None
+            and task.source.provider == "github"
+            and task.source.repository_slug == task.target_repository
+            and self._pool_backlog_links is not None
+            and self._pool_backlog_links.reconciliation_origin(task.task_id)
+            == ("github-direct", None)
+        )
+
+    def _selectable(self, status: TaskStatus, *, pool: bool = False) -> list[FactoryTask]:
         return [
             task
             for task in self._tasks.list(status)
-            if self._sprint is None or self._sprint.allows(task)
+            if (
+                self._pool_allows(task)
+                if pool
+                else self._sprint is None or self._sprint.allows(task)
+            )
         ]
 
     def _block(self, task_id: str, reason: str) -> FactoryTask:
