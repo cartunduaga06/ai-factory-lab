@@ -40,7 +40,11 @@ successful deployment is found when the project profile sets
 `"deploy_required": true`. A project may set `"required_ci_checks"` to an
 operator-owned list of exact GitHub check-run names; when configured, E6 verifies
 those checks directly and does not require branch-protection administration access.
-Missing or unreadable evidence leaves the Issue open
+Projects that intentionally rely on the Factory's successful required local gates
+may set `"provider_ci_required": false`; this skips GitHub branch-protection,
+status and check-run lookups while still requiring the exact merged PR identity and
+merge commit. The default is `true`, so existing projects keep fail-closed provider
+CI verification. Missing or unreadable required evidence leaves the Issue open
 and the Sprint at its human gate. The default is `false` for projects with no
 deployment acceptance requirement. Deployment remains a human operation.
 

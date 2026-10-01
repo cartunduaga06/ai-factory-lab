@@ -194,9 +194,15 @@ def test_operator_configuration_loads_two_project_profiles(tmp_path: Path) -> No
         }
         for p in _registry(tmp_path).profiles
     ]
+    profiles[1]["provider_ci_required"] = False
     config = FactoryConfig.from_env({"FACTORY_PROJECTS": json.dumps(profiles)})
     assert config.project_registry is not None
-    assert config.project_registry.resolve("dulces").repository_slug == "example/dulces"
+    dulces = config.project_registry.resolve("dulces")
+    assert dulces.repository_slug == "example/dulces"
+    assert dulces.provider_ci_required is False
+    redacted = config.redacted()["projects"]
+    assert isinstance(redacted, list)
+    assert redacted[1]["provider_ci_required"] is False
     with pytest.raises(ValueError, match="FACTORY_PROJECTS"):
         FactoryConfig.from_env({"FACTORY_PROJECTS": json.dumps(profiles + [profiles[0]])})
 

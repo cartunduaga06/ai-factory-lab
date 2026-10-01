@@ -196,6 +196,32 @@ def test_delivery_uses_explicit_required_ci_checks_without_branch_protection() -
     assert not any("/protection/" in path for path in client.paths)
 
 
+def test_delivery_can_use_successful_local_gates_without_provider_ci_queries() -> None:
+    from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
+
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+                provider_ci_required=False,
+            ),
+        )
+    )
+    client = DeliveryClient()
+    evidence = GitHubDeliveryEvidenceSource(client, registry).evidence(_identity())  # type: ignore[arg-type]
+
+    assert evidence.complete
+    assert not any(
+        marker in path
+        for path in client.paths
+        for marker in ("/protection/", "/status", "/check-runs")
+    )
+
+
 def test_delivery_fails_closed_when_configured_ci_check_is_missing() -> None:
     from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
 
