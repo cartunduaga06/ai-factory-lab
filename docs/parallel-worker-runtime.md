@@ -12,6 +12,17 @@ one. The Git
 provisioner gives each run a unique worktree path and branch. Project routing
 continues to resolve the task's registered repository before dispatch.
 
+If publication raises after a pool worker has a successful, validated latest
+run, the worker records `VALIDATING → BLOCKED` for that task with a sanitized
+reason naming its exact run and workspace. The original run, green gates,
+security review and transition history remain available for inspection. The
+pool reports the exception class for that session and continues its peers.
+`BLOCKED` is excluded from automatic selection after restart, so an unchanged
+workspace cannot be published repeatedly. Operators must resolve the
+publication blocker and explicitly authorize recovery; the publisher still
+refuses branches containing only an agent-created commit. One-shot `run` and
+`watch` keep their existing publication error behavior.
+
 Use `FACTORY_MAX_CONCURRENCY=2 python -m factory pool` after configuring
 the normal runtime credentials, project profiles and quality gates. `1` is the
 supported serial setting. `SIGINT` and `SIGTERM` stop new scheduling and allow

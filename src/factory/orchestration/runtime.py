@@ -197,6 +197,7 @@ class FactoryRuntime:
         self._backlog_reconcile = backlog_reconcile
         self._sprint = sprint
         self._recovery_policy = recovery_policy or RecoveryPolicy()
+        self._pool_mode = pool_mode
 
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
@@ -510,7 +511,34 @@ class FactoryRuntime:
         except SecurityReviewBlocked:
             current = self._block(task.task_id, "security review blocked publication")
             return self._result(current, refresh.run, refresh, "SECURITY_REVIEW_BLOCKED", intake)
+        except Exception:
+            if self._pool_mode:
+                self._block_failed_publication(task.task_id, refresh.run)
+            raise
         return self._result_from_publication(published, refresh.run, intake)
+
+    def _block_failed_publication(self, task_id: str, run: AgentRun) -> None:
+        """Keep a failed pool publication out of automatic restart selection."""
+        task = self._tasks.get(task_id)
+        workspace = run.workspace
+        latest = self._latest_run(task_id)
+        if (
+            task is None
+            or task.status is not TaskStatus.VALIDATING
+            or workspace is None
+            or latest is None
+            or latest.run_id != run.run_id
+            or latest.status is not RunStatus.SUCCEEDED
+            or latest.validation_outcome is not ValidationOutcome.READY_FOR_NEXT_PHASE
+            or latest.workspace is None
+            or latest.workspace.workspace_id != workspace.workspace_id
+            or self._pull_requests.get_for_run(run.run_id) is not None
+        ):
+            return
+        self._block(
+            task_id,
+            f"publication failed: run {run.run_id}, workspace {workspace.workspace_id}",
+        )
 
     def _run_database(
         self, task: FactoryTask, target_id: str, intake: IntakeSummary
