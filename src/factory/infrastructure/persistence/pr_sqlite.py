@@ -100,7 +100,10 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
             source = conn.execute(
                 f"""
                 SELECT run.task_id, run.project_id, run.workspace_id,
-                       task.target_repository, workspace.branch
+                       task.project_id AS task_project_id,
+                       task.target_repository,
+                       workspace.repository_slug AS workspace_repository,
+                       workspace.branch
                   FROM {PULL_REQUESTS_TABLE} AS pr
                   JOIN agent_runs AS run ON run.run_id = pr.run_id
                   JOIN tasks AS task ON task.task_id = run.task_id
@@ -112,7 +115,10 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
             destination = conn.execute(
                 """
                 SELECT run.task_id, run.project_id, run.workspace_id,
-                       task.target_repository, workspace.branch
+                       task.project_id AS task_project_id,
+                       task.target_repository,
+                       workspace.repository_slug AS workspace_repository,
+                       workspace.branch
                   FROM agent_runs AS run
                   JOIN tasks AS task ON task.task_id = run.task_id
                   JOIN workspaces AS workspace ON workspace.workspace_id = run.workspace_id
@@ -125,6 +131,10 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
                 or destination is None
                 or tuple(source) != tuple(destination)
                 or destination["task_id"] != pull_request.task_id
+                or source["project_id"] != source["task_project_id"]
+                or source["workspace_repository"] != source["target_repository"]
+                or destination["project_id"] != destination["task_project_id"]
+                or destination["workspace_repository"] != destination["target_repository"]
                 or destination["target_repository"] != pull_request.repository_slug
                 or destination["branch"] != pull_request.head_branch
             ):

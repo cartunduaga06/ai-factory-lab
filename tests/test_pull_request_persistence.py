@@ -354,6 +354,59 @@ def test_record_revision_rejects_run_from_another_task_without_changing_pr(db_pa
 
 
 @pytest.mark.parametrize(
+    ("table", "column", "value"),
+    [
+        ("agent_runs", "project_id", "wrong-project"),
+        ("workspaces", "repository_slug", "wrong/repository"),
+    ],
+)
+def test_record_revision_rejects_persisted_ownership_mismatch(
+    db_path: str, table: str, column: str, value: str
+) -> None:
+    _, runs, task_id, first_run_id = _seed(db_path)
+    first = runs.get_run(first_run_id)
+    assert first is not None and first.workspace is not None
+    second = runs.save_run(
+        AgentRun(
+            task_id=task_id,
+            adapter=AgentKind.OTHER,
+            run_id="run-2",
+            status=RunStatus.SUCCEEDED,
+            workspace=first.workspace,
+        )
+    )
+    repo = SqlitePullRequestRepository(db_path)
+    original = replace(_pr(first_run_id, task_id), commit_sha="a" * 40)
+    repo.save(original)
+    persisted_before = repo.get_for_run(first_run_id)
+    assert persisted_before is not None
+    events_before = SqliteAuditEventStore(db_path).for_task(task_id)
+
+    with sqlite3.connect(db_path) as conn:
+        if table == "agent_runs":
+            conn.execute(
+                "UPDATE agent_runs SET project_id = ? WHERE run_id = ?",
+                (value, second.run_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE workspaces SET repository_slug = ? WHERE workspace_id = ?",
+                (value, second.workspace.workspace_id),
+            )
+
+    with pytest.raises(ValueError, match="pull request revision identity mismatch"):
+        repo.record_revision(original, second.run_id, "b" * 40)
+
+    reopened = SqlitePullRequestRepository(db_path)
+    assert reopened.get_for_run(first_run_id) == persisted_before
+    assert reopened.get_for_run(second.run_id) is None
+    assert reopened.find_by_branch("example/target", original.head_branch) == persisted_before
+    events_after = SqliteAuditEventStore(db_path).for_task(task_id)
+    assert events_after == events_before
+    assert not [event for event in events_after if event.name == "PRUpdated"]
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("task_id", "other-task"),
