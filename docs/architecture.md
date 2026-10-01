@@ -611,6 +611,10 @@ Design intent:
 The worker never merges, deploys or mutates an Issue. Its terminal state is
 ``WAITING_HUMAN``, same as the one-shot runtime.
 
+For E8 parallel worker acceptance, verify that concurrent work has distinct
+task IDs, run IDs, workspaces and branches, and distinct repositories where
+applicable. Every code PR still stops at `WAITING_HUMAN` for human review.
+
 ## Configuration model
 
 `FactoryConfig.from_env()` reads environment variables only, groups them by
