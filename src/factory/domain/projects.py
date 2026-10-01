@@ -25,6 +25,7 @@ class ProjectProfile:
     deploy_policy: str = "human-only"
     git_host: str = "github.com"
     deploy_required: bool = False
+    provider_ci_required: bool = True
     required_ci_checks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -44,6 +45,8 @@ class ProjectProfile:
             raise ProjectRoutingError("unsupported deploy policy")
         if not isinstance(self.deploy_required, bool):
             raise ProjectRoutingError("invalid deploy requirement")
+        if not isinstance(self.provider_ci_required, bool):
+            raise ProjectRoutingError("invalid provider CI requirement")
         if any(not isinstance(name, str) or not name.strip() for name in self.required_ci_checks):
             raise ProjectRoutingError("invalid required CI check")
         if len(set(self.required_ci_checks)) != len(self.required_ci_checks):

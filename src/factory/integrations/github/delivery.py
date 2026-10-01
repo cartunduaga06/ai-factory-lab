@@ -44,8 +44,14 @@ class GitHubDeliveryEvidenceSource(DeliveryEvidenceSource):
             merged_sha = str(pr["merge_commit_sha"])
             commit = self._client.get(f"{root}/commits/{merged_sha}")
             integrated = isinstance(commit, Mapping) and commit.get("sha") == merged_sha
-            required = self._required_checks(root, profile.base_ref, profile.required_ci_checks)
-            ci = self._checks_pass(root, identity.commit_sha, required)
+            if profile.provider_ci_required:
+                required = self._required_checks(root, profile.base_ref, profile.required_ci_checks)
+                ci = self._checks_pass(root, identity.commit_sha, required)
+            else:
+                # A persisted SUCCEEDED run has already passed the project's required
+                # local gates before publication. This explicit operator-owned policy
+                # avoids requiring GitHub branch-protection/status/check permissions.
+                ci = True
             deployed = not profile.deploy_required or self._deployment_passed(root, merged_sha)
             return DeliveryEvidence(True, integrated, ci, deployed)
         except (GitHubError, ProjectRoutingError, KeyError, TypeError, ValueError):
