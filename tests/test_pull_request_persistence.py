@@ -283,6 +283,41 @@ def test_record_revision_rebinds_single_pr_to_latest_run(db_path: str) -> None:
     assert reopened.get_for_run(second.run_id) == updated
 
 
+def test_same_sha_rebind_records_one_update_with_new_run_attribution(db_path: str) -> None:
+    _, runs, task_id, first_run_id = _seed(db_path)
+    first = runs.get_run(first_run_id)
+    assert first is not None
+    second = runs.save_run(
+        AgentRun(
+            task_id=task_id,
+            adapter=AgentKind.OTHER,
+            run_id="run-2",
+            status=RunStatus.SUCCEEDED,
+            workspace=first.workspace,
+        )
+    )
+    repo = SqlitePullRequestRepository(db_path)
+    sha = "a" * 40
+    original = replace(_pr(first_run_id, task_id), commit_sha=sha)
+    repo.save(original)
+    before_events = SqliteAuditEventStore(db_path).for_task(task_id)
+
+    updated = repo.record_revision(original, second.run_id, sha)
+    # Retrying after the durable update is a no-op and must not append another event.
+    assert repo.record_revision(updated, second.run_id, sha) == updated
+
+    reopened = SqlitePullRequestRepository(db_path)
+    assert reopened.get_for_run(first_run_id) is None
+    assert reopened.get_for_run(second.run_id) == updated
+    events = SqliteAuditEventStore(db_path).for_task(task_id)
+    updates = [event for event in events if event.name == "PRUpdated"]
+    assert len(updates) == len([event for event in before_events if event.name == "PRUpdated"]) + 1
+    rebind = updates[-1]
+    assert rebind.run_id == "b9d17232a4c8"  # Safe public representation of run-2.
+    assert second.workspace is not None
+    assert rebind.workspace_id == second.workspace.workspace_id
+
+
 def test_record_revision_rejects_run_from_another_task_without_changing_pr(db_path: str) -> None:
     tasks, runs, task_id, first_run_id = _seed(db_path)
     other_task = tasks.save(

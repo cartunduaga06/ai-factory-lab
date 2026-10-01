@@ -240,7 +240,8 @@ END;
 CREATE_AUDIT_PR_UPDATE_TRIGGER = f"""
 CREATE TRIGGER IF NOT EXISTS audit_pr_update AFTER UPDATE ON {PULL_REQUESTS_TABLE}
 WHEN OLD.number IS NOT NEW.number OR OLD.url IS NOT NEW.url OR
- OLD.merged IS NOT NEW.merged OR OLD.commit_sha IS NOT NEW.commit_sha
+ OLD.merged IS NOT NEW.merged OR OLD.commit_sha IS NOT NEW.commit_sha OR
+ OLD.run_id IS NOT NEW.run_id
 BEGIN
 {_audit_insert("'PRUpdated'", "'pr:update:' || NEW.pull_request_id || ':' || (SELECT count(*) + 1 FROM audit_events WHERE aggregate_type = 'pull_request' AND aggregate_id = NEW.pull_request_id)", "(SELECT task_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.run_id", "pull_request", "NEW.pull_request_id", "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')", "NEW.run_id", "(SELECT workspace_id FROM agent_runs WHERE run_id = NEW.run_id)", "NEW.pull_request_id")}
 END;
