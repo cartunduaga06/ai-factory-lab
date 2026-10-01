@@ -67,6 +67,30 @@ class SqliteBacklogLinkRepository(SqliteRepository, BacklogLinkRepository):
             ).fetchone()
         return (str(row["provider"]), str(row["external_id"])) if row else None
 
+    def reconciliation_origin(self, task_id: str) -> tuple[str, str | None] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT reconciliation_origin, expected_work_item_id FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if row is None or row["reconciliation_origin"] not in {"trello", "github-direct"}:
+            return None
+        provider = str(row["reconciliation_origin"])
+        item_id = row["expected_work_item_id"]
+        if (provider == "trello") != (isinstance(item_id, str) and bool(item_id)):
+            return None
+        if provider == "github-direct":
+            with self._connect() as conn:
+                linked = conn.execute(
+                    "SELECT 1 FROM backlog_links b JOIN tasks t ON t.task_id = ? "
+                    "WHERE b.repository_slug = t.source_repository "
+                    "AND b.issue_number = t.source_issue_number",
+                    (task_id,),
+                ).fetchone()
+            if linked is not None:
+                return None
+        return provider, item_id
+
     def complete(self, item: WorkItem, issue: MaterializedIssue) -> None:
         if issue.repository_slug != item.target_repository or issue.number <= 0:
             raise ValueError("issue identity does not match backlog reservation")

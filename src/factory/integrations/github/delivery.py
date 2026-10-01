@@ -30,6 +30,7 @@ class GitHubDeliveryEvidenceSource(DeliveryEvidenceSource):
                 not isinstance(head, Mapping)
                 or not isinstance(base, Mapping)
                 or head.get("sha") != identity.commit_sha
+                or head.get("ref") != identity.branch
                 or _repository(head) != identity.repository_slug
                 or _repository(base) != identity.repository_slug
                 or base.get("ref") != profile.base_ref

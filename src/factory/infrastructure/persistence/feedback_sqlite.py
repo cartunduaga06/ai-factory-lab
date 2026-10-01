@@ -37,26 +37,41 @@ class SqliteFeedbackEventRepository(SqliteRepository, FeedbackEventRepository):
             match = conn.execute(
                 "SELECT 1 FROM tasks t JOIN agent_runs r ON r.task_id = t.task_id "
                 "JOIN workspaces w ON w.workspace_id = r.workspace_id "
-                "JOIN backlog_links b ON b.repository_slug = t.source_repository "
-                "AND b.issue_number = t.source_issue_number "
                 "JOIN pull_requests p ON p.task_id = t.task_id "
                 "AND p.repository_slug = t.target_repository "
-                "AND p.head_branch = w.branch "
+                "AND p.head_branch = w.branch AND p.run_id = r.run_id "
                 "WHERE t.task_id = ? AND t.project_id = ? AND t.target_repository = ? "
+                "AND t.source_provider = 'github' AND t.source_repository = ? "
                 "AND t.source_issue_number = ? AND t.status = 'DONE' "
                 "AND r.run_id = ? AND r.project_id = ? AND w.workspace_id = ? "
-                "AND p.number = ? AND p.commit_sha = ? AND b.project_id = ? "
-                "AND b.provider = ? AND b.external_id = ? AND b.state = 'MATERIALIZED'",
+                "AND w.repository_slug = ? AND p.number = ? AND p.commit_sha = ? "
+                "AND p.head_branch = ? "
+                "AND p.merged = 1 AND ((t.reconciliation_origin = 'trello' "
+                "AND t.expected_work_item_id = ? AND ? = 'trello' "
+                "AND EXISTS (SELECT 1 FROM backlog_links b WHERE b.project_id = ? "
+                "AND b.repository_slug = t.source_repository "
+                "AND b.issue_number = t.source_issue_number AND b.provider = 'trello' "
+                "AND b.external_id = t.expected_work_item_id AND b.state = 'MATERIALIZED')) "
+                "OR (t.reconciliation_origin = 'github-direct' "
+                "AND t.expected_work_item_id IS NULL AND ? IS NULL AND ? IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM backlog_links b "
+                "WHERE b.repository_slug = t.source_repository "
+                "AND b.issue_number = t.source_issue_number)))",
                 (
                     identity.task_id,
                     identity.project_id,
+                    identity.repository_slug,
                     identity.repository_slug,
                     identity.issue_number,
                     identity.run_id,
                     identity.project_id,
                     identity.workspace_id,
+                    identity.repository_slug,
                     identity.pull_request_number,
                     identity.commit_sha,
+                    identity.branch,
+                    identity.work_item_id,
+                    identity.work_item_provider,
                     identity.project_id,
                     identity.work_item_provider,
                     identity.work_item_id,

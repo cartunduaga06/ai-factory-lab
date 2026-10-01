@@ -32,6 +32,7 @@ from factory.domain.ports import TaskRepository
 from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
 from factory.infrastructure.persistence.schema import (
     AGENT_RUNS_TABLE,
+    BACKLOG_LINKS_TABLE,
     QA_REWORK_TABLE,
     TASKS_TABLE,
     TRANSITIONS_TABLE,
@@ -104,13 +105,24 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         source = task.source
         try:
             with self._connect() as conn:
+                link = (
+                    conn.execute(
+                        f"SELECT provider, external_id FROM {BACKLOG_LINKS_TABLE} "
+                        "WHERE repository_slug = ? AND issue_number = ? AND project_id = ? "
+                        "AND state = 'MATERIALIZED'",
+                        (source.repository_slug, source.issue_number, task.project_id),
+                    ).fetchone()
+                    if source is not None
+                    else None
+                )
                 conn.execute(
                     f"""
                     INSERT INTO {TASKS_TABLE} (
                         task_id, title, body, target_repository, project_id,
                         source_provider, source_repository, source_issue_number,
-                        status, labels, kind, blocked_reason, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        status, labels, kind, blocked_reason, created_at, updated_at,
+                        reconciliation_origin, expected_work_item_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.task_id,
@@ -127,6 +139,8 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                         task.blocked_reason,
                         encode_datetime(task.created_at),
                         encode_datetime(task.updated_at),
+                        str(link["provider"]) if link is not None else "github-direct",
+                        str(link["external_id"]) if link is not None else None,
                     ),
                 )
         except sqlite3.IntegrityError as exc:

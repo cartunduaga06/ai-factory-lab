@@ -116,6 +116,10 @@ class BacklogLinkRepository(ABC):
     ) -> tuple[str, str] | None:
         """Find the unique provider and external id for an exact project Issue."""
 
+    @abstractmethod
+    def reconciliation_origin(self, task_id: str) -> tuple[str, str | None] | None:
+        """Return the task's durable direct or backlog identity, if valid."""
+
 
 class DeliveryEvidenceSource(ABC):
     """Read provider confirmed integration, CI and deployment facts."""

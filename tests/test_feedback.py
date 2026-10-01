@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -71,24 +72,36 @@ def _registry() -> ProjectRegistry:
     )
 
 
-def _records(path: Path, project: str, number: int, card: str) -> tuple[FactoryTask, AgentRun]:
+def _records(
+    path: Path, project: str, number: int, card: str | None
+) -> tuple[FactoryTask, AgentRun]:
     database = str(path)
     tasks = SqliteTaskRepository(database)
     runs = SqliteRunRepository(database)
     prs = SqlitePullRequestRepository(database)
     links = SqliteBacklogLinkRepository(database)
     tasks.initialize()
-    item = WorkItem(
-        "trello", card, "Work", f"project_id: {project}", f"example/{project}", True, True, project
-    )
-    links.reserve(item)
-    links.begin_write(item)
-    links.complete(
-        item,
-        MaterializedIssue(
-            f"example/{project}", number, f"https://github.com/example/{project}/issues/{number}"
-        ),
-    )
+    if card is not None:
+        item = WorkItem(
+            "trello",
+            card,
+            "Work",
+            f"project_id: {project}",
+            f"example/{project}",
+            True,
+            True,
+            project,
+        )
+        links.reserve(item)
+        links.begin_write(item)
+        links.complete(
+            item,
+            MaterializedIssue(
+                f"example/{project}",
+                number,
+                f"https://github.com/example/{project}/issues/{number}",
+            ),
+        )
     task = tasks.save(
         FactoryTask(
             "Work",
@@ -99,7 +112,9 @@ def _records(path: Path, project: str, number: int, card: str) -> tuple[FactoryT
         )
     )
     workspace = Workspace(
-        repository_slug=task.target_repository, branch=f"factory/{card}", path=f"/tmp/{card}"
+        repository_slug=task.target_repository,
+        branch=f"factory/{card or number}",
+        path=f"/tmp/{card or number}",
     )
     run = runs.save_run(
         AgentRun(
@@ -123,6 +138,80 @@ def _records(path: Path, project: str, number: int, card: str) -> tuple[FactoryT
         )
     )
     return task, run
+
+
+def _service(
+    path: Path, complete: bool, issues: Issues, cards: Cards
+) -> FeedbackReconciliationService:
+    database = str(path)
+    return FeedbackReconciliationService(
+        SqliteTaskRepository(database),
+        SqliteRunRepository(database),
+        SqlitePullRequestRepository(database),
+        Evidence(complete),
+        issues,
+        cards,
+        SqliteFeedbackEventRepository(database),
+        SqliteBacklogLinkRepository(database),
+        _registry(),
+        SqliteSprintRepository(database),
+    )
+
+
+def test_github_direct_merge_then_complete_is_idempotent_across_restart(tmp_path: Path) -> None:
+    path = tmp_path / "direct.db"
+    task, run = _records(path, "project-a", 84, None)
+    issues, cards = Issues(), Cards()
+    assert not _service(path, False, issues, cards).reconcile(task, run)
+    assert SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]
+    assert SqliteTaskRepository(str(path)).get(task.task_id).status is TaskStatus.WAITING_HUMAN  # type: ignore[union-attr]
+    assert issues.closed == set()
+    assert cards.phases == {}
+    assert _service(path, True, issues, cards).reconcile(task, run)
+    assert _service(path, True, issues, cards).reconcile(task, run)
+    assert SqliteTaskRepository(str(path)).get(task.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+    assert issues.closed == {("example/project-a", 84)}
+    assert cards.phases == {}
+    names = [event.name for event in SqliteAuditEventStore(str(path)).for_task(task.task_id)]
+    assert names.count("PRUpdated") == 1
+    assert names.count("DeliveryReconciled") == 1
+
+
+def test_trello_task_with_lost_link_cannot_downgrade(tmp_path: Path) -> None:
+    path = tmp_path / "lost-link.db"
+    task, run = _records(path, "project-a", 7, "carda")
+    with sqlite3.connect(path) as conn:
+        conn.execute("DELETE FROM backlog_links WHERE external_id = 'carda'")
+    issues, cards = Issues(), Cards()
+    assert not _service(path, True, issues, cards).reconcile(task, run)
+    assert not SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]
+    assert issues.closed == set()
+    assert cards.phases == {}
+
+
+def test_github_direct_link_mismatch_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "mismatch.db"
+    task, run = _records(path, "project-a", 7, None)
+    item = WorkItem(
+        "trello",
+        "carda",
+        "Work",
+        "project_id: project-a",
+        "example/project-a",
+        True,
+        True,
+        "project-a",
+    )
+    links = SqliteBacklogLinkRepository(str(path))
+    links.reserve(item)
+    links.begin_write(item)
+    links.complete(
+        item,
+        MaterializedIssue("example/project-a", 7, "https://github.com/example/project-a/issues/7"),
+    )
+    issues, cards = Issues(), Cards()
+    assert not _service(path, True, issues, cards).reconcile(task, run)
+    assert not SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]
 
 
 def test_completion_repairs_done_issue_and_is_idempotent_across_restart(tmp_path: Path) -> None:
@@ -167,6 +256,7 @@ def test_completion_repairs_done_issue_and_is_idempotent_across_restart(tmp_path
         database = str(path)
         return FeedbackReconciliationService(
             SqliteTaskRepository(database),
+            SqliteRunRepository(database),
             SqlitePullRequestRepository(database),
             Evidence(complete),
             issues,
@@ -205,6 +295,7 @@ def test_project_identity_cannot_reconcile_another_project_card(tmp_path: Path) 
     issues, cards = Issues(), Cards()
     wrong = FeedbackReconciliationService(
         SqliteTaskRepository(str(path)),
+        SqliteRunRepository(str(path)),
         SqlitePullRequestRepository(str(path)),
         Evidence(True),
         issues,
@@ -223,6 +314,7 @@ def test_unverified_merge_does_not_change_local_pr(tmp_path: Path) -> None:
     task, run = _records(path, "project-a", 7, "carda")
     service = FeedbackReconciliationService(
         SqliteTaskRepository(str(path)),
+        SqliteRunRepository(str(path)),
         SqlitePullRequestRepository(str(path)),
         Evidence(True, merged=False),
         Issues(),
@@ -243,6 +335,7 @@ def test_mismatched_run_cannot_record_merge(tmp_path: Path) -> None:
     task, run = _records(path, "project-a", 7, "carda")
     service = FeedbackReconciliationService(
         SqliteTaskRepository(str(path)),
+        SqliteRunRepository(str(path)),
         SqlitePullRequestRepository(str(path)),
         Evidence(True),
         Issues(),
@@ -253,3 +346,14 @@ def test_mismatched_run_cannot_record_merge(tmp_path: Path) -> None:
     )
     assert not service.reconcile(task, replace(run, run_id="other-run"))
     assert not SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]
+
+
+def test_mismatched_workspace_cannot_record_merge(tmp_path: Path) -> None:
+    path = tmp_path / "workspace.db"
+    task, run = _records(path, "project-a", 7, None)
+    assert run.workspace is not None
+    issues, cards = Issues(), Cards()
+    changed = replace(run, workspace=replace(run.workspace, workspace_id="other-workspace"))
+    assert not _service(path, True, issues, cards).reconcile(task, changed)
+    assert not SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]
+    assert issues.closed == set()

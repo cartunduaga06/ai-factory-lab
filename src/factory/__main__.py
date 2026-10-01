@@ -858,27 +858,28 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
     adapter = _build_agent_adapter(config)
     write_client = GitHubWriteClient(config.github_write_token or "", config.github.api_url)
     feedback = None
-    if (
-        config.project_registry is not None
-        and config.trello_key is not None
-        and config.trello_token is not None
-        and sprint is not None
-    ):
-        feedback = FeedbackReconciliationService(
-            tasks,
-            pull_requests,
-            GitHubDeliveryEvidenceSource(read_client, config.project_registry),
-            GitHubIssueCompletionSink(write_client),
+    if config.project_registry is not None:
+        card_feedback = (
             TrelloWorkItemFeedbackSink(
                 config.trello_key,
                 config.trello_token,
                 config.project_registry,
                 done_list_id=config.trello_done_list_id,
-            ),
+            )
+            if config.trello_key is not None and config.trello_token is not None
+            else None
+        )
+        feedback = FeedbackReconciliationService(
+            tasks,
+            runs,
+            pull_requests,
+            GitHubDeliveryEvidenceSource(read_client, config.project_registry),
+            GitHubIssueCompletionSink(write_client),
+            card_feedback,
             SqliteFeedbackEventRepository(database.path),
             SqliteBacklogLinkRepository(database.path),
             config.project_registry,
-            SqliteSprintRepository(database.path),
+            SqliteSprintRepository(database.path) if sprint is not None else None,
         )
     operational_provisioner = (
         ScratchWorkspaceProvisioner(config.operational_scratch_root)

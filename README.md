@@ -16,9 +16,11 @@ checkout; the Factory does not create them.
 
 ## Post-review feedback and metrics
 
-For an authorized project Sprint, `factory run` rechecks the exact persisted
-Issue, task, run, workspace, published commit, PR and Trello card relationship
-after human review. A merged PR becomes a completed delivery only after GitHub
+After human review, `factory run` rechecks the exact persisted project, Issue,
+task, run, workspace, branch, published commit and PR relationship. Tasks
+materialized from Trello also require their original card link and Sprint
+identity; GitHub-direct tasks retain their direct origin and do not write Trello
+feedback. A merged PR becomes a completed delivery only after GitHub
 confirms the merge commit, the configured required branch checks pass, and a
 successful deployment is found when the project profile sets
 `"deploy_required": true`. A project may set `"required_ci_checks"` to an
@@ -30,9 +32,10 @@ deployment acceptance requirement. Deployment remains a human operation.
 
 After verification, the Factory marks the task DONE, writes one marker-based
 closure comment, removes `factory-ready`, closes the source Issue with reason
-`completed`, sets the Trello card to DONE/complete and, when
-`FACTORY_TRELLO_DONE_LIST_ID` is configured, moves it to that DONE list; then
-it records one final E1 `DeliveryReconciled` event. Repeated runs check the same identities and repair a
+`completed`, and records one final E1 `DeliveryReconciled` event. For
+Trello-backed tasks it also sets the card to DONE/complete and, when
+`FACTORY_TRELLO_DONE_LIST_ID` is configured, moves it to that DONE list.
+Repeated runs check the same identities and repair a
 previously DONE task whose Issue or card is still open. The next authorized
 WorkItem is eligible only after the final event is durable. Closed PRs are
 recorded as cancelled and projected to Trello; open reviewed PRs and failed

@@ -30,6 +30,7 @@ def _identity(project: str = "project-a") -> FeedbackIdentity:
         "workspace-1",
         "a" * 40,
         17,
+        "factory/carda",
         "sprint-one",
         "trello",
         "carda",
@@ -147,7 +148,11 @@ class DeliveryClient:
                 "merged": True,
                 "merged_at": "2026-09-30T22:33:47Z",
                 "merge_commit_sha": "b" * 40,
-                "head": {"sha": "a" * 40, "repo": {"full_name": "example/project-a"}},
+                "head": {
+                    "sha": "a" * 40,
+                    "ref": "factory/carda",
+                    "repo": {"full_name": "example/project-a"},
+                },
                 "base": {"ref": "main", "repo": {"full_name": "example/project-a"}},
             }
         if path.endswith("/commits/" + "b" * 40):
@@ -198,6 +203,18 @@ def test_delivery_fails_closed_when_configured_ci_check_is_missing() -> None:
         DeliveryClient(missing_check=True), _delivery_registry()
     ).evidence(_identity())
     assert not evidence.required_ci_passed
+    assert not evidence.complete
+
+
+def test_delivery_fails_closed_on_provider_head_branch_mismatch() -> None:
+    from dataclasses import replace
+
+    from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
+
+    evidence = GitHubDeliveryEvidenceSource(  # type: ignore[arg-type]
+        DeliveryClient(), _delivery_registry()
+    ).evidence(replace(_identity(), branch="factory/other"))
+    assert not evidence.merged
     assert not evidence.complete
 
 

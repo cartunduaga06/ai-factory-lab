@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -467,6 +467,8 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
     f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
     f"ALTER TABLE {BACKLOG_LINKS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
     f"ALTER TABLE {PULL_REQUESTS_TABLE} ADD COLUMN commit_sha TEXT;",
+    f"ALTER TABLE {TASKS_TABLE} ADD COLUMN reconciliation_origin TEXT;",
+    f"ALTER TABLE {TASKS_TABLE} ADD COLUMN expected_work_item_id TEXT;",
 )
 
 #: Statements applied, in order, by :func:`initialize_schema`.
