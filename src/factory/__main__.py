@@ -797,7 +797,7 @@ def _run_watch(config: FactoryConfig) -> int:
 def _run_pool(config: FactoryConfig) -> int:
     """Run independent task sessions while preserving durable human gates."""
     try:
-        _build_runtime(config)
+        _build_runtime(config, pool_mode=True)
     except (ConfigurationError, UnsupportedDatabaseError) as exc:
         print(f"configuration error: {exc}")
         return EXIT_CONFIG_ERROR
@@ -808,7 +808,7 @@ def _run_pool(config: FactoryConfig) -> int:
     previous_handlers = _install_stop_handlers(stop)
     try:
         WorkerPool(
-            lambda: _build_runtime(config),
+            lambda: _build_runtime(config, pool_mode=True),
             max_concurrency=config.max_concurrency,
             idle_interval=config.watch_idle_interval,
             should_stop=stop.is_set,
@@ -849,7 +849,7 @@ def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
     return installed
 
 
-def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
+def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> FactoryRuntime:
     """Validate the run prerequisites and build the production runtime graph."""
     repository = _resolve_repository(config)
     if (
@@ -874,7 +874,9 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
     database = config.database
-    tasks = SqliteTaskRepository(database.path)
+    tasks = SqliteTaskRepository(
+        database.path, max_active_claims=config.max_concurrency if pool_mode else 1
+    )
     runs = SqliteRunRepository(database.path)
     pull_requests = SqlitePullRequestRepository(database.path)
     tasks.initialize()
@@ -969,6 +971,8 @@ def _build_runtime(config: FactoryConfig) -> FactoryRuntime:
         gate_specs=config.quality_gates,
         registry=config.project_registry,
         feedback=feedback,
+        pool_mode=pool_mode,
+        pool_backlog_links=(SqliteBacklogLinkRepository(database.path) if pool_mode else None),
         task_gate_specs=config.task_quality_gates,
         gate_runner=LocalQualityGateRunner(),
         revision_inspector=GitWorkspaceRevisionInspector(),

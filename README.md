@@ -21,7 +21,8 @@ local source checkout, base branch, quality gates, context profile and
 `human-only` deploy policy. The Trello card supplies one line such as
 `project_id: dulces-el-jericoano`; it cannot select a repository. Unknown ids
 and repository mismatches are rejected before Issue creation and recorded as
-sanitized routing rejections. Global WIP stays at one.
+sanitized routing rejections. `run` and `watch` retain WIP one; `pool` admits
+up to `FACTORY_MAX_CONCURRENCY` independent tasks (at most two).
 
 The configured checkout must already exist with an HTTPS `origin` matching its
 registered repository. The Dulces E2E pilot requires its real repository and

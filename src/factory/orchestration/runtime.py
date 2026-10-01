@@ -33,6 +33,7 @@ from factory.domain.operational import (
     parse_scratch_artifact,
 )
 from factory.domain.ports import (
+    BacklogLinkRepository,
     DatabaseReadonlyInspector,
     OperationalAcceptance,
     PullRequestRepository,
@@ -119,11 +120,14 @@ class FactoryRuntime:
         context_builder: ContextPackBuilder | None = None,
         registry: ProjectRegistry | None = None,
         feedback: FeedbackReconciliationService | None = None,
+        pool_mode: bool = False,
+        pool_backlog_links: BacklogLinkRepository | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
         self._registry = registry
         self._feedback = feedback
+        self._pool_backlog_links = pool_backlog_links
         self._tasks = tasks
         self._runs = runs
         self._adapter = adapter
@@ -176,7 +180,9 @@ class FactoryRuntime:
             runs,
             self._tracking,
             adapter,
-            allows=sprint.allows if sprint else None,
+            allows=self._pool_allows
+            if pool_mode and sprint
+            else (sprint.allows if sprint else None),
             registry=registry,
         )
         self._pull_requests = pull_requests
@@ -237,15 +243,17 @@ class FactoryRuntime:
             TaskStatus.READY,
             TaskStatus.DISCOVERED,
         )
-        return tuple(task.task_id for status in statuses for task in self._selectable(status))
+        return tuple(
+            task.task_id for status in statuses for task in self._selectable(status, pool=True)
+        )
 
     def run_task(self, task_id: str) -> RuntimeResult:
         """Resume exactly one named task; dispatch still claims it atomically."""
         task = self._tasks.get(task_id)
         if task is None:
             raise KeyError(task_id)
-        if self._sprint is not None and not self._sprint.allows(task):
-            raise ValueError("task is not authorized by the active sprint")
+        if not self._pool_allows(task):
+            raise ValueError("task is not authorized for pool execution")
         try:
             return self._run_once(selected_task=task, do_intake=False)
         finally:
@@ -674,11 +682,27 @@ class FactoryRuntime:
                 return tasks[0]
         return None
 
-    def _selectable(self, status: TaskStatus) -> list[FactoryTask]:
+    def _pool_allows(self, task: FactoryTask) -> bool:
+        if self._sprint is None:
+            return True
+        return self._sprint.allows(task) or (
+            task.source is not None
+            and task.source.provider == "github"
+            and task.source.repository_slug == task.target_repository
+            and self._pool_backlog_links is not None
+            and self._pool_backlog_links.reconciliation_origin(task.task_id)
+            == ("github-direct", None)
+        )
+
+    def _selectable(self, status: TaskStatus, *, pool: bool = False) -> list[FactoryTask]:
         return [
             task
             for task in self._tasks.list(status)
-            if self._sprint is None or self._sprint.allows(task)
+            if (
+                self._pool_allows(task)
+                if pool
+                else self._sprint is None or self._sprint.allows(task)
+            )
         ]
 
     def _block(self, task_id: str, reason: str) -> FactoryTask:

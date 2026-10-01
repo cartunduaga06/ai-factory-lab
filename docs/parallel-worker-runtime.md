@@ -4,8 +4,11 @@ The pool schedules distinct task IDs into at most two process-local worker
 sessions. A session constructs its own `FactoryRuntime` and adapter. The SQLite
 task, run, workspace and PR records remain authoritative; the process-local
 session is discarded after a pass. After restart, active lifecycle states are
-selected before READY work and the persisted run is resumed. Dispatch uses the
-task status compare-and-swap and active-run uniqueness constraint, while the Git
+selected before READY work and the persisted run is resumed. Dispatch uses a
+SQLite claim transaction that counts distinct active task/run identities up to
+the configured pool capacity, the task status compare-and-swap, and the
+active-run uniqueness constraint. One-shot `run` and `watch` retain capacity
+one. The Git
 provisioner gives each run a unique worktree path and branch. Project routing
 continues to resolve the task's registered repository before dispatch.
 
@@ -26,9 +29,11 @@ separate run and verify the other continues; restart the orchestrator while
 workers are active and verify each resumes its persisted run. Stop without
 merging either PR.
 
-The existing Trello Sprint authorization model exposes only its current ordered
-step. A pool pass honors that gate, so two Trello Sprint steps cannot yet run
-concurrently. Parallel acceptance therefore requires two independently eligible
-GitHub-direct tasks. The real Dulces task and PR evidence must be supplied by an
-authorized environment with that repository and credentials; local tests alone
-cannot satisfy the final E2E gate.
+The Trello Sprint authorizes only its current ordered step. In pool mode, a
+GitHub-direct Issue is independently authorized by its `factory-ready` intake
+eligibility and durable direct origin; eligibility is checked again before
+dispatch. A task linked to a Trello WorkItem cannot use this direct route, and
+an inactive Sprint step stays ineligible. Thus two independently authorized
+GitHub-direct Issues can run while a Sprint is configured. The real Dulces task
+and PR evidence must be supplied by an authorized environment with that
+repository and credentials; local tests alone cannot satisfy the final E2E gate.

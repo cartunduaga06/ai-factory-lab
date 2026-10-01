@@ -32,6 +32,7 @@ from tests.fake_workspace import (
     FakeWorkspaceProvisioner,
     specs,
 )
+from tests.test_runtime import FakeIssueSource
 
 
 class Source:
@@ -133,6 +134,79 @@ def test_authorized_order_pause_resume_and_trace_survive_restart(tmp_path: Path)
         "SprintAdvanced",
         "WorkItemSelected",
     ]
+
+
+def test_pool_accepts_direct_issue_with_sprint_but_rejects_other_trello_step(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    sprint, tasks = _service(path, source, sink)
+    manifest = sprint.draft("pool-sprint", (("a", ()), ("b", ())))
+    sprint.authorize(manifest)
+    assert sprint.prepare()
+    links = SqliteBacklogLinkRepository(str(path))
+    first = tasks.save(
+        FactoryTask(
+            "sprint step",
+            "example/control",
+            status=TaskStatus.READY,
+            source=TaskSource("github", "example/control", 1),
+        )
+    )
+    direct = tasks.save(
+        FactoryTask(
+            "independent issue",
+            "example/control",
+            status=TaskStatus.READY,
+            source=TaskSource("github", "example/control", 86),
+        )
+    )
+    other_item = source.get_item("b")
+    assert links.reserve(other_item)
+    assert links.begin_write(other_item)
+    links.complete(
+        other_item,
+        MaterializedIssue("example/control", 2, "https://github.com/example/control/issues/2"),
+    )
+    later = tasks.save(
+        FactoryTask(
+            "later sprint step",
+            "example/control",
+            status=TaskStatus.READY,
+            source=TaskSource("github", "example/control", 2),
+        )
+    )
+    runs = SqliteRunRepository(str(path))
+    prs = SqlitePullRequestRepository(str(path))
+    runs.initialize()
+    prs.initialize()
+    runtime = FactoryRuntime(
+        intake=IssueIntakeService(FakeIssueSource(direct), tasks),
+        intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
+        tasks=tasks,
+        runs=runs,
+        adapter=FakeAgentAdapter(kind=AgentKind.OTHER),
+        provisioner=FakeWorkspaceProvisioner(),
+        workspace_root=str(tmp_path / "workspaces"),
+        gate_specs=specs("tests"),
+        gate_runner=FakeQualityGateRunner(),
+        revision_inspector=FakeRevisionInspector(),
+        publisher=FakeWorkspacePublisher(),
+        pull_request_sink=FakePullRequestSink(),
+        pull_requests=prs,
+        base_branch="main",
+        security_review=FakeSecurityReviewGate(),
+        sprint=sprint,
+        pool_mode=True,
+        pool_backlog_links=links,
+    )
+    candidates = runtime.pool_candidates()
+    assert first.task_id in candidates
+    assert direct.task_id in candidates
+    assert later.task_id not in candidates
+    with pytest.raises(ValueError, match="not authorized"):
+        runtime.run_task(later.task_id)
 
 
 def test_changed_snapshot_pauses_before_e2_write(tmp_path: Path) -> None:
