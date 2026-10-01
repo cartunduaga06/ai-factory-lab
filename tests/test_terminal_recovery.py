@@ -93,9 +93,24 @@ def timeout_case(tmp_path: Path):
         workspace_root=str(root),
         base_branch="main",
         source_is_eligible=lambda _: availability[0],
+        workspace_is_clean=lambda *_: True,
         sprint=_AllowingSprint(),  # type: ignore[arg-type]
     )
     return service, task, run, root, tasks, runs, prs, sink, availability
+
+
+def _set_worker_failure(root: Path, run: AgentRun) -> None:
+    (root / ".factory-codex-runs" / (run.run_id + ".result")).write_text(
+        json.dumps(
+            {
+                "status": "FAILED",
+                "exit_code": 1,
+                "stdout_bytes": 0,
+                "stderr_bytes": 128,
+                "timed_out": False,
+            }
+        )
+    )
 
 
 def test_terminal_failed_remains_terminal_without_explicit_recovery(timeout_case) -> None:
@@ -127,6 +142,35 @@ def test_operator_recovery_preserves_workspace_history_and_audit(timeout_case) -
     )
     assert tasks.get(task.task_id).blocked_reason == f"terminal-timeout-recovery:{run.run_id}"
     assert root.exists()
+
+
+def test_clean_nonzero_worker_failure_can_be_recovered_explicitly(timeout_case) -> None:
+    service, task, run, root, tasks, runs, _, _, _ = timeout_case
+    _set_worker_failure(root, run)
+    assert run.workspace is not None
+
+    with pytest.raises(TerminalRecoveryRefused, match="acknowledgement"):
+        service.authorize_worker_failure(task.task_id, run.run_id, acknowledge_failure=False)
+    result = service.authorize_worker_failure(task.task_id, run.run_id, acknowledge_failure=True)
+    assert result.status is TaskStatus.BLOCKED
+    assert result.blocked_reason == f"terminal-worker-recovery:{run.run_id}"
+    assert [r.run_id for r in runs.list_runs(task.task_id)] == [run.run_id]
+    assert [(t.from_status, t.to_status) for t in tasks.history(task.task_id)] == [
+        (TaskStatus.FAILED, TaskStatus.BLOCKED)
+    ]
+    ready = RetryService(tasks, runs, RecoveryPolicy(base_backoff_seconds=0)).retry(task.task_id)
+    assert ready.status is TaskStatus.READY
+
+
+def test_worker_failure_recovery_rejects_dirty_workspace(timeout_case) -> None:
+    service, task, run, root, tasks, _, _, _, _ = timeout_case
+    _set_worker_failure(root, run)
+    assert run.workspace is not None
+    service._workspace_is_clean = lambda *_: False
+    with pytest.raises(TerminalRecoveryRefused, match="unpublished changes"):
+        service.authorize_worker_failure(task.task_id, run.run_id, acknowledge_failure=True)
+    assert tasks.get(task.task_id).status is TaskStatus.FAILED
+    assert tasks.history(task.task_id) == []
 
 
 @pytest.mark.parametrize(
@@ -276,6 +320,7 @@ def test_cli_recover_timeout_is_explicit_and_does_not_dispatch(
     monkeypatch.setattr(cli, "_build_sprint", lambda *a, **kw: _AllowingSprint())
     monkeypatch.setattr(cli, "GitHubIssueSource", lambda *a, **kw: FakeIssueSource(task))
     monkeypatch.setattr(cli, "GitHubPullRequestSink", lambda *a, **kw: FakePullRequestSink())
+    monkeypatch.setattr(cli, "git_workspace_is_clean_unpublished", lambda *_: True)
     monkeypatch.setattr(
         cli, "GitWorktreeWorkspaceProvisioner", lambda *a, **kw: FakeWorkspaceProvisioner()
     )
@@ -291,6 +336,51 @@ def test_cli_recover_timeout_is_explicit_and_does_not_dispatch(
     assert len(runs.list_runs(task.task_id)) == 1
     assert cli.main([*argv, "--acknowledge-timeout"]) == cli.EXIT_INTAKE_ERROR
     assert len(tasks.history(task.task_id)) == 1
+
+
+def test_cli_recover_worker_failure_is_explicit_and_does_not_dispatch(
+    timeout_case, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from factory import __main__ as cli
+    from factory.infrastructure.config import FactoryConfig
+    from tests.test_runtime import FakeIssueSource
+
+    _, task, run, root, tasks, runs, _, _, _ = timeout_case
+    _set_worker_failure(root, run)
+    assert run.workspace is not None
+    env = {
+        "DATABASE_URL": f"sqlite:///{tasks.path}",
+        "FACTORY_GITHUB_REPO": "example/control",
+        "FACTORY_TARGET_REPO": "example/target",
+        "FACTORY_SOURCE_CHECKOUT": str(root),
+        "FACTORY_WORKSPACE_ROOT": str(root),
+        "GITHUB_TOKEN": "fake-read-token",
+        "GITHUB_WRITE_TOKEN": "fake-write-token",
+    }
+    config = FactoryConfig.from_env(env)
+    monkeypatch.setattr(cli.FactoryConfig, "from_env", lambda: config)
+    monkeypatch.setattr(cli, "_build_sprint", lambda *a, **kw: None)
+    monkeypatch.setattr(cli, "GitHubIssueSource", lambda *a, **kw: FakeIssueSource(task))
+    monkeypatch.setattr(cli, "GitHubPullRequestSink", lambda *a, **kw: FakePullRequestSink())
+    monkeypatch.setattr(cli, "git_workspace_is_clean_unpublished", lambda *_: True)
+    monkeypatch.setattr(
+        cli, "GitWorktreeWorkspaceProvisioner", lambda *a, **kw: FakeWorkspaceProvisioner()
+    )
+    argv = [
+        "recover-worker-failure",
+        "--task-id",
+        task.task_id,
+        "--run-id",
+        run.run_id,
+    ]
+    assert cli.main(argv) == cli.EXIT_INTAKE_ERROR
+    assert "acknowledge-worker-failure" in capsys.readouterr().out
+    assert cli.main([*argv, "--acknowledge-worker-failure"]) == cli.EXIT_OK
+    output = capsys.readouterr().out
+    assert "BLOCKED" in output
+    assert "fake-read-token" not in output
+    assert "fake-write-token" not in output
+    assert len(runs.list_runs(task.task_id)) == 1
 
 
 def test_terminal_recovery_without_authorized_sprint_is_refused(timeout_case) -> None:

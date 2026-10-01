@@ -30,6 +30,8 @@ DEFAULT_DATABASE_PATH = "./factory.db"
 DEFAULT_TARGET_BRANCH = "main"
 DEFAULT_RUN_POLL_INTERVAL = 5.0
 DEFAULT_RUN_TIMEOUT = 1800.0
+DEFAULT_CODEX_MODEL = "gpt-6-luna"
+DEFAULT_CODEX_REASONING_EFFORT = "low"
 # Idle wait between watch iterations when no eligible work exists. Positive by
 # default so an unattended worker cannot spin against the GitHub API.
 DEFAULT_WATCH_IDLE_INTERVAL = 60.0
@@ -281,6 +283,8 @@ class FactoryConfig:
     quality_gates: tuple[QualityGateSpec, ...] = ()
     task_quality_gates: Mapping[str, tuple[QualityGateSpec, ...]] = field(default_factory=dict)
     codex_ecc_skill: str | None = None
+    codex_model: str = DEFAULT_CODEX_MODEL
+    codex_reasoning_effort: str = DEFAULT_CODEX_REASONING_EFFORT
     # Separate WRITE credential for Phase 5 publication (push + PR). Distinct from
     # the read-only intake token: the factory must not implicitly reuse a
     # read-scoped credential for writes.
@@ -344,6 +348,14 @@ class FactoryConfig:
         ecc_skill = _clean(source.get("FACTORY_CODEX_ECC_SKILL"))
         if ecc_skill not in (None, "verification-loop", "auto"):
             raise ValueError("FACTORY_CODEX_ECC_SKILL must be auto, verification-loop or unset")
+        codex_model = _clean(source.get("FACTORY_CODEX_MODEL")) or DEFAULT_CODEX_MODEL
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", codex_model) is None:
+            raise ValueError("FACTORY_CODEX_MODEL is invalid")
+        codex_reasoning_effort = (
+            _clean(source.get("FACTORY_CODEX_REASONING_EFFORT")) or DEFAULT_CODEX_REASONING_EFFORT
+        ).lower()
+        if codex_reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError("FACTORY_CODEX_REASONING_EFFORT is invalid")
         raw_env = (_clean(source.get("FACTORY_ENV")) or Environment.DEVELOPMENT.value).lower()
         try:
             environment = Environment(raw_env)
@@ -382,6 +394,8 @@ class FactoryConfig:
             project_registry=project_registry,
             task_quality_gates=task_quality_gates,
             codex_ecc_skill=ecc_skill,
+            codex_model=codex_model,
+            codex_reasoning_effort=codex_reasoning_effort,
             github_write_token=_clean(source.get("GITHUB_WRITE_TOKEN")),
             github_write_username=write_username,
             target_default_branch=(
@@ -483,6 +497,8 @@ class FactoryConfig:
                 for ref, specs in self.task_quality_gates.items()
             },
             "codex_ecc_skill": self.codex_ecc_skill,
+            "codex_model": self.codex_model,
+            "codex_reasoning_effort": self.codex_reasoning_effort,
             "github_write_token": "***" if self.github_write_token else None,
             "github_write_username": self.github_write_username,
             "target_default_branch": self.target_default_branch,

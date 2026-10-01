@@ -45,13 +45,21 @@ class CodexAdapter(AgentAdapterBase):
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         environment: Mapping[str, str] | None = None,
         ecc_skill: str | None = None,
+        model: str = "gpt-6-luna",
+        reasoning_effort: str = "low",
     ) -> None:
         if timeout <= 0:
             raise ValueError("Codex timeout must be positive")
+        if not model.strip():
+            raise ValueError("Codex model must not be empty")
+        if reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError("invalid Codex reasoning effort")
         self._executable = executable
         self._timeout = timeout
         self._environment = environment
         self._ecc_skill = ecc_skill
+        self._model = model
+        self._reasoning_effort = reasoning_effort
 
     @property
     def kind(self) -> AgentKind:
@@ -126,6 +134,8 @@ class CodexAdapter(AgentAdapterBase):
                     run.run_id,
                     str(self._timeout),
                     task.kind.value,
+                    self._model,
+                    self._reasoning_effort,
                 ],
                 cwd=factory_source,
                 env=environment,

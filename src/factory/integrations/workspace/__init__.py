@@ -8,6 +8,7 @@ filesystem and a version-control tool, so it lives here — outside ``domain`` a
 
 from factory.integrations.workspace.git import GitWorktreeWorkspaceProvisioner
 from factory.integrations.workspace.git_publish import GitWorkspacePublisher
+from factory.integrations.workspace.recovery import git_workspace_is_clean_unpublished
 from factory.integrations.workspace.revision import GitWorkspaceRevisionInspector
 from factory.integrations.workspace.shared_policy import (
     PRIVATE_DIRECTORY_MODE,
@@ -36,6 +37,7 @@ __all__ = [
     "GitWorktreeWorkspaceProvisioner",
     "SharedWorkspacePolicyError",
     "classify_ignored_paths",
+    "git_workspace_is_clean_unpublished",
     "normalize_workspace",
     "normalize_workspace_path",
     "target_directory_mode",
