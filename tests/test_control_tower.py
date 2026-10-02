@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs
 
+from factory.__main__ import main
 from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskStatus
 from factory.domain.models import (
     AgentRun,
@@ -24,6 +27,7 @@ from factory.infrastructure.persistence import (
     SqliteRunRepository,
     SqliteTaskRepository,
 )
+from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.status_http import render_status
 from factory.integrations.trello.status import TrelloStatusChannel
@@ -31,6 +35,64 @@ from factory.orchestration.status import StatusService
 from factory.orchestration.status_events import StatusEventPublisher
 from factory.orchestration.tracking import RunTrackingService
 from tests.fake_adapter import FakeAgentAdapter
+
+
+def _invoke_status_cli(database_url: str, port: int) -> None:
+    with patch.dict(
+        "os.environ",
+        {"DATABASE_URL": database_url, "FACTORY_HEARTBEAT_INTERVAL": "180"},
+        clear=True,
+    ):
+        main(["status", "--serve", "--host", "127.0.0.1", "--port", str(port)])
+
+
+class _CapturedResponse:
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+        self.status: int | None = None
+        self.body = b""
+
+    def write(self, body: bytes) -> None:
+        self.body = body
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, name: str, value: str) -> None:
+        self.headers[name] = value
+
+    def end_headers(self) -> None:
+        return
+
+
+class _InProcessStatusServer:
+    handler: type
+    instance: _InProcessStatusServer
+
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        self.handler = handler
+        self.instance = self
+
+    def __enter__(self) -> _InProcessStatusServer:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return
+
+    def serve_forever(self) -> None:
+        for path in self.paths:
+            request = self.handler.__new__(self.handler)
+            request.path = path
+            request.headers = {"Accept": "application/json"}
+            request.wfile = _CapturedResponse()
+            request.send_response = request.wfile.send_response
+            request.send_header = request.wfile.send_header
+            request.end_headers = request.wfile.end_headers
+            request.do_GET()
+            self.responses[path] = request.wfile
+
+    paths: tuple[str, ...] = ()
+    responses: dict[str, _CapturedResponse] = {}
 
 
 class ControlTowerTests(unittest.TestCase):
@@ -105,9 +167,9 @@ class ControlTowerTests(unittest.TestCase):
         configured_dir = Path(self.temporary.name) / "configured"
         configured_dir.mkdir()
         fallback_dir = Path(self.temporary.name) / "fallback"
+        fallback_dir.mkdir(exist_ok=True)
         configured_path = f"sqlite:///{configured_dir / 'production.sqlite'}"
-        configured_config = FactoryConfig.from_env({"DATABASE_URL": configured_path})
-        database_path = configured_config.database.path
+        database_path = FactoryConfig.from_env({"DATABASE_URL": configured_path}).database.path
         configured_tasks = SqliteTaskRepository(database_path)
         configured_runs = SqliteRunRepository(database_path)
         configured_prs = SqlitePullRequestRepository(database_path)
@@ -120,20 +182,50 @@ class ControlTowerTests(unittest.TestCase):
             status=TaskStatus.READY,
         )
         configured_tasks.save(known_task)
-        service = StatusService(
-            configured_tasks,
-            configured_runs,
-            configured_prs,
-            heartbeat_interval=180,
-            missed_heartbeats=2,
+        fallback_path = str(fallback_dir / "factory.db")
+        fallback_tasks = SqliteTaskRepository(fallback_path)
+        fallback_runs = SqliteRunRepository(fallback_path)
+        fallback_prs = SqlitePullRequestRepository(fallback_path)
+        for repository in (fallback_tasks, fallback_runs, fallback_prs):
+            repository.initialize()
+        fallback_task = FactoryTask(
+            title="Fallback database task",
+            target_repository="example/project",
+            source=TaskSource("github", "example/project", 999),
+            status=TaskStatus.READY,
         )
+        fallback_tasks.save(fallback_task)
+        audit = SqliteAuditEventStore(database_path)
+        known_event = audit.for_task(known_task.task_id)[0]
 
-        snapshot = service.for_task(known_task.task_id)
-        self.assertEqual(snapshot.task_id, str(known_task.task_id))
-        self.assertEqual(snapshot.phase, "READY")
-        fallback_db = fallback_dir / "factory.db"
-        self.assertEqual(fallback_db, Path(self.temporary.name) / "fallback" / "factory.db")
-        self.assertNotEqual(fallback_db, Path(database_path))
+        original_cwd = Path.cwd()
+        os.chdir(fallback_dir)
+        self.addCleanup(os.chdir, original_cwd)
+        _InProcessStatusServer.paths = (
+            f"/factory/status?task_id={known_task.task_id}",
+            f"/factory/trace?task_id={known_task.task_id}",
+        )
+        _InProcessStatusServer.responses = {}
+        with patch("factory.integrations.status_http.ThreadingHTTPServer", _InProcessStatusServer):
+            _invoke_status_cli(configured_path, 18765)
+        status_response = next(
+            response
+            for path, response in _InProcessStatusServer.responses.items()
+            if path.startswith("/factory/status")
+        )
+        trace_response = next(
+            response
+            for path, response in _InProcessStatusServer.responses.items()
+            if path.startswith("/factory/trace")
+        )
+        self.assertEqual(status_response.status, 200)
+        self.assertEqual(trace_response.status, 200)
+        status_body = status_response.body.decode()
+        self.assertIn(known_task.task_id, status_body)
+        self.assertNotIn(fallback_task.task_id, status_body)
+        trace_body = trace_response.body.decode()
+        self.assertIn(known_event.name, trace_body)
+        self.assertNotIn(fallback_task.task_id, trace_body)
 
     def test_config_masks_trello_credentials_and_bounds_heartbeat(self) -> None:
         config = FactoryConfig.from_env(

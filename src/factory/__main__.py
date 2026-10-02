@@ -532,12 +532,9 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
         return EXIT_CONFIG_ERROR
     try:
         path = config.database.path
-        tasks = SqliteTaskRepository(path)
-        runs = SqliteRunRepository(path)
-        prs = SqlitePullRequestRepository(path)
-        tasks.initialize()
-        runs.initialize()
-        prs.initialize()
+        tasks = SqliteTaskRepository(path, read_only=True)
+        runs = SqliteRunRepository(path, read_only=True)
+        prs = SqlitePullRequestRepository(path, read_only=True)
         service = StatusService(
             tasks,
             runs,
@@ -546,13 +543,11 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
             missed_heartbeats=config.missed_heartbeats,
         )
         if serve:
-            publisher = _status_publisher(config)
             serve_status(
                 service,
                 host,
                 port,
-                publisher.flush if publisher else None,
-                SqliteAuditEventStore(path),
+                audit=SqliteAuditEventStore(path, read_only=True),
             )
         else:
             from dataclasses import asdict

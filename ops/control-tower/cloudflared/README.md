@@ -15,20 +15,24 @@ credential, account, zone, hostname and identity policy are external
 prerequisites and cannot be provisioned by this repository. Do not use a quick
 tunnel or a public hostname without an Access policy.
 
-Install `cloudflared` using the host's approved package process. Copy
+The units target the current ai-server deployment contract: the existing
+`carlos` account, checkout at `/srv/ai-factory/control-plane`, its `.venv`,
+and `/usr/local/bin/cloudflared`. Install `cloudflared` at that path using the
+host's approved package process. Copy
 `config.yml.example` to `/etc/cloudflared/control-tower.yml`, fill the tunnel UUID
 and hostname, and install the dashboard-issued credential JSON at
 `/etc/cloudflared/control-tower-credentials.json` with mode `0600`, owned by the
-cloudflared service account. These files are secrets or environment-specific
+`carlos` service account. These files are secrets or environment-specific
 configuration and must not be committed.
 
 Install `systemd/factory-control-tower.service` and
 `systemd/cloudflared-control-tower.service` into `/etc/systemd/system/`, then
 reload systemd and enable/start both units. The Factory unit loads
 `/srv/ai-factory/config/runtime.env`, uses the production `DATABASE_URL` from
-that file, and binds only `127.0.0.1:8765`. The file must be readable by the
-`factory` service account and should not be world-readable. Keep the database
-read-only to this service account. The cloudflared unit runs the persistent named
+that file, and binds only `127.0.0.1:8765`. The status repositories use SQLite
+URI `mode=ro`, do not initialize or migrate schema, and run from the read-only
+checkout. The env file must be readable by `carlos` and should not be
+world-readable. The cloudflared unit runs the persistent named
 tunnel against its dedicated config path and restarts after process/host restart.
 Keep port 8765 closed at the host firewall as defense in depth. Do not add any
 other ingress rule or origin service.

@@ -5,9 +5,9 @@ After=network-online.target factory-control-tower.service
 
 [Service]
 Type=simple
-User=cloudflared
-Group=cloudflared
-ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --config /etc/cloudflared/control-tower.yml run
+User=carlos
+Group=carlos
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel --config /etc/cloudflared/control-tower.yml run
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

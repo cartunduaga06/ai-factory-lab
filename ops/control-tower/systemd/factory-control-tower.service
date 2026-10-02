@@ -4,18 +4,18 @@ After=network.target
 
 [Service]
 Type=simple
-User=factory
-Group=factory
-WorkingDirectory=/srv/ai-factory/current
+User=carlos
+Group=carlos
+WorkingDirectory=/srv/ai-factory/control-plane
 EnvironmentFile=/srv/ai-factory/config/runtime.env
-ExecStart=/srv/ai-factory/venv/bin/python -m factory status --serve --host 127.0.0.1 --port 8765
+ExecStart=/srv/ai-factory/control-plane/.venv/bin/python -m factory status --serve --host 127.0.0.1 --port 8765
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadOnlyPaths=/srv/ai-factory/state/factory-control-tower.db
+ReadOnlyPaths=/srv/ai-factory/control-plane
 
 [Install]
 WantedBy=multi-user.target

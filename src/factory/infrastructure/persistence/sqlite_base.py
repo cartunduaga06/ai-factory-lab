@@ -29,9 +29,10 @@ from factory.infrastructure.persistence.schema import (
 class SqliteRepository:
     """Base class holding the file path, connection factory and schema setup."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, read_only: bool = False) -> None:
         # ``:memory:`` is honoured; any other value is a filesystem path.
         self._path = path
+        self._read_only = read_only
 
     @property
     def path(self) -> str:
@@ -49,6 +50,8 @@ class SqliteRepository:
         error. The workspace index is replaced by its active-run variant;
         stored task and run rows are not rewritten.
         """
+        if self._read_only:
+            raise ValueError("read-only repository cannot be initialized")
         if self._path != ":memory:":
             Path(self._path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -268,7 +271,11 @@ class SqliteRepository:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self._path)
+        if self._read_only:
+            uri = Path(self._path).expanduser().resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+        else:
+            conn = sqlite3.connect(self._path)
         try:
             conn.row_factory = sqlite3.Row
             # Enforce the foreign keys from transitions/runs to their parents.
