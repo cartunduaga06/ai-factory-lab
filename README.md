@@ -7,8 +7,8 @@ sessions at once. Each session owns one durable task and run; dispatch creates
 its own worktree and branch, and publication stops at `WAITING_HUMAN`. The pool
 prioritizes persisted in-flight tasks after restart. A worker timeout remains
 resumable on its task, and an exception in one session does not stop another.
-Set the concurrency to `1` to serialize pool execution. `factory run` and
-`factory watch` retain their existing one-task behavior.
+Set the concurrency to `1` to serialize pool execution. `factory run` retains
+its one-task behavior. `factory watch` is a compatibility alias for the pool.
 
 See [the worker pool runbook](docs/parallel-worker-runtime.md) for operation,
 traceability and current acceptance limits.
@@ -216,21 +216,19 @@ with `python -m factory retry --task-id <uuid>`.
 
 ## 1a-bis. Automatic worker (Phase 6)
 
-The autonomous mode reuses the one-shot runtime above rather than duplicating any
-phase. It calls `FactoryRuntime.run_once()` in a sequential loop:
+The autonomous mode reuses the existing runtime and runs independent tasks
+through the bounded worker pool:
 
 ```bash
 python -m factory watch
 ```
 
-* **WIP = 1.** Each iteration invokes the runtime exactly once, and the runtime
-  completes at most one task at a time. A `WAITING_HUMAN` task stays the single
-  in-flight task until a human advances it, so no second issue is started while
-  work is awaiting review.
+* **Bounded concurrency.** `FACTORY_MAX_CONCURRENCY` controls the number of
+  independent tasks (up to 2). A `WAITING_HUMAN` task does not stop other work.
 * **Idle wait.** When an iteration finds no eligible task
   (`NO_ELIGIBLE_TASK`), the worker sleeps `FACTORY_WATCH_IDLE_INTERVAL` seconds
   (default `60`) and checks again. It never spins against the GitHub API.
-  When a task reaches `WAITING_HUMAN`, the watcher exits after that iteration.
+  Waiting tasks remain persisted while the pool checks for more work.
 * **Clean stop.** `SIGINT` (Ctrl+C) and `SIGTERM` only set a stop flag, which the
   loop observes *between* iterations. A signal never interrupts an in-flight
   task or corrupts persisted state, and the previous signal handlers are
@@ -238,8 +236,8 @@ python -m factory watch
 * **Idempotent by construction.** The runtime reconciles by persisted state, so a
   restart re-observes the same task/run/branch/PR rather
   than creating a duplicate.
-* **No auto-merge, no deploy.** The worker stops at `WAITING_HUMAN` exactly as
-  `factory run` does.
+* **Mandatory review.** Code tasks publish a PR and stop in `WAITING_HUMAN` for
+  human approval; there is no auto-merge or auto-deploy.
 
 `factory run` is unchanged: it remains a single bounded pass an operator or a
 health check can invoke. There is still no scheduler; `watch` is a foreground

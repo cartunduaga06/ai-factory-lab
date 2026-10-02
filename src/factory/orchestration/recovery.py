@@ -55,6 +55,12 @@ class RecoveryPolicy:
             return FailureClass.TRANSIENT
         if latest.status is RunStatus.FAILED:
             return FailureClass.CORRECTABLE
+        if (
+            task.status is TaskStatus.BLOCKED
+            and latest.is_terminal
+            and latest.validation_outcome is ValidationOutcome.GATES_FAILED
+        ):
+            return FailureClass.CORRECTABLE
         if task.status is TaskStatus.CLAIMED and rework_claim and latest.is_terminal:
             return FailureClass.CORRECTABLE
         return FailureClass.NON_RECOVERABLE

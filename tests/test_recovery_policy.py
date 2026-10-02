@@ -8,7 +8,12 @@ from threading import Barrier, Thread
 
 import pytest
 
-from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskStatus
+from factory.domain.enums import (
+    AgentKind,
+    QualityGateStatus,
+    RunStatus,
+    TaskStatus,
+)
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
 from factory.domain.models import AgentRun, FactoryTask, QualityGate
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
@@ -177,3 +182,108 @@ def test_explicit_retry_obeys_persisted_backoff_and_attempt_cap(tmp_path: Path) 
     with pytest.raises(RetryNotAllowedError, match="limit"):
         service.retry(task.task_id)
     assert tasks.get(task.task_id).status is TaskStatus.BLOCKED  # type: ignore[union-attr]
+
+
+def test_gate_failure_human_retry_ignores_automatic_corrections(tmp_path: Path) -> None:
+    path = str(tmp_path / "factory.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(FactoryTask("gate failure", "example/target", status=TaskStatus.BLOCKED))
+    for _ in range(3):
+        runs.save_run(
+            AgentRun(
+                task_id=task.task_id,
+                adapter=AgentKind.OTHER,
+                status=RunStatus.SUCCEEDED,
+                gates=(QualityGate("tests", QualityGateStatus.FAILED),),
+            )
+        )
+
+    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+
+
+def test_gate_failure_human_retries_are_bounded_by_audited_transitions(tmp_path: Path) -> None:
+    path = str(tmp_path / "gate-retry-limit.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(FactoryTask("gate retry", "example/target", status=TaskStatus.BLOCKED))
+    policy = RecoveryPolicy(run_retry_limit=3, base_backoff_seconds=0)
+    service = RetryService(tasks, runs, policy)
+
+    runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            gates=(QualityGate("tests", QualityGateStatus.FAILED),),
+        )
+    )
+    assert service.retry(task.task_id).status is TaskStatus.READY
+    tasks.apply_transition(task.task_id, TaskStatus.READY, TaskStatus.BLOCKED)
+
+    for _ in range(2):
+        runs.save_run(
+            AgentRun(
+                task_id=task.task_id,
+                adapter=AgentKind.OTHER,
+                status=RunStatus.SUCCEEDED,
+                gates=(QualityGate("tests", QualityGateStatus.FAILED),),
+            )
+        )
+        assert service.retry(task.task_id).status is TaskStatus.READY
+        tasks.apply_transition(task.task_id, TaskStatus.READY, TaskStatus.BLOCKED)
+
+    runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            gates=(QualityGate("tests", QualityGateStatus.FAILED),),
+        )
+    )
+    with pytest.raises(RetryNotAllowedError, match="limit"):
+        service.retry(task.task_id)
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED  # type: ignore[union-attr]
+
+
+def test_explicit_retry_budget_does_not_count_healthy_successes(tmp_path: Path) -> None:
+    path = str(tmp_path / "healthy-success.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(FactoryTask("healthy success", "example/target", status=TaskStatus.BLOCKED))
+    runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            gates=(QualityGate("tests", QualityGateStatus.PASSED),),
+        )
+    )
+
+    with pytest.raises(RetryNotAllowedError, match="not recoverable"):
+        RetryService(tasks, runs).retry(task.task_id)
+
+
+@pytest.mark.parametrize(
+    "latest",
+    [
+        AgentRun(task_id="task", adapter=AgentKind.OTHER, status=RunStatus.SUCCEEDED),
+        AgentRun(task_id="task", adapter=AgentKind.OTHER, status=RunStatus.CANCELLED),
+    ],
+)
+def test_explicit_retry_rejects_other_terminal_runs(tmp_path: Path, latest: AgentRun) -> None:
+    path = str(tmp_path / f"{latest.status.value}.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(FactoryTask("not correctable", "example/target", status=TaskStatus.BLOCKED))
+    latest.task_id = task.task_id
+    runs.save_run(latest)
+
+    with pytest.raises(RetryNotAllowedError, match="not recoverable"):
+        RetryService(tasks, runs).retry(task.task_id)
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED  # type: ignore[union-attr]
+    assert tasks.history(task.task_id) == []

@@ -229,7 +229,7 @@ class FactoryRuntime:
         if self._sprint is not None:
             self._sprint.resume_completed()
             self._sprint.prepare()
-        if self._backlog_reconcile is not None and self._sprint is None:
+        if self._backlog_reconcile is not None:
             self._backlog_reconcile()
         return self._intake.intake(self._intake_repository)
 
@@ -264,7 +264,7 @@ class FactoryRuntime:
         self, selected_task: FactoryTask | None = None, *, do_intake: bool = True
     ) -> RuntimeResult:
         """Drive the existing one-shot lifecycle."""
-        if do_intake and self._backlog_reconcile is not None and self._sprint is None:
+        if do_intake and self._backlog_reconcile is not None:
             self._backlog_reconcile()
         intake = self._intake.intake(self._intake_repository) if do_intake else IntakeSummary()
         if do_intake:
@@ -300,18 +300,23 @@ class FactoryRuntime:
             active = self._runs.find_active_run(task.task_id)
             if active is not None:
                 return self._result(task, active, None, "ACTIVE_RUN_STATE_MISMATCH", intake)
-            busy = do_intake and any(
-                other.task_id != task.task_id
-                for status in (
-                    TaskStatus.CLAIMED,
-                    TaskStatus.RUNNING,
-                    TaskStatus.VALIDATING,
-                    TaskStatus.PR_OPEN,
+            busy = (
+                do_intake
+                and not self._pool_mode
+                and any(
+                    other.task_id != task.task_id
+                    for status in (
+                        TaskStatus.CLAIMED,
+                        TaskStatus.RUNNING,
+                        TaskStatus.VALIDATING,
+                        TaskStatus.PR_OPEN,
+                    )
+                    for other in self._tasks.list(status)
                 )
-                for other in self._tasks.list(status)
             )
             busy = busy or (
                 do_intake
+                and not self._pool_mode
                 and any(
                     run.task_id != task.task_id and not run.is_terminal
                     for run in self._runs.list_runs()

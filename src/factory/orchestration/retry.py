@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from factory.domain.enums import RunStatus, TaskStatus
+from factory.domain.enums import RunStatus, TaskStatus, ValidationOutcome
 from factory.domain.errors import RetryNotAllowedError
 from factory.domain.models import FactoryTask
 from factory.domain.ports import RunRepository, TaskRepository
@@ -53,7 +53,19 @@ class RetryService:
             )
             raise RetryNotAllowedError(f"task {task_id} {reason}")
         failed_count = sum(run.status is RunStatus.FAILED for run in history)
-        if failed_count >= self._policy.run_retry_limit:
+        gate_retry_count = sum(
+            transition.from_status is TaskStatus.BLOCKED
+            and transition.to_status is TaskStatus.READY
+            for transition in self._tasks.history(task_id)
+        )
+        is_gate_retry = (
+            task.status is TaskStatus.BLOCKED
+            and latest is not None
+            and latest.is_terminal
+            and latest.validation_outcome is ValidationOutcome.GATES_FAILED
+        )
+        retry_count = gate_retry_count if is_gate_retry else failed_count
+        if retry_count >= self._policy.run_retry_limit:
             raise RetryNotAllowedError(f"task {task_id} retry limit reached")
         if latest is not None and latest.status is RunStatus.FAILED:
             last_attempt = latest.finished_at or latest.started_at
