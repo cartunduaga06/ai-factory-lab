@@ -30,6 +30,11 @@ from factory.domain.models import (
     TaskTransition,
     Workspace,
 )
+from factory.domain.revalidation import (
+    ExactHeadCiEvidence,
+    PostRebaseRevalidation,
+    WorkspaceRevisionSnapshot,
+)
 from factory.domain.security import SecurityReview
 from factory.domain.sprint import SprintManifest, SprintState
 
@@ -478,6 +483,83 @@ class SecurityReviewGate(ABC):
         """Require a durable, explicit human decision for this exact review."""
 
 
+class WorkspaceRevalidationInspector(ABC):
+    """Read exact commit/tree identity from a clean reviewed workspace."""
+
+    @abstractmethod
+    def snapshot(self, workspace: Workspace) -> WorkspaceRevisionSnapshot:
+        """Return current clean HEAD + tree, or raise on ambiguous/mutable state."""
+
+
+class PostRebaseEvidenceSource(ABC):
+    """Read exact open-PR head and provider CI without provider writes."""
+
+    @abstractmethod
+    def current_head(self, pull_request: PullRequest) -> str:
+        """Return the exact provider head SHA after validating PR identity."""
+
+    @abstractmethod
+    def exact_ci(
+        self,
+        pull_request: PullRequest,
+        expected_head: str,
+        required_checks: tuple[str, ...],
+        *,
+        required: bool,
+    ) -> ExactHeadCiEvidence:
+        """Return CI evidence bound to ``expected_head``; fail closed on mismatch."""
+
+
+class PostRebaseRevalidationRepository(ABC):
+    """Durable, single-active-attempt storage for post-rebase evidence."""
+
+    @abstractmethod
+    def initialize(self) -> None:
+        """Create persistence structures idempotently."""
+
+    @abstractmethod
+    def active_for_task(self, task_id: str) -> PostRebaseRevalidation | None:
+        """Return the one active attempt for a task, if any."""
+
+    @abstractmethod
+    def latest_for_task(self, task_id: str) -> PostRebaseRevalidation | None:
+        """Return newest attempt, including terminal attempts."""
+
+    @abstractmethod
+    def start(self, attempt: PostRebaseRevalidation) -> PostRebaseRevalidation:
+        """Persist or recover an identical active attempt; refuse concurrency."""
+
+    @abstractmethod
+    def record_local_validation(
+        self,
+        attempt_id: str,
+        validated_tree: str,
+        gates: tuple[QualityGate, ...],
+        security_review: SecurityReview,
+    ) -> PostRebaseRevalidation:
+        """Persist fresh local + security evidence and enter WAITING_CI."""
+
+    @abstractmethod
+    def mark_passed(
+        self, attempt_id: str, ci_sha: str, ci_checks: tuple[str, ...]
+    ) -> PostRebaseRevalidation:
+        """Finish one attempt after exact-head rebind + human-ready recovery."""
+
+    @abstractmethod
+    def mark_failed(
+        self,
+        attempt_id: str,
+        reason: str,
+        *,
+        validated_tree: str | None = None,
+        gates: tuple[QualityGate, ...] = (),
+        security_review: SecurityReview | None = None,
+        ci_sha: str | None = None,
+        ci_checks: tuple[str, ...] = (),
+    ) -> PostRebaseRevalidation:
+        """Finish one attempt while preserving any trustworthy partial evidence."""
+
+
 class WorkspacePublisher(ABC):
     """Publishes a validated run's workspace revision to an isolated branch.
 
@@ -597,6 +679,17 @@ class PullRequestRepository(ABC):
         """Bind a reviewed PR to a new validated run and commit on its same branch."""
 
     @abstractmethod
+    def record_revalidated_revision(
+        self, pull_request: PullRequest, expected_previous_sha: str, new_sha: str
+    ) -> PullRequest:
+        """CAS-rebind one existing PR after first-class post-rebase validation.
+
+        The historical ``run_id`` is preserved. Implementations must be
+        idempotent when the PR is already bound to ``new_sha`` and must refuse
+        every other identity or previous-head mismatch.
+        """
+
+    @abstractmethod
     def record_merged(self, pull_request: PullRequest) -> PullRequest:
         """Record a provider-verified merge for this exact persisted PR, idempotently."""
 
@@ -608,6 +701,9 @@ __all__ = [
     "IssueSource",
     "OperationalAcceptance",
     "PullRequestRepository",
+    "WorkspaceRevalidationInspector",
+    "PostRebaseRevalidationRepository",
+    "PostRebaseEvidenceSource",
     "PullRequestSink",
     "QualityGateRunner",
     "RunRepository",

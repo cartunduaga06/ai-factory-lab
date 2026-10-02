@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -47,6 +47,7 @@ STATUS_EVENTS_TABLE = "status_events"
 AUDIT_EVENTS_TABLE = "audit_events"
 BACKLOG_LINKS_TABLE = "backlog_links"
 SPRINTS_TABLE = "sprints"
+POST_REBASE_REVALIDATIONS_TABLE = "post_rebase_revalidations"
 
 CREATE_SPRINTS = f"""
 CREATE TABLE IF NOT EXISTS {SPRINTS_TABLE} (
@@ -442,6 +443,54 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_{PULL_REQUESTS_TABLE}_repository_branch
     ON {PULL_REQUESTS_TABLE} (repository_slug, head_branch);
 """
 
+CREATE_POST_REBASE_REVALIDATIONS = f"""
+CREATE TABLE IF NOT EXISTS {POST_REBASE_REVALIDATIONS_TABLE} (
+    attempt_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
+    repository_slug TEXT NOT NULL,
+    head_branch TEXT NOT NULL,
+    pull_request_number INTEGER NOT NULL CHECK (pull_request_number > 0),
+    previous_head TEXT NOT NULL,
+    new_head TEXT NOT NULL,
+    validated_tree TEXT,
+    gates TEXT NOT NULL DEFAULT '[]',
+    security_review TEXT,
+    ci_sha TEXT,
+    ci_checks TEXT NOT NULL DEFAULT '[]',
+    result TEXT NOT NULL CHECK (result IN ('PENDING', 'WAITING_CI', 'PASSED', 'FAILED')),
+    failure_reason TEXT,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    FOREIGN KEY (task_id) REFERENCES {TASKS_TABLE} (task_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_run_id) REFERENCES {AGENT_RUNS_TABLE} (run_id)
+);
+"""
+
+CREATE_POST_REBASE_REVALIDATIONS_ACTIVE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS uq_{POST_REBASE_REVALIDATIONS_TABLE}_active_task
+ON {POST_REBASE_REVALIDATIONS_TABLE} (task_id)
+WHERE result IN ('PENDING', 'WAITING_CI');
+"""
+
+CREATE_AUDIT_REVALIDATION_INSERT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_revalidation_insert
+AFTER INSERT ON {POST_REBASE_REVALIDATIONS_TABLE}
+BEGIN
+{_audit_insert("'RevalidationStarted'", "'revalidation:start:' || NEW.attempt_id", "NEW.task_id", "NEW.attempt_id", "revalidation", "NEW.attempt_id", "NEW.started_at", "NEW.source_run_id", "(SELECT workspace_id FROM agent_runs WHERE run_id = NEW.source_run_id)", "(SELECT pull_request_id FROM pull_requests WHERE task_id = NEW.task_id AND number = NEW.pull_request_number LIMIT 1)")}
+END;
+"""
+
+CREATE_AUDIT_REVALIDATION_RESULT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS audit_revalidation_result
+AFTER UPDATE OF result ON {POST_REBASE_REVALIDATIONS_TABLE}
+WHEN OLD.result != NEW.result
+BEGIN
+{_audit_insert("CASE NEW.result WHEN 'WAITING_CI' THEN 'RevalidationWaitingCI' WHEN 'PASSED' THEN 'RevalidationPassed' WHEN 'FAILED' THEN 'RevalidationFailed' ELSE 'RevalidationUpdated' END", "'revalidation:' || lower(NEW.result) || ':' || NEW.attempt_id", "NEW.task_id", "NEW.attempt_id", "revalidation", "NEW.attempt_id", "NEW.updated_at", "NEW.source_run_id", "(SELECT workspace_id FROM agent_runs WHERE run_id = NEW.source_run_id)", "(SELECT pull_request_id FROM pull_requests WHERE task_id = NEW.task_id AND number = NEW.pull_request_number LIMIT 1)")}
+END;
+"""
+
 CREATE_QA_REWORK = f"""
 CREATE TABLE IF NOT EXISTS {QA_REWORK_TABLE} (
     request_id TEXT PRIMARY KEY,
@@ -492,6 +541,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_WORKSPACES,
     CREATE_AGENT_RUNS,
     CREATE_PULL_REQUESTS,
+    CREATE_POST_REBASE_REVALIDATIONS,
     CREATE_QA_REWORK,
     CREATE_TASKS_STATUS_INDEX,
     CREATE_TASKS_CREATED_INDEX,
@@ -502,6 +552,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_AGENT_RUNS_WORKSPACE_OWNER_TRIGGER,
     CREATE_PULL_REQUESTS_RUN_INDEX,
     CREATE_PULL_REQUESTS_BRANCH_INDEX,
+    CREATE_POST_REBASE_REVALIDATIONS_ACTIVE_INDEX,
     CREATE_AUDIT_INDEX,
     CREATE_AUDIT_TASK_TRIGGER,
     CREATE_AUDIT_TRANSITION_TRIGGER,
@@ -511,6 +562,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_AUDIT_RUN_FINISH_TRIGGER,
     CREATE_AUDIT_PR_TRIGGER,
     CREATE_AUDIT_PR_UPDATE_TRIGGER,
+    CREATE_AUDIT_REVALIDATION_INSERT_TRIGGER,
+    CREATE_AUDIT_REVALIDATION_RESULT_TRIGGER,
     CREATE_AUDIT_NO_UPDATE,
     CREATE_AUDIT_NO_DELETE,
 )
@@ -526,6 +579,8 @@ __all__ = [
     "CREATE_WORKSPACES",
     "MIGRATION_STATEMENTS",
     "PULL_REQUESTS_TABLE",
+    "CREATE_POST_REBASE_REVALIDATIONS",
+    "POST_REBASE_REVALIDATIONS_TABLE",
     "QA_REWORK_TABLE",
     "SCHEMA_STATEMENTS",
     "SCHEMA_VERSION",

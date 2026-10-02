@@ -36,6 +36,7 @@ from factory.infrastructure.config import AgentEngine, FactoryConfig, Unsupporte
 from factory.infrastructure.logging import configure_logging
 from factory.infrastructure.persistence import (
     SqliteBacklogLinkRepository,
+    SqlitePostRebaseRevalidationRepository,
     SqlitePullRequestRepository,
     SqliteRunRepository,
     SqliteTaskRepository,
@@ -62,6 +63,7 @@ from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
 from factory.integrations.github.issue_completion import GitHubIssueCompletionSink
 from factory.integrations.github.pr_state import GitHubPullRequestStateSource
 from factory.integrations.github.project_issues import ProjectIssueSource
+from factory.integrations.github.revalidation import GitHubPostRebaseEvidenceSource
 from factory.integrations.openhands import (
     OpenHandsAdapter,
     OpenHandsClient,
@@ -81,6 +83,7 @@ from factory.integrations.trello.feedback import TrelloWorkItemFeedbackSink
 from factory.integrations.trello.status import TrelloStatusChannel
 from factory.integrations.workspace import (
     GitWorkspacePublisher,
+    GitWorkspaceRevalidationInspector,
     GitWorkspaceRevisionInspector,
     GitWorktreeWorkspaceProvisioner,
     git_workspace_is_clean_unpublished,
@@ -91,6 +94,7 @@ from factory.orchestration.feedback import FeedbackReconciliationService
 from factory.orchestration.intake import IssueIntakeService
 from factory.orchestration.recovery import RecoveryPolicy
 from factory.orchestration.retry import RetryService
+from factory.orchestration.revalidation import PostRebaseRevalidationService
 from factory.orchestration.rework import ReworkNotAllowedError, ReworkService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 from factory.orchestration.sprint import AuthorizedBacklogSource, SprintService
@@ -195,6 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
     orphan_recovery.add_argument("--task-id", required=True, type=UUID)
     orphan_recovery.add_argument("--run-id", required=True, type=UUID)
     orphan_recovery.add_argument("--acknowledge-orphan", action="store_true")
+    revalidate = subparsers.add_parser(
+        "revalidate-pr",
+        help="Create/resume durable exact-head validation after an external rebase.",
+    )
+    revalidate.add_argument("--task-id", required=True, type=UUID)
     rework = subparsers.add_parser(
         "request-changes", help="Record human QA feedback for an open PR."
     )
@@ -249,6 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _recover_orphaned_codex(
             config, str(args.task_id), str(args.run_id), args.acknowledge_orphan
         )
+    if args.command == "revalidate-pr":
+        return _revalidate_pr(config, str(args.task_id))
     if args.command == "request-changes":
         return _request_changes(config, str(args.task_id), args.feedback_file)
     if args.command == "run":
@@ -286,6 +297,64 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser.print_help()
     return EXIT_OK
+
+
+def _revalidate_pr(config: FactoryConfig, task_id: str) -> int:
+    """Run one bounded, durable post-rebase revalidation pass."""
+    if config.github.token is None:
+        print("configuration error: GITHUB_TOKEN is required for revalidation")
+        return EXIT_CONFIG_ERROR
+    try:
+        database = config.database
+        tasks = SqliteTaskRepository(database.path)
+        runs = SqliteRunRepository(database.path)
+        pull_requests = SqlitePullRequestRepository(database.path)
+        attempts = SqlitePostRebaseRevalidationRepository(database.path)
+        attempts.initialize()
+        task = tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if config.project_registry is not None:
+            profile = config.project_registry.resolve(task.project_id, task.target_repository)
+            security_base = f"origin/{profile.base_ref}"
+        else:
+            security_base = f"origin/{config.target_default_branch}"
+        service = PostRebaseRevalidationService(
+            tasks,
+            runs,
+            pull_requests,
+            attempts,
+            LocalQualityGateRunner(),
+            GitWorkspaceRevalidationInspector(),
+            GitSecurityInspector(base_ref=security_base),
+            GitHubPostRebaseEvidenceSource(
+                GitHubClient(token=config.github.token, api_url=config.github.api_url)
+            ),
+            registry=config.project_registry,
+            gate_specs=config.quality_gates,
+            task_gate_specs=config.task_quality_gates,
+        )
+        outcome = service.revalidate(task_id)
+        attempt = outcome.attempt
+        print(
+            json.dumps(
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "task_status": outcome.task_status.value,
+                    "result": attempt.result.value,
+                    "previous_head": attempt.previous_head,
+                    "new_head": attempt.new_head,
+                    "validated_tree": attempt.validated_tree,
+                    "ci_sha": attempt.ci_sha,
+                    "ci_checks": list(attempt.ci_checks),
+                },
+                sort_keys=True,
+            )
+        )
+        return EXIT_INTAKE_ERROR if attempt.result.value == "FAILED" else EXIT_OK
+    except Exception as exc:  # noqa: BLE001 - provider/storage details stay private
+        print(f"revalidation failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
 
 
 def _run_intake(config: FactoryConfig) -> int:

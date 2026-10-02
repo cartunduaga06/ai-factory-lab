@@ -160,6 +160,63 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
         assert result is not None
         return result
 
+    def record_revalidated_revision(
+        self, pull_request: PullRequest, expected_previous_sha: str, new_sha: str
+    ) -> PullRequest:
+        """Rebind only the mutable PR revision; never rewrite its historical run."""
+        if (
+            pull_request.run_id is None
+            or pull_request.task_id is None
+            or pull_request.number is None
+            or not expected_previous_sha.strip()
+            or not new_sha.strip()
+            or expected_previous_sha == new_sha
+        ):
+            raise ValueError("invalid revalidated pull request revision")
+        identity = (
+            pull_request.run_id,
+            pull_request.task_id,
+            pull_request.repository_slug,
+            pull_request.head_branch,
+            pull_request.base_branch,
+            pull_request.number,
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                f"UPDATE {PULL_REQUESTS_TABLE} SET commit_sha = ?, merged = 0 "
+                "WHERE run_id = ? AND task_id = ? AND repository_slug = ? "
+                "AND head_branch = ? AND base_branch = ? AND number = ? "
+                "AND commit_sha = ? AND merged = 0",
+                (new_sha, *identity, expected_previous_sha),
+            )
+            if cursor.rowcount == 0:
+                row = conn.execute(
+                    f"SELECT * FROM {PULL_REQUESTS_TABLE} WHERE run_id = ?",
+                    (pull_request.run_id,),
+                ).fetchone()
+                if (
+                    row is None
+                    or (
+                        row["run_id"],
+                        row["task_id"],
+                        row["repository_slug"],
+                        row["head_branch"],
+                        row["base_branch"],
+                        row["number"],
+                    )
+                    != identity
+                    or row["commit_sha"] != new_sha
+                    or bool(row["merged"])
+                ):
+                    raise ValueError("pull request revalidation identity mismatch")
+            row = conn.execute(
+                f"SELECT * FROM {PULL_REQUESTS_TABLE} WHERE run_id = ?",
+                (pull_request.run_id,),
+            ).fetchone()
+        assert row is not None
+        return _row_to_pull_request(row)
+
     def record_merged(self, pull_request: PullRequest) -> PullRequest:
         if (
             pull_request.run_id is None

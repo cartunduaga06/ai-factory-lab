@@ -9,6 +9,7 @@ filesystem and a version-control tool, so it lives here — outside ``domain`` a
 from factory.integrations.workspace.git import GitWorktreeWorkspaceProvisioner
 from factory.integrations.workspace.git_publish import GitWorkspacePublisher
 from factory.integrations.workspace.recovery import git_workspace_is_clean_unpublished
+from factory.integrations.workspace.revalidation import GitWorkspaceRevalidationInspector
 from factory.integrations.workspace.revision import GitWorkspaceRevisionInspector
 from factory.integrations.workspace.shared_policy import (
     PRIVATE_DIRECTORY_MODE,
@@ -33,6 +34,7 @@ __all__ = [
     "SHARED_EXECUTABLE_MODE",
     "SHARED_FILE_MODE",
     "GitWorkspacePublisher",
+    "GitWorkspaceRevalidationInspector",
     "GitWorkspaceRevisionInspector",
     "GitWorktreeWorkspaceProvisioner",
     "SharedWorkspacePolicyError",
