@@ -63,5 +63,15 @@ class TaskLifecycleService:
         """Return the recorded transition history for ``task_id``, oldest first."""
         return list(self._repository.history(task_id))
 
+    def reconcile_terminal_resolution(self, task_id: str, expected_from: TaskStatus) -> FactoryTask:
+        """Resolve a FAILED/CANCELLED task after exact provider evidence.
+
+        This narrow exception exists for durable provider reconciliation only;
+        normal lifecycle transitions continue to reject terminal states.
+        """
+        if expected_from not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            raise ValueError("provider reconciliation requires a terminal failure state")
+        return self._repository.apply_transition(task_id, expected_from, TaskStatus.DONE)
+
 
 __all__ = ["TaskLifecycleService"]

@@ -260,11 +260,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "status":
         return _show_status(config, serve=args.serve, host=args.host, port=args.port)
     if args.command == "sync-status":
-        publisher = _status_publisher(config)
         try:
             if config.project_registry is not None:
                 runtime = _build_runtime(config)
                 runtime.prepare_pool()
+            publisher = _status_publisher(config)
             if publisher is not None:
                 publisher.flush()
             elif config.project_registry is None:
