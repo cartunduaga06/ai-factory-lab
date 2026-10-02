@@ -6,6 +6,8 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from factory.domain.backlog import MaterializedIssue, WorkItem
 from factory.domain.enums import AgentKind, RunStatus, TaskStatus
 from factory.domain.feedback import DeliveryEvidence, FeedbackIdentity
@@ -43,9 +45,21 @@ class Evidence(DeliveryEvidenceSource):
 class Issues(IssueCompletionSink):
     def __init__(self) -> None:
         self.closed: set[tuple[str, int]] = set()
+        self.reasons: dict[tuple[str, int], str] = {}
 
     def complete(self, identity: FeedbackIdentity) -> None:
         self.closed.add((identity.repository_slug, identity.issue_number))
+
+    def state(self, repository_slug: str, issue_number: int) -> tuple[str, str | None]:
+        key = (repository_slug, issue_number)
+        if key not in self.closed:
+            return "open", None
+        return "closed", self.reasons.get(key, "completed")
+
+    def close(self, identity: FeedbackIdentity, reason: str) -> None:
+        key = (identity.repository_slug, identity.issue_number)
+        self.closed.add(key)
+        self.reasons[key] = reason
 
 
 class Cards(WorkItemFeedbackSink):
@@ -399,6 +413,104 @@ def test_unverified_merge_does_not_change_local_pr(tmp_path: Path) -> None:
     assert "PRUpdated" not in [
         event.name for event in SqliteAuditEventStore(str(path)).for_task(task.task_id)
     ]
+
+
+def test_provider_closed_issue_marks_done_and_records_resolution(tmp_path: Path) -> None:
+    path = tmp_path / "closed-issue.db"
+    task, run = _records(path, "project-a", 24, None)
+    tasks = SqliteTaskRepository(str(path))
+    task = tasks.get(task.task_id)
+    assert task is not None
+    task.status = TaskStatus.WAITING_HUMAN
+    tasks.update(task)
+    issues, cards = Issues(), Cards()
+    issues.closed.add(("example/project-a", 24))
+    service = _service(path, False, issues, cards)
+    assert service.reconcile_provider_closure(task, run)
+    assert tasks.get(task.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+    names = [event.name for event in SqliteAuditEventStore(str(path)).for_task(task.task_id)]
+    assert names.count("DeliveryReconciled") == 1
+
+
+@pytest.mark.parametrize(
+    ("initial", "reason"),
+    [
+        (TaskStatus.FAILED, "completed"),
+        (TaskStatus.CANCELLED, "duplicate"),
+    ],
+)
+def test_terminal_provider_closure_resolves_once(
+    tmp_path: Path, initial: TaskStatus, reason: str
+) -> None:
+    path = tmp_path / f"terminal-{initial.value}.db"
+    task, run = _records(path, "project-a", 31, None)
+    tasks = SqliteTaskRepository(str(path))
+    stored = tasks.get(task.task_id)
+    assert stored is not None
+    stored.status = initial
+    stored.blocked_reason = "stale provider closure blocker"
+    tasks.update(stored)
+    issues, cards = Issues(), Cards()
+    issues.closed.add(("example/project-a", 31))
+    issues.reasons = {("example/project-a", 31): reason}
+    service = _service(path, False, issues, cards)
+
+    assert service.reconcile_provider_closure(stored, run)
+    assert service.reconcile_provider_closure(stored, run)
+    final = tasks.get(task.task_id)
+    assert final is not None and final.status is TaskStatus.DONE
+    assert final.blocked_reason is None
+    transitions = tasks.history(task.task_id)
+    assert [(item.from_status, item.to_status) for item in transitions].count(
+        (initial, TaskStatus.DONE)
+    ) == 1
+    events = SqliteAuditEventStore(str(path)).for_task(task.task_id)
+    assert sum(event.name == "DeliveryReconciled" for event in events) == 1
+
+
+def test_closed_unmerged_pr_waits_for_explicit_issue_resolution(tmp_path: Path) -> None:
+    path = tmp_path / "closed-unmerged.db"
+    task, run = _records(path, "project-a", 32, None)
+    tasks = SqliteTaskRepository(str(path))
+    issues, cards = Issues(), Cards()
+    service = _service(path, False, issues, cards)
+    assert not service.reconcile_provider_closure(task, run)
+    stored = tasks.get(task.task_id)
+    assert stored is not None and stored.status is TaskStatus.WAITING_HUMAN
+
+    issues.closed.add(("example/project-a", 32))
+    issues.reasons = {("example/project-a", 32): "not_planned"}
+    assert service.reconcile_provider_closure(task, run)
+    assert tasks.get(task.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+
+
+def test_reopened_issue_does_not_resurrect_done_task(tmp_path: Path) -> None:
+    path = tmp_path / "reopened.db"
+    task, run = _records(path, "project-a", 33, None)
+    tasks = SqliteTaskRepository(str(path))
+    issues, cards = Issues(), Cards()
+    issues.closed.add(("example/project-a", 33))
+    issues.reasons = {("example/project-a", 33): "completed"}
+    service = _service(path, False, issues, cards)
+    assert service.reconcile_provider_closure(task, run)
+    issues.closed.clear()
+    issues.reasons.clear()
+    assert not service.reconcile_provider_closure(task, run)
+    assert tasks.get(task.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+
+
+def test_incidental_superseded_text_does_not_resolve(tmp_path: Path) -> None:
+    path = tmp_path / "incidental-superseded.db"
+    task, run = _records(path, "project-a", 34, None)
+    tasks = SqliteTaskRepository(str(path))
+    stored = tasks.get(task.task_id)
+    assert stored is not None
+    stored.body = "Another task superseded this one during triage."
+    tasks.update(stored)
+    issues, cards = Issues(), Cards()
+    service = _service(path, False, issues, cards)
+    assert not service.reconcile_external(stored, run)
+    assert tasks.get(task.task_id).status is TaskStatus.WAITING_HUMAN  # type: ignore[union-attr]
 
 
 def test_mismatched_run_cannot_record_merge(tmp_path: Path) -> None:

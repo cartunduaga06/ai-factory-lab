@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from factory.domain.enums import RunStatus, TaskKind, TaskStatus
 from factory.domain.feedback import FeedbackIdentity
 from factory.domain.models import AgentRun, FactoryTask, PullRequest
@@ -74,6 +76,113 @@ class FeedbackReconciliationService:
             self._cards.sync(identity, "MERGED" if facts.merged else task.status.value)
         return False
 
+    def reconcile_external(self, task: FactoryTask, run: AgentRun) -> bool:
+        """Reconcile explicit provider closures and merged PRs without unsafe run changes."""
+        task = self._tasks.get(task.task_id) or task
+        if run.status is not RunStatus.SUCCEEDED:
+            return False
+        matched = self._identity(task, run)
+        if matched is None or task.status in {
+            TaskStatus.DISCOVERED,
+            TaskStatus.READY,
+            TaskStatus.CLAIMED,
+            TaskStatus.RUNNING,
+            TaskStatus.PR_OPEN,
+            TaskStatus.CHANGES_REQUESTED,
+            TaskStatus.BLOCKED,
+        }:
+            return False
+        identity, pr = matched
+        try:
+            issue_state, reason = self._issues.state(
+                identity.repository_slug, identity.issue_number
+            )
+        except Exception:
+            issue_state, reason = "unknown", None
+        facts = self._evidence.evidence(identity)
+        superseded = _has_superseded_marker(task.body) or _has_superseded_marker(task.title)
+        completed_issue = issue_state == "closed" and reason in {
+            "completed",
+            "not_planned",
+            "duplicate",
+        }
+        merge_resolution = facts.merged and facts.complete
+        if facts.merged and task.status is TaskStatus.WAITING_HUMAN:
+            # Persist provider merge immediately; task completion still waits for
+            # CI, integration and deployment evidence in the delivery path.
+            self._prs.record_merged(pr)
+        if not merge_resolution and not completed_issue and not superseded:
+            return False
+        if facts.merged and merge_resolution:
+            self._prs.record_merged(pr)
+        if task.status is not TaskStatus.DONE:
+            if task.status not in {
+                TaskStatus.WAITING_HUMAN,
+                TaskStatus.VALIDATING,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            }:
+                return False
+            task = self._resolve_done(task)
+        task = self._tasks.get(task.task_id) or task
+        if task.blocked_reason is not None:
+            task.blocked_reason = None
+            self._tasks.update(task)
+        if facts.complete and issue_state != "closed":
+            self._issues.complete(identity)
+        elif superseded and issue_state != "closed":
+            self._issues.close(identity, "not_planned")
+        if identity.work_item_provider == "trello" and self._cards is not None:
+            self._cards.sync(identity, "DONE")
+        resolution = reason if completed_issue else ("not_planned" if superseded else "completed")
+        if facts.complete or superseded or completed_issue:
+            self._events.record_resolution(identity, resolution or "completed")
+        return facts.complete or superseded or completed_issue
+
+    def reconcile_provider_closure(self, task: FactoryTask, run: AgentRun) -> bool:
+        """Apply a completed Issue closure even when delivery CI policy is stricter."""
+        task = self._tasks.get(task.task_id) or task
+        if run.status is not RunStatus.SUCCEEDED:
+            return False
+        stored_run = self._runs.get_run(run.run_id)
+        if stored_run is None or stored_run.status is not RunStatus.SUCCEEDED:
+            return False
+        matched = self._identity(task, run)
+        if matched is None or task.status in {
+            TaskStatus.DISCOVERED,
+            TaskStatus.READY,
+            TaskStatus.CLAIMED,
+            TaskStatus.RUNNING,
+            TaskStatus.PR_OPEN,
+            TaskStatus.CHANGES_REQUESTED,
+            TaskStatus.BLOCKED,
+        }:
+            return False
+        identity, _ = matched
+        try:
+            state, reason = self._issues.state(identity.repository_slug, identity.issue_number)
+        except Exception:
+            return False
+        if state != "closed" or reason not in {"completed", "not_planned", "duplicate"}:
+            return False
+        if task.status is not TaskStatus.DONE:
+            if task.status not in {
+                TaskStatus.WAITING_HUMAN,
+                TaskStatus.VALIDATING,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            }:
+                return False
+            task = self._resolve_done(task)
+        task = self._tasks.get(task.task_id) or task
+        if task.blocked_reason is not None:
+            task.blocked_reason = None
+            self._tasks.update(task)
+        if identity.work_item_provider == "trello" and self._cards is not None:
+            self._cards.sync(identity, "DONE")
+        self._events.record_resolution(identity, reason)
+        return True
+
     def sync(self, task: FactoryTask, run: AgentRun, phase: str) -> None:
         matched = self._identity(task, run)
         if (
@@ -82,6 +191,13 @@ class FeedbackReconciliationService:
             and self._cards is not None
         ):
             self._cards.sync(matched[0], phase)
+
+    def _resolve_done(self, task: FactoryTask) -> FactoryTask:
+        if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            return self._lifecycle.reconcile_terminal_resolution(task.task_id, task.status)
+        if task.status is TaskStatus.DONE:
+            return task
+        return self._lifecycle.transition(task.task_id, TaskStatus.DONE)
 
     def is_github_direct(self, task: FactoryTask) -> bool:
         """Allow a persisted direct task to bypass only Sprint review routing."""
@@ -169,3 +285,14 @@ class FeedbackReconciliationService:
     def _is_latest_run(self, task_id: str, run_id: str) -> bool:
         runs = self._runs.list_runs(task_id)
         return bool(runs) and runs[-1].run_id == run_id
+
+
+def _has_superseded_marker(value: str) -> bool:
+    """Accept only an explicit standalone marker, not incidental prose."""
+    return (
+        re.search(
+            r"(?im)^\s*(?:<!--\s*)?factory-resolution:\s*superseded\s*(?:-->)?\s*$",
+            value,
+        )
+        is not None
+    )

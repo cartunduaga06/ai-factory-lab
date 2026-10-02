@@ -57,7 +57,7 @@ The output masks all credentials (`"***"`). Never commit `.env`.
 | Automatic worker | `python -m factory watch` |
 | Current operator snapshot | `python -m factory status` |
 | Phone view (loopback) | `python -m factory status --serve` |
-| Retry queued Trello events | `python -m factory sync-status` |
+| Reconcile provider lifecycle and retry queued Trello status events | `python -m factory sync-status` |
 
 The read-only phone view is at `/factory/status` (add `?task_id=<id>` for one
 task). It binds to loopback only; use a trusted, authenticated reverse proxy or
@@ -69,8 +69,11 @@ and configured missed interval, leaving the task's lifecycle status `RUNNING`.
 
 When the Trello card ID, key and token are configured, meaningful transitions
 are queued transactionally and delivered during `run`/`watch` and by the status
-server's once-per-minute monitor. `sync-status` retries queued events after a
-restart. Heartbeats do not enqueue events. Stall and recovery observations are
+server's once-per-minute monitor. `sync-status` also reconciles persisted PR and
+Issue state against Factory tasks; provider reconciliation requires a project
+registry but does not require Trello status-card configuration. It retries
+queued Trello events when those status-channel settings are present. Heartbeats
+do not enqueue events. Stall and recovery observations are
 deduplicated per run heartbeat. Delivery failure leaves the event pending and
 does not interrupt an agent run. A separate alert channel can implement the
 `AlertChannel` port; the Trello implementation comments on the card only for

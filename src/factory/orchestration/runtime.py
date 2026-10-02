@@ -603,6 +603,7 @@ class FactoryRuntime:
             *self._tasks.list(TaskStatus.VALIDATING),
             *self._tasks.list(TaskStatus.DONE),
             *self._tasks.list(TaskStatus.FAILED),
+            *self._tasks.list(TaskStatus.CANCELLED),
         ]
         for task in review_tasks:
             if self._registry is not None:
@@ -633,17 +634,31 @@ class FactoryRuntime:
                 or pr.repository_slug != task.target_repository
             ):
                 continue
-            state = self._pull_request_state.state(pr)
+            if task.status is TaskStatus.CANCELLED:
+                if self._feedback is not None:
+                    self._feedback.reconcile_provider_closure(task, run)
+                continue
+            try:
+                state = self._pull_request_state.state(pr)
+            except Exception:
+                if self._feedback is not None:
+                    self._feedback.reconcile_provider_closure(task, run)
+                    continue
+                raise
             if state is PullRequestState.MERGED:
                 if self._feedback is not None:
-                    self._feedback.reconcile(task, run)
+                    self._feedback.reconcile_external(task, run)
                 elif task.status in {TaskStatus.WAITING_HUMAN, TaskStatus.VALIDATING}:
                     self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
             elif state is PullRequestState.CLOSED and task.status in {
                 TaskStatus.WAITING_HUMAN,
                 TaskStatus.VALIDATING,
             }:
-                self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
+                cancelled = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
+                cancelled.blocked_reason = (
+                    "pull request closed without merge; human review required"
+                )
+                self._tasks.update(cancelled)
                 if self._feedback is not None:
                     self._feedback.sync(task, run, "CLOSED")
             elif self._feedback is not None and task.status in {
@@ -651,6 +666,8 @@ class FactoryRuntime:
                 TaskStatus.FAILED,
             }:
                 self._feedback.sync(task, run, task.status.value)
+            if self._feedback is not None:
+                self._feedback.reconcile_provider_closure(task, run)
 
     def _select_task(self) -> FactoryTask | None:
         # Recovery states take precedence over new work; ordering within each

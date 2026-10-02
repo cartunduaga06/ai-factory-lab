@@ -130,11 +130,19 @@ class DeliveryEvidenceSource(ABC):
 
 
 class IssueCompletionSink(ABC):
-    """Idempotently remove readiness, record evidence and close one Issue."""
+    """Read and idempotently resolve one exact GitHub Issue."""
 
     @abstractmethod
     def complete(self, identity: FeedbackIdentity) -> None:
-        """Apply only to the exact Issue and PR relationship."""
+        """Mark one exactly identified delivery Issue completed."""
+
+    @abstractmethod
+    def state(self, repository_slug: str, issue_number: int) -> tuple[str, str | None]:
+        """Read exact Issue state and closure reason; raise on uncertainty."""
+
+    @abstractmethod
+    def close(self, identity: FeedbackIdentity, reason: str) -> None:
+        """Close the exact Issue with a supported auditable reason."""
 
 
 class WorkItemFeedbackSink(ABC):
@@ -146,7 +154,7 @@ class WorkItemFeedbackSink(ABC):
 
 
 class FeedbackEventRepository(ABC):
-    """Append one final reconciliation fact to the E1 task trace."""
+    """Append one idempotent provider reconciliation fact to the E1 task trace."""
 
     @abstractmethod
     def record_completed(self, identity: FeedbackIdentity) -> None:
@@ -155,6 +163,10 @@ class FeedbackEventRepository(ABC):
     @abstractmethod
     def is_completed(self, task_id: str) -> bool:
         """Return whether final reconciliation was durably recorded."""
+
+    @abstractmethod
+    def record_resolution(self, identity: FeedbackIdentity, reason: str) -> None:
+        """Record one exact provider resolution, including its reason."""
 
 
 class SprintRepository(ABC):

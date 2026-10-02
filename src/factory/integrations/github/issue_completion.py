@@ -62,6 +62,53 @@ class GitHubIssueCompletionSink(IssueCompletionSink):
         except GitHubWriteError:
             raise IssueCompletionError("GitHub Issue completion failed") from None
 
+    def state(self, repository_slug: str, issue_number: int) -> tuple[str, str | None]:
+        path = f"/repos/{repository_slug}/issues/{issue_number}"
+        try:
+            issue = self._client.get(path)
+        except Exception:
+            raise IssueCompletionError("GitHub Issue read failed") from None
+        if (
+            not isinstance(issue, Mapping)
+            or isinstance(issue.get("number"), bool)
+            or issue.get("number") != issue_number
+            or "pull_request" in issue
+            or issue.get("state") not in {"open", "closed"}
+            or (
+                issue.get("state") == "closed"
+                and issue.get("state_reason") not in {"completed", "not_planned", "duplicate"}
+            )
+        ):
+            raise IssueCompletionError("Issue state is ambiguous")
+        value = issue.get("state_reason")
+        return str(issue["state"]), str(value) if value is not None else None
+
+    def close(self, identity: FeedbackIdentity, reason: str) -> None:
+        if reason not in {"completed", "not_planned", "duplicate"}:
+            raise IssueCompletionError("unsupported Issue closure reason")
+        path = f"/repos/{identity.repository_slug}/issues/{identity.issue_number}"
+        try:
+            issue = self._client.get(path)
+            self._check_issue(issue, identity)
+            if issue.get("state") == "closed" and issue.get("state_reason") == reason:
+                return
+            marker = f"<!-- factory-resolution:{identity.task_id}:{reason} -->"
+            if not self._has_comment(path, marker):
+                self._client.post(
+                    path + "/comments", {"body": f"Factory resolution: {reason}. {marker}"}
+                )
+            if issue.get("state") != "closed" or issue.get("state_reason") != reason:
+                closed = self._client.patch(path, {"state": "closed", "state_reason": reason})
+                self._check_issue(closed, identity)
+                if closed.get("state") != "closed" or closed.get("state_reason") != reason:
+                    raise IssueCompletionError("Issue closure was not confirmed")
+            final = self._client.get(path)
+            self._check_issue(final, identity)
+            if final.get("state") != "closed" or final.get("state_reason") != reason:
+                raise IssueCompletionError("Issue closure was not confirmed")
+        except GitHubWriteError:
+            raise IssueCompletionError("GitHub Issue closure failed") from None
+
     def _has_comment(self, path: str, marker: str) -> bool:
         for page in range(1, 101):
             payload = self._client.get(path + "/comments", {"per_page": 100, "page": page})

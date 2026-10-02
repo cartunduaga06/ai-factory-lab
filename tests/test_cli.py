@@ -273,6 +273,46 @@ def test_runtime_reconciles_configured_trello_backlog(tmp_path: Path) -> None:
     assert runtime._backlog_reconcile is not None
 
 
+def test_sync_status_reconciles_projects_without_trello_status_card(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    projects = (
+        '[{"project_id":"demo","repository":"example/demo",'
+        f'"source_checkout":"{tmp_path}","base_ref":"main",'
+        '"gates":[{"name":"tests","argv":["pytest"]}]}]'
+    )
+    env = _runtime_env(
+        tmp_path,
+        GITHUB_WRITE_TOKEN="write-token",
+        FACTORY_PROJECTS=projects,
+    )
+    for key in (
+        "FACTORY_TRELLO_STATUS_CARD_ID",
+        "FACTORY_TRELLO_KEY",
+        "FACTORY_TRELLO_TOKEN",
+    ):
+        env.pop(key, None)
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    calls: list[str] = []
+
+    class Runtime:
+        def __init__(self, config: FactoryConfig) -> None:
+            assert config.project_registry is not None
+
+        def prepare_pool(self) -> object:
+            calls.append("reconcile")
+            return object()
+
+    monkeypatch.setattr(cli, "_build_runtime", Runtime)
+    monkeypatch.setattr(cli, "_status_publisher", lambda config: None)
+    assert cli.main(["sync-status"]) == cli.EXIT_OK
+    assert calls == ["reconcile"]
+    assert "Trello status card" not in capsys.readouterr().out
+
+
 def test_legacy_watch_command_uses_pool_supervisor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
