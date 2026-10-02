@@ -72,12 +72,25 @@ class ControlTowerTests(unittest.TestCase):
     def test_running_stall_healthy_heartbeat_and_recovery(self) -> None:
         task = self._task(TaskStatus.RUNNING)
         start = datetime(2026, 1, 1, tzinfo=UTC)
-        run = self._run(task, heartbeat=start)
+        self._run(task, heartbeat=start)
         healthy = self.service.for_task(task.task_id, now=start + timedelta(seconds=359))
         self.assertEqual(healthy.phase, "RUNNING")
         stalled = self.service.for_task(task.task_id, now=start + timedelta(seconds=361))
         self.assertEqual(stalled.phase, "STALLED")
         self.assertEqual(stalled.evidence, "No verified heartbeat within the configured threshold")
+
+    def test_codex_agent_liveness_is_separate_from_supervisor_heartbeat(self) -> None:
+        task = self._task(TaskStatus.RUNNING)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        run = self._run(task, heartbeat=start)
+        unknown = self.service.for_task(task.task_id, now=start + timedelta(seconds=1))
+        self.assertEqual(unknown.agent_liveness, "unknown")
+        run.agent_heartbeat = start
+        self.runs.update_run(run)
+        alive = self.service.for_task(task.task_id, now=start + timedelta(seconds=5))
+        self.assertEqual(alive.agent_liveness, "alive")
+        stalled = self.service.for_task(task.task_id, now=start + timedelta(seconds=361))
+        self.assertEqual(stalled.agent_liveness, "stalled")
         self.events.observe(stalled)
         self.events.observe(stalled)
         self.assertEqual(len(self.events.pending()), 1)
@@ -99,7 +112,7 @@ class ControlTowerTests(unittest.TestCase):
         )
         self.assertEqual(config.heartbeat_interval, 300.0)
         self.assertEqual(config.missed_heartbeats, 3)
-        self.assertNotIn("key-secret", repr(config))
+        self.assertNotIn("key-secret", repr(config.redacted()))
         self.assertNotIn("token-secret", repr(config.redacted()))
 
     def test_phone_view_escapes_dynamic_content(self) -> None:

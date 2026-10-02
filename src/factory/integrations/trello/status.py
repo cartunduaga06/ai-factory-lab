@@ -38,6 +38,8 @@ class TrelloStatusChannel:
             ("Workspace", snapshot.workspace_id),
             ("Started", snapshot.started_at),
             ("Heartbeat", snapshot.last_heartbeat),
+            ("Agent heartbeat", snapshot.agent_heartbeat),
+            ("Agent liveness", snapshot.agent_liveness),
             ("Last transition", snapshot.last_transition),
             ("Finished", snapshot.finished_at),
             ("Evidence", snapshot.evidence),

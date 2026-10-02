@@ -74,6 +74,16 @@ class StatusService:
         last_transition = transitions[-1].occurred_at if transitions else None
         current_time = now or datetime.now(UTC)
         phase = task.status.value
+        agent_liveness = None
+        if run is not None and run.adapter.value == "CODEX" and not run.is_terminal:
+            if run.agent_heartbeat is None:
+                agent_liveness = "unknown"
+            elif current_time - run.agent_heartbeat > self._stale_after:
+                agent_liveness = "stalled"
+            else:
+                agent_liveness = "alive"
+        elif run is not None and run.adapter.value == "CODEX":
+            agent_liveness = "stopped"
         if task.status is TaskStatus.RUNNING and run is not None and not run.is_terminal:
             heartbeat = run.last_heartbeat or run.started_at
             if heartbeat is not None and current_time - heartbeat > self._stale_after:
@@ -98,6 +108,8 @@ class StatusService:
             branch=run.workspace.branch if run and run.workspace else None,
             started_at=self._iso(run.started_at) if run else None,
             last_heartbeat=self._iso(run.last_heartbeat) if run else None,
+            agent_heartbeat=self._iso(run.agent_heartbeat) if run else None,
+            agent_liveness=agent_liveness,
             last_transition=self._iso(last_transition),
             finished_at=self._iso(
                 last_transition

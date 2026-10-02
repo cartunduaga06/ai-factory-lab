@@ -104,6 +104,8 @@ def render_status(snapshot: StatusSnapshot) -> str:
         ("Branch", snapshot.branch),
         ("Started", snapshot.started_at),
         ("Heartbeat", snapshot.last_heartbeat),
+        ("Agent heartbeat", snapshot.agent_heartbeat),
+        ("Agent liveness", snapshot.agent_liveness),
         ("Last transition", snapshot.last_transition),
         ("Finished", snapshot.finished_at),
         ("Evidence", snapshot.evidence),

@@ -8,7 +8,9 @@ import selectors
 import signal
 import subprocess
 import sys
+import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, cast
 
@@ -33,13 +35,17 @@ def run(
     message = state_dir / f"{run_id}.message"
     cancel = state_dir / f"{run_id}.cancel"
     result = state_dir / f"{run_id}.result"
+    liveness = state_dir / f"{run_id}.alive"
     stdout_path = state_dir / f"{run_id}.stdout"
     stderr_path = state_dir / f"{run_id}.stderr"
+    heartbeat_stop = threading.Event()
     status = "FAILED"
     exit_code: int | None = None
     stdout_bytes = 0
     stderr_bytes = 0
     timed_out = False
+    _write_liveness(liveness)
+    heartbeat: threading.Thread | None = None
     try:
         if kind not in ("CODE", "OPERATIONAL"):
             raise ValueError("invalid Codex task kind")
@@ -72,6 +78,13 @@ def run(
                 start_new_session=True,
             ) as process:
                 try:
+                    _write_liveness(liveness, process.pid)
+                    heartbeat = threading.Thread(
+                        target=_heartbeat_loop,
+                        args=(liveness, process.pid, heartbeat_stop),
+                        daemon=True,
+                    )
+                    heartbeat.start()
                     status, output_exceeded, timed_out = _drain_output(
                         process,
                         instruction.encode("utf-8"),
@@ -100,6 +113,10 @@ def run(
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
         pass
     finally:
+        if heartbeat is not None:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=1)
+        liveness.unlink(missing_ok=True)
         prompt.unlink(missing_ok=True)
         message.unlink(missing_ok=True)
         stdout_path.unlink(missing_ok=True)
@@ -118,6 +135,33 @@ def run(
             encoding="ascii",
         )
         os.replace(temporary, result)
+
+
+def _write_liveness(path: Path, codex_pid: int | None = None) -> None:
+    """Publish worker-owned process identity while this worker is executing."""
+    # A unique temporary file lets the heartbeat and pipe-drain writers publish
+    # independently without replacing each other's in-progress file.
+    temporary = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "worker_pid": os.getpid(),
+                "codex_pid": codex_pid,
+                "heartbeat": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="ascii",
+    )
+    os.replace(temporary, path)
+
+
+def _heartbeat_loop(path: Path, codex_pid: int, stop: threading.Event) -> None:
+    """Refresh worker-owned evidence even while Codex is quiet on its pipes."""
+    while not stop.wait(5):
+        try:
+            _write_liveness(path, codex_pid)
+        except OSError:
+            return
 
 
 def _drain_output(
@@ -145,6 +189,9 @@ def _drain_output(
         else:
             process.stdin.close()
         while selector.get_map() or process.poll() is None:
+            _write_liveness(
+                cancel.with_name(cancel.name.removesuffix(".cancel") + ".alive"), process.pid
+            )
             if cancel.exists():
                 status = "CANCELLED"
                 break

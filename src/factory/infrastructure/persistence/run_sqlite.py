@@ -98,9 +98,9 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     f"""
                     INSERT INTO {AGENT_RUNS_TABLE} (
                         run_id, task_id, project_id, adapter, status, workspace_id,
-                        summary, started_at, last_heartbeat, finished_at, gates,
+                        summary, started_at, last_heartbeat, agent_heartbeat, finished_at, gates,
                         validated_revision, context_pack, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
@@ -112,6 +112,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                         run.summary,
                         encode_datetime(run.started_at) if run.started_at else None,
                         encode_datetime(run.last_heartbeat) if run.last_heartbeat else None,
+                        encode_datetime(run.agent_heartbeat) if run.agent_heartbeat else None,
                         encode_datetime(run.finished_at) if run.finished_at else None,
                         _encode_gates(run.gates),
                         run.validated_revision,
@@ -174,7 +175,8 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
             conn.execute(
                 f"""
                 UPDATE {AGENT_RUNS_TABLE}
-                   SET status = ?, summary = ?, started_at = ?, last_heartbeat = ?, finished_at = ?,
+                   SET status = ?, summary = ?, started_at = ?, last_heartbeat = ?,
+                       agent_heartbeat = ?, finished_at = ?,
                        gates = ?, validated_revision = ?
                  WHERE run_id = ?
                 """,
@@ -183,6 +185,7 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     run.summary,
                     encode_datetime(run.started_at) if run.started_at else None,
                     encode_datetime(run.last_heartbeat) if run.last_heartbeat else None,
+                    encode_datetime(run.agent_heartbeat) if run.agent_heartbeat else None,
                     encode_datetime(run.finished_at) if run.finished_at else None,
                     _encode_gates(run.gates),
                     run.validated_revision,
@@ -354,6 +357,7 @@ def _row_to_run(row: sqlite3.Row, workspace: Workspace | None) -> AgentRun:
         summary=row["summary"],
         started_at=decode_datetime(started_at) if started_at else None,
         last_heartbeat=decode_datetime(row["last_heartbeat"]) if row["last_heartbeat"] else None,
+        agent_heartbeat=decode_datetime(row["agent_heartbeat"]) if row["agent_heartbeat"] else None,
         finished_at=decode_datetime(finished_at) if finished_at else None,
         gates=_decode_gates(row["gates"]),
         validated_revision=row["validated_revision"],

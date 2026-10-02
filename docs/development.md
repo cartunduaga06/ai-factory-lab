@@ -259,3 +259,25 @@ its own merits; this feature must not alter E4's historical FAILED/PAUSED
 production records merely to make the dashboard appear complete.
 
 Terminal recovery requires the new worker's explicit `timed_out: true` result evidence as well as exit_code -9; SIGKILL alone is not proof of a timeout. Legacy results without that marker are not eligible for automatic operator recovery and require separate human review.
+
+### Orphaned RUNNING Codex recovery
+
+When Factory's supervisor heartbeat continues but its detached Codex worker has
+disappeared, status reports supervisor and agent liveness separately. Recovery is
+an explicit operator action and requires the exact latest RUNNING CODEX run, a
+trusted worker liveness record whose worker and child PIDs are both absent, no
+terminal result, the canonical isolated workspace and branch, a clean unpublished
+workspace, an eligible source Issue, matching project identity, and no local or
+provider PR. Routing and provenance must remain eligible and fail-closed. A live
+or authorized Sprint is not universally required for orphan recovery. Any
+missing or ambiguous required evidence refuses recovery.
+
+```sh
+python -m factory recover-orphaned-codex --task-id TASK_UUID --run-id RUN_UUID --acknowledge-orphan
+python -m factory retry --task-id TASK_UUID
+```
+
+Recovery atomically records the run as FAILED and moves the task from RUNNING to
+BLOCKED. It does not dispatch; `retry` remains the only path to READY. A live
+worker cannot be recovered, and timeout/worker-failure recovery semantics remain
+separate.

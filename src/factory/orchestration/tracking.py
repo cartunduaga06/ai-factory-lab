@@ -39,6 +39,7 @@ from factory.domain.enums import (
 from factory.domain.errors import AgentCollectError, FactoryError, WorkspaceRevisionError
 from factory.domain.models import (
     AgentAdapter,
+    AgentLiveness,
     AgentRun,
     FactoryTask,
     QualityGate,
@@ -176,6 +177,10 @@ class RunTrackingService:
             now = datetime.now(UTC)
             if run.last_heartbeat is None or now - run.last_heartbeat >= self._heartbeat_interval:
                 run.last_heartbeat = now
+            if isinstance(adapter, AgentLiveness) and (
+                run.agent_heartbeat is None or now - run.agent_heartbeat >= self._heartbeat_interval
+            ):
+                run.agent_heartbeat = adapter.read_agent_heartbeat(run)
 
         if run.status is RunStatus.SUCCEEDED:
             task = self._tasks.get(run.task_id)

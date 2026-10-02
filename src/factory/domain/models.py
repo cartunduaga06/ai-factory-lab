@@ -296,6 +296,7 @@ class AgentRun:
     summary: str | None = None
     started_at: datetime | None = None
     last_heartbeat: datetime | None = None
+    agent_heartbeat: datetime | None = None
     finished_at: datetime | None = None
     gates: tuple[QualityGate, ...] = ()
     #: Durable identity of the workspace revision that passed validation.
@@ -376,6 +377,8 @@ class StatusSnapshot:
     branch: str | None = None
     started_at: str | None = None
     last_heartbeat: str | None = None
+    agent_heartbeat: str | None = None
+    agent_liveness: str | None = None
     last_transition: str | None = None
     finished_at: str | None = None
     pr_url: str | None = None
@@ -462,8 +465,18 @@ class AgentAdapter(Protocol):
         ...
 
 
+@runtime_checkable
+class AgentLiveness(Protocol):
+    """Optional capability for adapters that expose worker-owned liveness."""
+
+    def read_agent_heartbeat(self, run: AgentRun) -> datetime | None:
+        """Return separately sourced agent liveness, when available."""
+        ...
+
+
 __all__ = [
     "AgentAdapter",
+    "AgentLiveness",
     "AgentRun",
     "FactoryTask",
     "PublishedRevision",
