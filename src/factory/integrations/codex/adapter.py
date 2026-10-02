@@ -99,6 +99,9 @@ class CodexAdapter(AgentAdapterBase):
                 or state_dir.stat().st_uid != os.getuid()
             ):
                 raise OSError("unsafe Codex state directory")
+            # Run ids are unique. Clear only this run's stale marker before the
+            # prompt becomes visible to the worker.
+            (state_dir / f"{run.run_id}.cancel").unlink(missing_ok=True)
             prompt = state_dir / f"{run.run_id}.prompt"
             descriptor = os.open(prompt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -226,8 +229,20 @@ class CodexAdapter(AgentAdapterBase):
             return
         workspace = run.workspace
         assert workspace is not None
-        cancel = self._state_dir(workspace) / f"{run.run_id}.cancel"
-        cancel.touch(exist_ok=True)
+        state_dir = self._state_dir(workspace)
+        if (state_dir / f"{run.run_id}.result").exists():
+            return
+        cancel = state_dir / f"{run.run_id}.cancel"
+        try:
+            descriptor = os.open(cancel, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return
+        os.close(descriptor)
+        # The worker may publish terminal evidence after the first result check
+        # but before this marker is created. Re-check and consume the marker so
+        # cancel() cannot leave stale state after a terminal result.
+        if (state_dir / f"{run.run_id}.result").exists():
+            cancel.unlink(missing_ok=True)
 
     def read_agent_heartbeat(self, run: AgentRun) -> datetime | None:
         """Read trusted worker liveness without conflating it with supervisor polling."""
