@@ -20,7 +20,7 @@ import argparse
 import json
 import signal
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -966,6 +966,7 @@ def _run_pool(config: FactoryConfig) -> int:
             max_concurrency=config.max_concurrency,
             idle_interval=config.watch_idle_interval,
             should_stop=stop.is_set,
+            sleep=_stop_aware_sleep(stop),
             on_session=_print_worker_session,
         ).run()
     except Exception as exc:  # noqa: BLE001 - no provider details in output
@@ -1001,6 +1002,15 @@ def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
     for signum in (signal.SIGINT, signal.SIGTERM):
         installed[signum] = signal.signal(signum, _request_stop)
     return installed
+
+
+def _stop_aware_sleep(stop: threading.Event) -> Callable[[float], None]:
+    """Return an idle sleeper that wakes as soon as shutdown is requested."""
+
+    def _sleep(seconds: float) -> None:
+        stop.wait(seconds)
+
+    return _sleep
 
 
 def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> FactoryRuntime:

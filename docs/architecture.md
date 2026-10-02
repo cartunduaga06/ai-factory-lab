@@ -601,9 +601,10 @@ Design intent:
   ``WAITING_HUMAN`` holds later CODE tasks until human review, but a separate
   OPERATIONAL scratch task may run while that review is pending.
 - **Cooperative stop.** The CLI installs ``SIGINT``/``SIGTERM`` handlers that only
-  set a flag; the loop checks it between iterations, so a signal cannot interrupt
-  an in-flight task or corrupt persisted state. Previous handlers are restored on
-  exit.
+  set a flag. Idle waits wake as soon as the flag is set; pool shutdown stops
+  scheduling, requests adapter cancellation for active runs, and drains those
+  sessions without inventing lifecycle transitions. Previous handlers are
+  restored on exit.
 - **Injected seams.** ``sleep`` and ``should_stop`` are constructor arguments, so
   the loop is deterministic and offline under test — no wall-clock or signal
   dependence in the tests.
