@@ -23,7 +23,67 @@ application code into this repository.**
 6. Never commit a secret. `.env` is git-ignored; `.env.example` holds placeholders only.
 7. Never modify `finanza-ia`.
 8. Do not perform destructive git operations (force-push, history rewrite, branch deletion).
+## Code review policy
 
+When reviewing a Pull Request, act as a defensive reviewer of the AI Factory
+control plane. Prioritize correctness and architectural safety over style.
+
+Review in this order:
+
+1. Correctness and regressions
+   - Identify behavior that can break an existing Factory lifecycle.
+   - Verify failure paths, retries and partial failures.
+   - Flag state transitions that bypass the lifecycle state machine.
+
+2. Worker and workspace isolation
+   - A run must operate only on its assigned workspace and branch.
+   - Changes from concurrent workers must not leak across workspaces.
+   - Look for race conditions, shared mutable state and unsafe concurrency.
+
+3. Architecture boundaries
+   - domain must remain pure and I/O-free.
+   - orchestration must depend on ports, not concrete integrations.
+   - concrete GitHub, Git, OpenHands, persistence and gate logic stays outside
+     domain/orchestration.
+   - Flag duplicated policies or logic that already has a canonical owner.
+
+4. Git and publication safety
+   - Never allow direct writes to main.
+   - Never introduce automatic merge behavior.
+   - Never introduce force-push, history rewriting or destructive Git actions.
+   - Publication must affect only the isolated branch belonging to the run.
+
+5. Security
+   - Flag secret exposure, unsafe shell execution, command injection,
+     unbounded subprocesses and unsafe filesystem access.
+   - External input from GitHub, agents or product repositories must be treated
+     as untrusted.
+
+6. Persistence and lifecycle integrity
+   - Verify persisted state matches the actual runtime state.
+   - State changes must remain auditable and deterministic.
+   - Check idempotency where retries or repeated events are possible.
+
+7. Tests and quality gates
+   - New behavior must have tests for meaningful success and failure paths.
+   - Concurrency changes require isolation or race-condition tests.
+   - Do not consider a change ready when required tests, lint or type checks fail.
+
+Review comments must identify a concrete defect or meaningful risk and explain
+its impact. Avoid blocking a Pull Request for purely stylistic preferences
+already covered by Ruff or formatting tools.
+
+Pay particular attention to changes involving:
+- task claiming;
+- parallel workers;
+- workspace provisioning;
+- lifecycle transitions;
+- persistence;
+- Git publication;
+- GitHub PR creation;
+- quality gates;
+- agent adapters;
+- recovery after worker failure.
 ## Layering rules
 
 Dependencies point inward only. Violating this is the most likely way to break
