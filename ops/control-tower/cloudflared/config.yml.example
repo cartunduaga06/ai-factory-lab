@@ -1,0 +1,10 @@
+# Copy to config.yml and substitute the stable hostname and tunnel UUID.
+# Create this tunnel in the Cloudflare dashboard and install its credential
+# JSON as credentials.json with owner-only permissions. Do not commit either.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /etc/cloudflared/credentials.json
+protocol: http2
+ingress:
+  - hostname: tower.example.com
+    service: http://127.0.0.1:8765
+  - service: http_status:404
