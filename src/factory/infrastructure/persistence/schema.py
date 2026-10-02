@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -340,6 +340,7 @@ CREATE TABLE IF NOT EXISTS {AGENT_RUNS_TABLE} (
     summary       TEXT,
     started_at    TEXT,
     last_heartbeat TEXT,
+    agent_heartbeat TEXT,
     finished_at   TEXT,
     gates         TEXT NOT NULL DEFAULT '[]',
     validated_revision TEXT,
@@ -461,6 +462,7 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
     MIGRATE_AGENT_RUNS_VALIDATED_REVISION,
     f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN context_pack TEXT;",
     f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN last_heartbeat TEXT;",
+    f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN agent_heartbeat TEXT;",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN blocked_reason TEXT;",
     f"ALTER TABLE {WORKSPACES_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",

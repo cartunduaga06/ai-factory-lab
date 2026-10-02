@@ -308,6 +308,56 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
             task_id, run_id, marker="terminal-worker-recovery:" + run_id
         )
 
+    def authorize_orphaned_codex_recovery(self, task_id: str, run_id: str) -> FactoryTask:
+        """Atomically fail the exact latest orphan and block its task for retry."""
+        timestamp = encode_datetime(datetime.now(UTC))
+        marker = "orphaned-codex-recovery:" + run_id
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""SELECT r.run_id FROM {AGENT_RUNS_TABLE} r
+                    JOIN {TASKS_TABLE} t ON t.task_id = r.task_id
+                    WHERE t.task_id = ? AND t.status = 'RUNNING' AND t.kind = 'CODE'
+                      AND r.project_id = t.project_id
+                      AND r.workspace_id IS NOT NULL
+                      AND r.run_id = ? AND r.status = 'RUNNING' AND r.adapter = 'CODEX'
+                      AND r.rowid = (
+                        SELECT x.rowid FROM {AGENT_RUNS_TABLE} x
+                        WHERE x.task_id = t.task_id
+                        ORDER BY x.created_at DESC, x.rowid DESC LIMIT 1
+                      )
+                      AND NOT EXISTS (SELECT 1 FROM pull_requests p WHERE p.task_id = t.task_id)
+                      AND NOT EXISTS (SELECT 1 FROM {AGENT_RUNS_TABLE} a
+                        WHERE a.task_id != t.task_id AND a.status IN ('PENDING','RUNNING'))""",
+                (task_id, run_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("orphan recovery concurrency guard rejected")
+            conn.execute(
+                f"UPDATE {AGENT_RUNS_TABLE} SET status='FAILED', summary=?, "
+                "finished_at=? WHERE run_id=? AND status='RUNNING'",
+                (marker, timestamp, run_id),
+            )
+            cursor = conn.execute(
+                f"UPDATE {TASKS_TABLE} SET status='BLOCKED', blocked_reason=?, "
+                "updated_at=? WHERE task_id=? AND status='RUNNING'",
+                (marker, timestamp, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("orphan recovery task state changed")
+            transition_id = str(uuid.uuid4())
+            conn.execute(
+                f"INSERT INTO {TRANSITIONS_TABLE} "
+                "(transition_id,task_id,from_status,to_status,occurred_at) "
+                "VALUES (?,?, 'RUNNING','BLOCKED',?)",
+                (transition_id, task_id, timestamp),
+            )
+            # The transition trigger records the immutable E1 projection in this transaction.
+            updated = conn.execute(
+                f"SELECT * FROM {TASKS_TABLE} WHERE task_id=?", (task_id,)
+            ).fetchone()
+        assert updated is not None
+        return _row_to_task(updated)
+
     def _authorize_terminal_recovery(
         self, task_id: str, run_id: str, *, marker: str
     ) -> FactoryTask:

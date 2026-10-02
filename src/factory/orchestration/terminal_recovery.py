@@ -34,6 +34,7 @@ class TerminalRecoveryTasks(Protocol):
 
     def authorize_terminal_timeout_recovery(self, task_id: str, run_id: str) -> FactoryTask: ...
     def authorize_terminal_worker_recovery(self, task_id: str, run_id: str) -> FactoryTask: ...
+    def authorize_orphaned_codex_recovery(self, task_id: str, run_id: str) -> FactoryTask: ...
 
 
 class TerminalRecoveryRefused(ValueError):
@@ -245,3 +246,109 @@ class TerminalRecoveryService:
         if not clean:
             raise TerminalRecoveryRefused("workspace contains unpublished changes")
         return self._tasks.authorize_terminal_worker_recovery(task_id, expected_run_id)
+
+    def authorize_orphaned_codex(
+        self, task_id: str, expected_run_id: str, *, acknowledge_orphan: bool
+    ) -> FactoryTask:
+        """Recover a missing-worker RUNNING Codex attempt after independent checks."""
+        if not acknowledge_orphan:
+            raise TerminalRecoveryRefused("explicit orphan acknowledgement is required")
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        try:
+            base = (
+                self._registry.resolve(task.project_id, task.target_repository).base_ref
+                if self._registry
+                else self._base
+            )
+        except ProjectRoutingError:
+            raise TerminalRecoveryRefused("project identity mismatch") from None
+        history = self._runs.list_runs(task_id)
+        if task.status is not TaskStatus.RUNNING or task.kind is not TaskKind.CODE:
+            raise TerminalRecoveryRefused("task must be RUNNING CODE")
+        if not history or history[-1].run_id != expected_run_id:
+            raise TerminalRecoveryRefused("expected run is not the latest attempt")
+        run = history[-1]
+        workspace = run.workspace
+        if (
+            run.status is not RunStatus.RUNNING
+            or run.adapter is not AgentKind.CODEX
+            or run.project_id != task.project_id
+            or workspace is None
+            or workspace.kind is not TaskKind.CODE
+            or workspace.repository_slug != task.target_repository
+        ):
+            raise TerminalRecoveryRefused("latest RUNNING CODEX run/workspace required")
+        root = Path(self._root).expanduser().resolve(strict=True)
+        path = Path(workspace.path).expanduser()
+        if (
+            path.is_symlink()
+            or not path.is_dir()
+            or path.resolve(strict=True).parent != root
+            or workspace.branch != f"factory/{task.task_id}/{workspace.workspace_id}"
+            or workspace.branch == base
+        ):
+            raise TerminalRecoveryRefused("factory workspace identity is not valid")
+        state = root / ".factory-codex-runs"
+        result = state / f"{expected_run_id}.result"
+        liveness = state / f"{expected_run_id}.alive"
+        if (
+            liveness.is_symlink()
+            or not liveness.is_file()
+            or liveness.stat().st_uid != os.getuid()
+            or liveness.stat().st_size > 512
+        ):
+            raise TerminalRecoveryRefused("trusted worker liveness evidence is missing")
+        try:
+            evidence = json.loads(liveness.read_text(encoding="ascii"))
+            if not isinstance(evidence, dict):
+                raise ValueError
+            raw_pids = [evidence.get("worker_pid"), evidence.get("codex_pid")]
+            if any(type(pid) is not int or pid <= 0 for pid in raw_pids):
+                raise ValueError
+            pids = [pid for pid in raw_pids if type(pid) is int]
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            raise TerminalRecoveryRefused("worker liveness evidence is ambiguous") from None
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                raise TerminalRecoveryRefused("worker liveness is ambiguous") from None
+            else:
+                raise TerminalRecoveryRefused("Codex worker is still alive")
+        if result.exists() or result.is_symlink():
+            raise TerminalRecoveryRefused("terminal worker result exists or is ambiguous")
+        if self._runs.find_active_run(task_id) is None:
+            raise TerminalRecoveryRefused("active Codex run is missing")
+        if self._runs.find_active_run(task_id) != run:
+            raise TerminalRecoveryRefused("active run identity is ambiguous")
+        if (
+            self._sprint is None
+            or not self._sprint.allows_review(task)
+            or task.source is None
+            or not self._eligible(task)
+        ):
+            raise TerminalRecoveryRefused("source Issue or authorized Sprint is not eligible")
+        if self._prs.find_by_branch(task.target_repository, workspace.branch) is not None:
+            raise TerminalRecoveryRefused("existing local PR requires human review")
+        if (
+            self._sink.find_open_pull_request(
+                Repository(task.target_repository, RepositoryRole.TARGET), workspace.branch, base
+            )
+            is not None
+        ):
+            raise TerminalRecoveryRefused("existing provider PR requires human review")
+        if self._workspace_is_clean is None:
+            raise TerminalRecoveryRefused("workspace cleanliness verifier is unavailable")
+        try:
+            if not self._workspace_is_clean(workspace, base):
+                raise TerminalRecoveryRefused("workspace contains unpublished changes")
+            self._provisioner.repair(task, workspace)
+        except TerminalRecoveryRefused:
+            raise
+        except Exception:
+            raise TerminalRecoveryRefused("workspace evidence is ambiguous") from None
+        return self._tasks.authorize_orphaned_codex_recovery(task_id, expected_run_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Thread
@@ -160,6 +161,56 @@ def test_clean_nonzero_worker_failure_can_be_recovered_explicitly(timeout_case) 
     ]
     ready = RetryService(tasks, runs, RecoveryPolicy(base_backoff_seconds=0)).retry(task.task_id)
     assert ready.status is TaskStatus.READY
+
+
+def test_orphaned_running_codex_recovers_only_after_explicit_ack(timeout_case) -> None:
+    service, task, run, root, tasks, runs, prs, _, _ = timeout_case
+    task.status = TaskStatus.RUNNING
+    tasks.update(task)
+    run.status = RunStatus.RUNNING
+    run.finished_at = None
+    runs.update_run(run)
+    state = root / ".factory-codex-runs"
+    (state / f"{run.run_id}.result").unlink()
+    (state / f"{run.run_id}.alive").write_text(
+        json.dumps(
+            {
+                "worker_pid": 2147483000,
+                "codex_pid": 2147483001,
+                "heartbeat": "2020-01-01T00:00:00+00:00",
+            }
+        )
+    )
+    with pytest.raises(TerminalRecoveryRefused, match="acknowledgement"):
+        service.authorize_orphaned_codex(task.task_id, run.run_id, acknowledge_orphan=False)
+    result = service.authorize_orphaned_codex(task.task_id, run.run_id, acknowledge_orphan=True)
+    assert result.status is TaskStatus.BLOCKED
+    assert result.blocked_reason == f"orphaned-codex-recovery:{run.run_id}"
+    assert runs.get_run(run.run_id).status is RunStatus.FAILED  # type: ignore[union-attr]
+    assert [(item.from_status, item.to_status) for item in tasks.history(task.task_id)] == [
+        (TaskStatus.RUNNING, TaskStatus.BLOCKED)
+    ]
+    assert prs.find_by_branch(task.target_repository, run.workspace.branch) is None  # type: ignore[union-attr]
+    assert (
+        RetryService(tasks, runs, RecoveryPolicy(base_backoff_seconds=0)).retry(task.task_id).status
+        is TaskStatus.READY
+    )
+
+
+def test_orphan_recovery_refuses_live_worker_and_terminal_result(timeout_case) -> None:
+    service, task, run, root, tasks, runs, _, _, _ = timeout_case
+    task.status = TaskStatus.RUNNING
+    tasks.update(task)
+    run.status = RunStatus.RUNNING
+    run.finished_at = None
+    runs.update_run(run)
+    state = root / ".factory-codex-runs"
+    (state / f"{run.run_id}.alive").write_text(
+        json.dumps({"worker_pid": os.getpid(), "codex_pid": 2147483001})
+    )
+    with pytest.raises(TerminalRecoveryRefused, match="still alive"):
+        service.authorize_orphaned_codex(task.task_id, run.run_id, acknowledge_orphan=True)
+    assert tasks.get(task.task_id).status is TaskStatus.RUNNING  # type: ignore[union-attr]
 
 
 def test_worker_failure_recovery_rejects_dirty_workspace(timeout_case) -> None:

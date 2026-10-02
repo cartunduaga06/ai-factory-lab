@@ -188,6 +188,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly attest that the reviewed worker failure may be recovered.",
     )
+    orphan_recovery = subparsers.add_parser(
+        "recover-orphaned-codex",
+        help="Recover one orphaned RUNNING Codex attempt; never dispatches.",
+    )
+    orphan_recovery.add_argument("--task-id", required=True, type=UUID)
+    orphan_recovery.add_argument("--run-id", required=True, type=UUID)
+    orphan_recovery.add_argument("--acknowledge-orphan", action="store_true")
     rework = subparsers.add_parser(
         "request-changes", help="Record human QA feedback for an open PR."
     )
@@ -237,6 +244,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(args.task_id),
             str(args.run_id),
             args.acknowledge_worker_failure,
+        )
+    if args.command == "recover-orphaned-codex":
+        return _recover_orphaned_codex(
+            config, str(args.task_id), str(args.run_id), args.acknowledge_orphan
         )
     if args.command == "request-changes":
         return _request_changes(config, str(args.task_id), args.feedback_file)
@@ -646,6 +657,77 @@ def _recover_terminal_timeout(
     print(f"Task: {result.task_id}")
     print("Task status: BLOCKED")
     print("Next steps: explicit factory retry, then human Sprint resume.")
+    return EXIT_OK
+
+
+def _recover_orphaned_codex(
+    config: FactoryConfig, task_id: str, run_id: str, acknowledged: bool
+) -> int:
+    if not acknowledged:
+        print("recover-orphaned-codex refused: --acknowledge-orphan is required")
+        return EXIT_INTAKE_ERROR
+    try:
+        token, write_token = config.github.token, config.github_write_token
+        source_checkout = config.source_checkout
+        if not token or not write_token or (not source_checkout and not config.project_registry):
+            raise ConfigurationError(
+                "GitHub read/write credentials and source checkout are required"
+            )
+        tasks, runs, prs = (
+            SqliteTaskRepository(config.database.path),
+            SqliteRunRepository(config.database.path),
+            SqlitePullRequestRepository(config.database.path),
+        )
+        tasks.initialize()
+        runs.initialize()
+        prs.initialize()
+        raw_source = GitHubIssueSource(
+            GitHubClient(token=token, api_url=config.github.api_url),
+            target_repository=None if config.project_registry else config.github.target_repo,
+        )
+        source: IssueSource = (
+            ProjectIssueSource(raw_source, config.project_registry)
+            if config.project_registry
+            else raw_source
+        )
+        intake = IssueIntakeService(source=source, repository=tasks)
+        service = TerminalRecoveryService(
+            tasks,
+            runs,
+            prs,
+            GitHubPullRequestSink(GitHubWriteClient(write_token, config.github.api_url)),
+            ProjectWorkspaceProvisioner(config.project_registry)
+            if config.project_registry
+            else GitWorktreeWorkspaceProvisioner(
+                source_checkout or "", base_ref=config.workspace_base_ref
+            ),
+            workspace_root=config.workspace_root,
+            base_branch=config.target_default_branch,
+            registry=config.project_registry,
+            source_is_eligible=lambda task: (
+                task.source is not None
+                and intake.is_eligible(
+                    Repository(task.source.repository_slug, role=RepositoryRole.CONTROL_PLANE),
+                    task.source,
+                )
+            ),
+            workspace_is_clean=git_workspace_is_clean_unpublished,
+            sprint=_build_sprint(config, tasks),
+        )
+        result = service.authorize_orphaned_codex(task_id, run_id, acknowledge_orphan=True)
+    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except KeyError:
+        print("recover-orphaned-codex refused: task was not found")
+        return EXIT_INTAKE_ERROR
+    except (TerminalRecoveryRefused, TaskStateChangedError, ValueError) as exc:
+        print(f"recover-orphaned-codex refused: {exc}")
+        return EXIT_INTAKE_ERROR
+    except Exception as exc:  # noqa: BLE001 - keep provider details out of CLI
+        print(f"recover-orphaned-codex failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    print(f"Task: {result.task_id}\nTask status: BLOCKED\nNext step: explicit factory retry.")
     return EXIT_OK
 
 

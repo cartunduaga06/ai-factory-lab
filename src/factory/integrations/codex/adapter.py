@@ -173,12 +173,14 @@ class CodexAdapter(AgentAdapterBase):
                 }
                 if workspace.kind is TaskKind.CODE and content in legacy:
                     run.status = legacy[content]
+                    _capture_liveness(run, self._state_dir(workspace))
                     if run.is_terminal:
                         run.finished_at = datetime.now(UTC)
                     return run
                 parsed = json.loads(content)
                 if not isinstance(parsed, dict):
                     raise ValueError("invalid worker result")
+                _capture_liveness(run, self._state_dir(workspace))
                 status = parsed.get("status")
                 run.status = (
                     {
@@ -209,6 +211,8 @@ class CodexAdapter(AgentAdapterBase):
                 seconds=self._timeout + _COLLECTION_GRACE_SECONDS
             ):
                 run.status = RunStatus.FAILED
+            else:
+                _capture_liveness(run, self._state_dir(workspace))
         except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
             run.status = RunStatus.FAILED
         if run.is_terminal:
@@ -225,6 +229,13 @@ class CodexAdapter(AgentAdapterBase):
         cancel = self._state_dir(workspace) / f"{run.run_id}.cancel"
         cancel.touch(exist_ok=True)
 
+    def read_agent_heartbeat(self, run: AgentRun) -> datetime | None:
+        """Read trusted worker liveness without conflating it with supervisor polling."""
+        self._require_identity(run)
+        assert run.workspace is not None
+        _capture_liveness(run, self._state_dir(run.workspace))
+        return run.agent_heartbeat
+
     @staticmethod
     def _state_dir(workspace: Workspace) -> Path:
         # The directory is a sibling of the checkout so run metadata cannot be
@@ -240,6 +251,19 @@ class CodexAdapter(AgentAdapterBase):
     def _require_identity(self, run: AgentRun) -> None:
         if run.adapter is not self.kind or run.workspace is None:
             raise ValueError("Codex run identity is invalid")
+
+
+def _capture_liveness(run: AgentRun, state_dir: Path) -> None:
+    path = state_dir / f"{run.run_id}.alive"
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 512:
+        return
+    try:
+        evidence = json.loads(path.read_text(encoding="ascii"))
+        heartbeat = evidence.get("heartbeat") if isinstance(evidence, dict) else None
+        if isinstance(heartbeat, str):
+            run.agent_heartbeat = datetime.fromisoformat(heartbeat)
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        return
 
 
 __all__ = ["CodexAdapter", "DEFAULT_TIMEOUT_SECONDS"]
