@@ -267,9 +267,10 @@ disappeared, status reports supervisor and agent liveness separately. Recovery i
 an explicit operator action and requires the exact latest RUNNING CODEX run, a
 trusted worker liveness record whose worker and child PIDs are both absent, no
 terminal result, the canonical isolated workspace and branch, a clean unpublished
-workspace, an eligible source Issue and authorized Sprint, matching project
-identity, and no local or provider PR. Any missing or ambiguous evidence refuses
-recovery.
+workspace, an eligible source Issue, matching project identity, and no local or
+provider PR. Routing and provenance must remain eligible and fail-closed. A live
+or authorized Sprint is not universally required for orphan recovery. Any
+missing or ambiguous required evidence refuses recovery.
 
 ```sh
 python -m factory recover-orphaned-codex --task-id TASK_UUID --run-id RUN_UUID --acknowledge-orphan
