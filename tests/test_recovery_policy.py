@@ -184,6 +184,39 @@ def test_explicit_retry_obeys_persisted_backoff_and_attempt_cap(tmp_path: Path) 
     assert tasks.get(task.task_id).status is TaskStatus.BLOCKED  # type: ignore[union-attr]
 
 
+def test_failed_run_backoff_ignores_prior_gate_failures(tmp_path: Path) -> None:
+    path = str(tmp_path / "separate-retry-counts.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(FactoryTask("mixed failures", "example/target", status=TaskStatus.BLOCKED))
+    runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            gates=(QualityGate("tests", QualityGateStatus.FAILED),),
+        )
+    )
+    failed = runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.FAILED,
+            finished_at=datetime.now(UTC) - timedelta(seconds=31),
+        )
+    )
+    # Both persisted failures consume retry budget, while only the FAILED run
+    # contributes to the one-step FAILED-run backoff.
+    assert (
+        RetryService(tasks, runs, RecoveryPolicy(run_retry_limit=3, base_backoff_seconds=30))
+        .retry(task.task_id)
+        .status
+        is TaskStatus.READY
+    )
+    assert runs.get_run(failed.run_id) is not None
+
+
 def test_gate_failure_human_retry_ignores_automatic_corrections(tmp_path: Path) -> None:
     path = str(tmp_path / "factory.db")
     tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
@@ -200,7 +233,8 @@ def test_gate_failure_human_retry_ignores_automatic_corrections(tmp_path: Path) 
             )
         )
 
-    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+    with pytest.raises(RetryNotAllowedError, match="limit"):
+        RetryService(tasks, runs).retry(task.task_id)
 
 
 def test_gate_failure_human_retries_are_bounded_by_audited_transitions(tmp_path: Path) -> None:
@@ -223,7 +257,7 @@ def test_gate_failure_human_retries_are_bounded_by_audited_transitions(tmp_path:
     assert service.retry(task.task_id).status is TaskStatus.READY
     tasks.apply_transition(task.task_id, TaskStatus.READY, TaskStatus.BLOCKED)
 
-    for _ in range(2):
+    for _ in range(1):
         runs.save_run(
             AgentRun(
                 task_id=task.task_id,

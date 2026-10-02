@@ -229,7 +229,8 @@ class FactoryRuntime:
         if self._sprint is not None:
             self._sprint.resume_completed()
             self._sprint.prepare()
-        if self._backlog_reconcile is not None:
+        if self._should_reconcile_backlog():
+            assert self._backlog_reconcile is not None
             self._backlog_reconcile()
         return self._intake.intake(self._intake_repository)
 
@@ -264,7 +265,8 @@ class FactoryRuntime:
         self, selected_task: FactoryTask | None = None, *, do_intake: bool = True
     ) -> RuntimeResult:
         """Drive the existing one-shot lifecycle."""
-        if do_intake and self._backlog_reconcile is not None:
+        if do_intake and self._should_reconcile_backlog():
+            assert self._backlog_reconcile is not None
             self._backlog_reconcile()
         intake = self._intake.intake(self._intake_repository) if do_intake else IntakeSummary()
         if do_intake:
@@ -718,13 +720,32 @@ class FactoryRuntime:
     def _pool_allows(self, task: FactoryTask) -> bool:
         if self._sprint is None:
             return True
-        return self._sprint.allows(task) or (
-            task.source is not None
-            and task.source.provider == "github"
-            and task.source.repository_slug == task.target_repository
-            and self._pool_backlog_links is not None
-            and self._pool_backlog_links.reconciliation_origin(task.task_id)
-            == ("github-direct", None)
+        provenance = (
+            self._pool_backlog_links.reconciliation_origin(task.task_id)
+            if self._pool_backlog_links is not None
+            else None
+        )
+        return (
+            self._sprint.allows(task)
+            or (
+                not self._sprint.has_live_sprint()
+                and task.source is not None
+                and task.source.provider == "github"
+                and provenance is not None
+                and provenance[0] == "trello"
+            )
+            or (
+                task.source is not None
+                and task.source.provider == "github"
+                and task.source.repository_slug == task.target_repository
+                and self._pool_backlog_links is not None
+                and provenance == ("github-direct", None)
+            )
+        )
+
+    def _should_reconcile_backlog(self) -> bool:
+        return self._backlog_reconcile is not None and (
+            self._sprint is None or not self._sprint.has_live_sprint()
         )
 
     def _selectable(self, status: TaskStatus, *, pool: bool = False) -> list[FactoryTask]:

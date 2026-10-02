@@ -77,6 +77,42 @@ def _service(path: Path, source: Source, sink: Sink) -> tuple[SprintService, Sql
     return SprintService(source, materializer, links, tasks, sprints), tasks
 
 
+def _pool_runtime(
+    tmp_path: Path,
+    tasks: SqliteTaskRepository,
+    sprint: SprintService,
+    links: SqliteBacklogLinkRepository,
+    backlog_reconcile: object,
+    issue_task: FactoryTask,
+) -> FactoryRuntime:
+    path = str(tmp_path / "factory.db")
+    runs = SqliteRunRepository(path)
+    prs = SqlitePullRequestRepository(path)
+    runs.initialize()
+    prs.initialize()
+    return FactoryRuntime(
+        intake=IssueIntakeService(FakeIssueSource(issue_task), tasks),
+        intake_repository=Repository("example/control", role=RepositoryRole.CONTROL_PLANE),
+        tasks=tasks,
+        runs=runs,
+        adapter=FakeAgentAdapter(kind=AgentKind.OTHER),
+        provisioner=FakeWorkspaceProvisioner(),
+        workspace_root=str(tmp_path / "workspaces"),
+        gate_specs=specs("tests"),
+        gate_runner=FakeQualityGateRunner(),
+        revision_inspector=FakeRevisionInspector(),
+        publisher=FakeWorkspacePublisher(),
+        pull_request_sink=FakePullRequestSink(),
+        pull_requests=prs,
+        base_branch="main",
+        security_review=FakeSecurityReviewGate(),
+        sprint=sprint,
+        pool_mode=True,
+        pool_backlog_links=links,
+        backlog_reconcile=backlog_reconcile,  # type: ignore[arg-type]
+    )
+
+
 def test_authorized_order_pause_resume_and_trace_survive_restart(tmp_path: Path) -> None:
     path = tmp_path / "factory.db"
     source, sink = Source(), Sink()
@@ -207,6 +243,91 @@ def test_pool_accepts_direct_issue_with_sprint_but_rejects_other_trello_step(
     assert later.task_id not in candidates
     with pytest.raises(ValueError, match="not authorized"):
         runtime.run_task(later.task_id)
+
+
+def test_ready_trello_provenance_is_pool_authorized_without_live_sprint(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    sprint, tasks = _service(path, source, sink)
+    links = SqliteBacklogLinkRepository(str(path))
+    item = source.get_item("a")
+    links.reserve(item)
+    links.begin_write(item)
+    links.complete(item, MaterializedIssue("example/control", 1, "https://example/1"))
+    task = tasks.save(
+        FactoryTask(
+            "READY from Trello",
+            "example/control",
+            status=TaskStatus.READY,
+            source=TaskSource("github", "example/control", 1),
+        )
+    )
+    assert SqliteTaskRepository(str(path)).get(task.task_id) is not None
+    assert SqliteBacklogLinkRepository(str(path)).reconciliation_origin(task.task_id) == (
+        "trello",
+        "a",
+    )
+    calls: list[str] = []
+    runtime = _pool_runtime(tmp_path, tasks, sprint, links, lambda: calls.append("reconcile"), task)
+
+    assert task.task_id in runtime.pool_candidates()
+    # Let run_task pass pool authorization, then stop before dispatch through
+    # the ordinary GitHub eligibility check.
+    runtime._intake._source.state = "closed"  # type: ignore[attr-defined]
+    assert runtime.run_task(task.task_id).outcome == "SOURCE_INELIGIBLE"
+    assert calls == []
+
+
+def test_live_sprint_owns_pool_materialization_and_pause_excludes_other_trello(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    sprint, tasks = _service(path, source, sink)
+    manifest = sprint.draft("live-pool", (("a", ()), ("b", ())))
+    sprint.authorize(manifest)
+    assert sprint.prepare()
+    links = SqliteBacklogLinkRepository(str(path))
+    current = tasks.save(
+        FactoryTask(
+            "current sprint task",
+            "example/control",
+            source=TaskSource("github", "example/control", 1),
+            status=TaskStatus.READY,
+        )
+    )
+    unrelated_item = source.get_item("outside")
+    links.reserve(unrelated_item)
+    links.begin_write(unrelated_item)
+    links.complete(
+        unrelated_item,
+        MaterializedIssue("example/control", 2, "https://example/2"),
+    )
+    unrelated = tasks.save(
+        FactoryTask(
+            "unrelated Trello item",
+            "example/control",
+            source=TaskSource("github", "example/control", 2),
+            status=TaskStatus.READY,
+        )
+    )
+    calls: list[str] = []
+    runtime = _pool_runtime(
+        tmp_path, tasks, sprint, links, lambda: calls.append("reconcile"), current
+    )
+
+    runtime.prepare_pool()
+    assert calls == []
+    assert current.task_id in runtime.pool_candidates()
+    assert unrelated.task_id not in runtime.pool_candidates()
+    sprint.pause("live-pool")
+    runtime.prepare_pool()
+    assert calls == []
+    assert unrelated.task_id not in runtime.pool_candidates()
+    with pytest.raises(ValueError, match="not authorized"):
+        runtime.run_task(unrelated.task_id)
 
 
 def test_changed_snapshot_pauses_before_e2_write(tmp_path: Path) -> None:

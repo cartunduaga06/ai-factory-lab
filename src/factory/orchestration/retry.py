@@ -52,20 +52,13 @@ class RetryService:
                 else "latest run is not recoverable"
             )
             raise RetryNotAllowedError(f"task {task_id} {reason}")
-        failed_count = sum(run.status is RunStatus.FAILED for run in history)
-        gate_retry_count = sum(
-            transition.from_status is TaskStatus.BLOCKED
-            and transition.to_status is TaskStatus.READY
-            for transition in self._tasks.history(task_id)
+        retryable_count = sum(
+            run.status is RunStatus.FAILED
+            or (run.is_terminal and run.validation_outcome is ValidationOutcome.GATES_FAILED)
+            for run in history
         )
-        is_gate_retry = (
-            task.status is TaskStatus.BLOCKED
-            and latest is not None
-            and latest.is_terminal
-            and latest.validation_outcome is ValidationOutcome.GATES_FAILED
-        )
-        retry_count = gate_retry_count if is_gate_retry else failed_count
-        if retry_count >= self._policy.run_retry_limit:
+        failed_run_count = sum(run.status is RunStatus.FAILED for run in history)
+        if retryable_count >= self._policy.run_retry_limit:
             raise RetryNotAllowedError(f"task {task_id} retry limit reached")
         if latest is not None and latest.status is RunStatus.FAILED:
             last_attempt = latest.finished_at or latest.started_at
@@ -73,7 +66,7 @@ class RetryService:
                 self._policy.base_backoff_seconds
                 and last_attempt is not None
                 and (datetime.now(UTC) - last_attempt).total_seconds()
-                < self._policy.delay_for(failed_count)
+                < self._policy.delay_for(failed_run_count)
             ):
                 raise RetryNotAllowedError(f"task {task_id} retry backoff pending")
         if task.status is TaskStatus.CLAIMED:
