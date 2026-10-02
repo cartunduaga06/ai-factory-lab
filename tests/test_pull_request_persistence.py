@@ -257,6 +257,155 @@ def test_record_merged_is_exact_durable_and_idempotent(db_path: str) -> None:
     assert names.count("PRUpdated") == 1
 
 
+def test_record_revision_rebinds_single_pr_to_latest_run(db_path: str) -> None:
+    tasks, runs, task_id, first_run_id = _seed(db_path)
+    second = AgentRun(
+        task_id=task_id,
+        adapter=AgentKind.OTHER,
+        run_id="run-2",
+        status=RunStatus.SUCCEEDED,
+        workspace=runs.get_run(first_run_id).workspace,  # type: ignore[union-attr]
+    )
+    runs.save_run(second)
+    repo = SqlitePullRequestRepository(db_path)
+    original = replace(_pr(first_run_id, task_id), commit_sha="a" * 40)
+    repo.save(original)
+    persisted_before = repo.get_for_run(first_run_id)
+    assert persisted_before is not None
+
+    updated = repo.record_revision(original, second.run_id, "b" * 40)
+    reopened = SqlitePullRequestRepository(db_path)
+
+    assert updated.run_id == second.run_id
+    assert updated.commit_sha == "b" * 40
+    assert reopened.find_by_branch("example/target", original.head_branch) == updated
+    assert reopened.get_for_run(first_run_id) is None
+    assert reopened.get_for_run(second.run_id) == updated
+
+
+def test_same_sha_rebind_records_one_update_with_new_run_attribution(db_path: str) -> None:
+    _, runs, task_id, first_run_id = _seed(db_path)
+    first = runs.get_run(first_run_id)
+    assert first is not None
+    second = runs.save_run(
+        AgentRun(
+            task_id=task_id,
+            adapter=AgentKind.OTHER,
+            run_id="run-2",
+            status=RunStatus.SUCCEEDED,
+            workspace=first.workspace,
+        )
+    )
+    repo = SqlitePullRequestRepository(db_path)
+    sha = "a" * 40
+    original = replace(_pr(first_run_id, task_id), commit_sha=sha)
+    repo.save(original)
+    before_events = SqliteAuditEventStore(db_path).for_task(task_id)
+
+    updated = repo.record_revision(original, second.run_id, sha)
+    # Retrying after the durable update is a no-op and must not append another event.
+    assert repo.record_revision(updated, second.run_id, sha) == updated
+
+    reopened = SqlitePullRequestRepository(db_path)
+    assert reopened.get_for_run(first_run_id) is None
+    assert reopened.get_for_run(second.run_id) == updated
+    events = SqliteAuditEventStore(db_path).for_task(task_id)
+    updates = [event for event in events if event.name == "PRUpdated"]
+    assert len(updates) == len([event for event in before_events if event.name == "PRUpdated"]) + 1
+    rebind = updates[-1]
+    assert rebind.run_id == "b9d17232a4c8"  # Safe public representation of run-2.
+    assert second.workspace is not None
+    assert rebind.workspace_id == second.workspace.workspace_id
+
+
+def test_record_revision_rejects_run_from_another_task_without_changing_pr(db_path: str) -> None:
+    tasks, runs, task_id, first_run_id = _seed(db_path)
+    other_task = tasks.save(
+        FactoryTask(
+            title="Other task",
+            target_repository="example/target",
+            source=TaskSource("github", "example/control", 2),
+        )
+    )
+    other_run = runs.save_run(
+        AgentRun(
+            task_id=other_task.task_id,
+            adapter=AgentKind.OTHER,
+            run_id="other-task-run",
+            status=RunStatus.SUCCEEDED,
+            workspace=Workspace(
+                repository_slug="example/target",
+                branch="factory/other-task/ws-1",
+                path="/tmp/other-task-ws",
+            ),
+        )
+    )
+    repo = SqlitePullRequestRepository(db_path)
+    original = replace(_pr(first_run_id, task_id), commit_sha="a" * 40)
+    repo.save(original)
+    persisted_before = repo.get_for_run(first_run_id)
+    assert persisted_before is not None
+
+    with pytest.raises(ValueError, match="identity mismatch"):
+        repo.record_revision(original, other_run.run_id, "b" * 40)
+
+    assert repo.get_for_run(first_run_id) == persisted_before
+    assert repo.get_for_run(other_run.run_id) is None
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "value"),
+    [
+        ("agent_runs", "project_id", "wrong-project"),
+        ("workspaces", "repository_slug", "wrong/repository"),
+    ],
+)
+def test_record_revision_rejects_persisted_ownership_mismatch(
+    db_path: str, table: str, column: str, value: str
+) -> None:
+    _, runs, task_id, first_run_id = _seed(db_path)
+    first = runs.get_run(first_run_id)
+    assert first is not None and first.workspace is not None
+    second = runs.save_run(
+        AgentRun(
+            task_id=task_id,
+            adapter=AgentKind.OTHER,
+            run_id="run-2",
+            status=RunStatus.SUCCEEDED,
+            workspace=first.workspace,
+        )
+    )
+    repo = SqlitePullRequestRepository(db_path)
+    original = replace(_pr(first_run_id, task_id), commit_sha="a" * 40)
+    repo.save(original)
+    persisted_before = repo.get_for_run(first_run_id)
+    assert persisted_before is not None
+    events_before = SqliteAuditEventStore(db_path).for_task(task_id)
+
+    with sqlite3.connect(db_path) as conn:
+        if table == "agent_runs":
+            conn.execute(
+                "UPDATE agent_runs SET project_id = ? WHERE run_id = ?",
+                (value, second.run_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE workspaces SET repository_slug = ? WHERE workspace_id = ?",
+                (value, second.workspace.workspace_id),
+            )
+
+    with pytest.raises(ValueError, match="pull request revision identity mismatch"):
+        repo.record_revision(original, second.run_id, "b" * 40)
+
+    reopened = SqlitePullRequestRepository(db_path)
+    assert reopened.get_for_run(first_run_id) == persisted_before
+    assert reopened.get_for_run(second.run_id) is None
+    assert reopened.find_by_branch("example/target", original.head_branch) == persisted_before
+    events_after = SqliteAuditEventStore(db_path).for_task(task_id)
+    assert events_after == events_before
+    assert not [event for event in events_after if event.name == "PRUpdated"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

@@ -748,3 +748,75 @@ def test_persisted_pr_identity_error_is_sanitized(db_path: str, tmp_path: Path) 
         assert text not in repr(error)
         assert text not in formatted
     assert error.__cause__ is None and error.__context__ is None
+
+
+def test_rework_publication_recovers_after_durable_rebind_before_reconciliation(
+    db_path: str, tmp_path: Path
+) -> None:
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    runs = _runs(db_path)
+    first = _validated_run(runs, task, tmp_path, run_id="run-a")
+    sink = FakePullRequestSink()
+    publisher = FakeWorkspacePublisher()
+    initial = _service(db_path, publisher=publisher, sink=sink).publish(task.task_id, first.run_id)
+    assert initial.task_status is TaskStatus.WAITING_HUMAN
+    tasks.request_rework(task.task_id, first.run_id, "Please revise")
+    for source, target in (
+        (TaskStatus.CHANGES_REQUESTED, TaskStatus.READY),
+        (TaskStatus.READY, TaskStatus.CLAIMED),
+        (TaskStatus.CLAIMED, TaskStatus.RUNNING),
+        (TaskStatus.RUNNING, TaskStatus.VALIDATING),
+    ):
+        tasks.apply_transition(task.task_id, source, target)
+    second = AgentRun(
+        task_id=task.task_id,
+        adapter=first.adapter,
+        run_id="run-b",
+        status=RunStatus.SUCCEEDED,
+        workspace=first.workspace,
+        gates=first.gates,
+        validated_revision="tree-validated-b",
+    )
+    runs.save_run(second)
+
+    class CrashAfterDurableRebind(SqlitePullRequestRepository):
+        def record_revision(
+            self, pull_request: PullRequest, run_id: str, commit_sha: str
+        ) -> PullRequest:
+            result = super().record_revision(pull_request, run_id, commit_sha)
+            raise RuntimeError(f"simulated crash after durable rebind: {result.number}")
+
+    interrupted = PublicationService(
+        tasks,
+        runs,
+        CrashAfterDurableRebind(db_path),
+        publisher=publisher,
+        sink=sink,
+        security_review=FakeSecurityReviewGate(),
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        interrupted.publish(task.task_id, second.run_id)
+
+    # Reopen every SQLite repository and rebuild PublicationService in the exact
+    # post-rebind/pre-lifecycle-reconciliation crash window.
+    restarted_tasks = SqliteTaskRepository(db_path)
+    restarted_runs = SqliteRunRepository(db_path)
+    restarted_prs = SqlitePullRequestRepository(db_path)
+    durable = restarted_prs.get_for_run(second.run_id)
+    assert durable is not None and durable.number == initial.pull_request.number
+    assert restarted_prs.get_for_run(first.run_id) is None
+    assert restarted_tasks.get(task.task_id).status is TaskStatus.VALIDATING  # type: ignore[union-attr]
+    recovered = PublicationService(
+        restarted_tasks,
+        restarted_runs,
+        restarted_prs,
+        publisher=publisher,
+        sink=sink,
+        security_review=FakeSecurityReviewGate(),
+    ).publish(task.task_id, second.run_id)
+
+    assert recovered.task_status is TaskStatus.WAITING_HUMAN
+    assert recovered.pull_request == durable
+    assert publisher.calls == 2  # initial publication plus rework, none during recovery
+    assert sink.create_calls == 1

@@ -161,7 +161,9 @@ class PublicationService:
                 revision = self._publisher.publish(task, run)
                 if revision.branch != rework.head_branch:
                     raise PullRequestIdentityError(task.task_id, run.run_id)
-                rework = self._pull_requests.record_revision(rework, revision.commit_sha)
+                rework = self._pull_requests.record_revision(
+                    rework, run.run_id, revision.commit_sha
+                )
             status, opened = self._reconcile(task.task_id)
             return PublicationResult(rework, status, opened)
 

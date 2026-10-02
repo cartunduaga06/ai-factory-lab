@@ -91,15 +91,60 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
             ).fetchone()
         return _row_to_pull_request(row) if row is not None else None
 
-    def record_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
-        if not commit_sha.strip() or pull_request.run_id is None:
+    def record_revision(
+        self, pull_request: PullRequest, run_id: str, commit_sha: str
+    ) -> PullRequest:
+        if not commit_sha.strip() or not run_id.strip() or pull_request.run_id is None:
             raise ValueError("invalid published revision")
         with self._connect() as conn:
+            source = conn.execute(
+                f"""
+                SELECT run.task_id, run.project_id, run.workspace_id,
+                       task.project_id AS task_project_id,
+                       task.target_repository,
+                       workspace.repository_slug AS workspace_repository,
+                       workspace.branch
+                  FROM {PULL_REQUESTS_TABLE} AS pr
+                  JOIN agent_runs AS run ON run.run_id = pr.run_id
+                  JOIN tasks AS task ON task.task_id = run.task_id
+                  JOIN workspaces AS workspace ON workspace.workspace_id = run.workspace_id
+                 WHERE pr.run_id = ? AND pr.task_id = ?
+                """,
+                (pull_request.run_id, pull_request.task_id),
+            ).fetchone()
+            destination = conn.execute(
+                """
+                SELECT run.task_id, run.project_id, run.workspace_id,
+                       task.project_id AS task_project_id,
+                       task.target_repository,
+                       workspace.repository_slug AS workspace_repository,
+                       workspace.branch
+                  FROM agent_runs AS run
+                  JOIN tasks AS task ON task.task_id = run.task_id
+                  JOIN workspaces AS workspace ON workspace.workspace_id = run.workspace_id
+                 WHERE run.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                source is None
+                or destination is None
+                or tuple(source) != tuple(destination)
+                or destination["task_id"] != pull_request.task_id
+                or source["project_id"] != source["task_project_id"]
+                or source["workspace_repository"] != source["target_repository"]
+                or destination["project_id"] != destination["task_project_id"]
+                or destination["workspace_repository"] != destination["target_repository"]
+                or destination["target_repository"] != pull_request.repository_slug
+                or destination["branch"] != pull_request.head_branch
+            ):
+                raise ValueError("pull request revision identity mismatch")
             cursor = conn.execute(
-                f"UPDATE {PULL_REQUESTS_TABLE} SET commit_sha = ? "
+                f"UPDATE {PULL_REQUESTS_TABLE} SET run_id = ?, commit_sha = ?, merged = 0 "
                 "WHERE run_id = ? AND task_id = ? AND repository_slug = ? "
                 "AND head_branch = ? AND base_branch = ? AND number = ?",
                 (
+                    run_id,
                     commit_sha,
                     pull_request.run_id,
                     pull_request.task_id,
@@ -111,7 +156,7 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
             )
             if cursor.rowcount != 1:
                 raise ValueError("pull request revision identity mismatch")
-        result = self.get_for_run(pull_request.run_id)
+        result = self.get_for_run(run_id)
         assert result is not None
         return result
 
