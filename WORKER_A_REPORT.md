@@ -13,7 +13,7 @@ The watcher/pool had two shutdown robustness gaps:
 
 ## Commit SHA
 
-`PENDING_COMMIT_SHA`
+`c6474ba0a8f1d161d64d6be54a3484b1685457fb`
 
 ## Files Changed
 
