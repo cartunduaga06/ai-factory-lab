@@ -72,6 +72,7 @@ def _execute(
             timer.join()
     assert not (state / "test.stdout").exists()
     assert not (state / "test.stderr").exists()
+    assert not (state / "test.cancel").exists()
     return json.loads((state / "test.result").read_text(encoding="ascii"))
 
 
@@ -166,7 +167,13 @@ time.sleep(10)
     assert result["status"] == ("CANCELLED" if cancel_after else "FAILED")
     assert result["exit_code"] == -9
     assert result["timed_out"] is (cancel_after is None)
-    assert result["stderr_bytes"] == worker.MAX_OUTPUT_BYTES
+    if cancel_after is None:
+        assert result["stderr_bytes"] == worker.MAX_OUTPUT_BYTES
+    else:
+        # Cancellation intentionally kills the child without promising a full
+        # pre-kill drain. The safety contract is bounded capture, not an exact
+        # byte count that depends on scheduler timing.
+        assert 0 <= result["stderr_bytes"] <= worker.MAX_OUTPUT_BYTES
 
 
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
@@ -193,3 +200,30 @@ os.kill(os.getpid(), signal.SIGKILL)
     assert result["status"] == "FAILED"
     assert result["exit_code"] == -9
     assert result["timed_out"] is False
+
+
+@pytest.mark.parametrize("iteration", range(8))
+def test_cancel_present_before_worker_start_is_terminal_and_consumed(
+    tmp_path: Path, iteration: int
+) -> None:
+    state = tmp_path / f"state-{iteration}"
+    state.mkdir()
+    (state / "test.prompt").write_text("Do the task", encoding="utf-8")
+    (state / "test.cancel").touch()
+    workspace = tmp_path / f"workspace-{iteration}"
+    workspace.mkdir()
+    executable = tmp_path / "should-not-run"
+    executable.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    worker.run(str(executable), str(workspace), state, "test", 3, "CODE")
+
+    result = json.loads((state / "test.result").read_text(encoding="ascii"))
+    assert result == {
+        "status": "CANCELLED",
+        "exit_code": None,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "timed_out": False,
+    }
+    assert not (state / "test.cancel").exists()

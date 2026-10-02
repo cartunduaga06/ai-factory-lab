@@ -39,73 +39,94 @@ def run(
     stdout_path = state_dir / f"{run_id}.stdout"
     stderr_path = state_dir / f"{run_id}.stderr"
     heartbeat_stop = threading.Event()
+    heartbeat: threading.Thread | None = None
+    process: subprocess.Popen[bytes] | None = None
     status = "FAILED"
     exit_code: int | None = None
     stdout_bytes = 0
     stderr_bytes = 0
     timed_out = False
+    output_exceeded = False
     _write_liveness(liveness)
-    heartbeat: threading.Thread | None = None
     try:
         if kind not in ("CODE", "OPERATIONAL"):
             raise ValueError("invalid Codex task kind")
-        instruction = prompt.read_text(encoding="utf-8")
-        prompt.unlink()
-        command = [
-            executable,
-            "exec",
-            "--ignore-user-config",
-            "--model",
-            model,
-            "-c",
-            f'model_reasoning_effort="{reasoning_effort}"',
-            "--sandbox",
-            "workspace-write",
-            "--cd",
-            workspace,
-        ]
-        if kind == "OPERATIONAL":
-            command.append("--skip-git-repo-check")
-        command.extend(("--output-last-message", str(message), "-"))
-        with stdout_path.open("xb") as stdout_file, stderr_path.open("xb") as stderr_file:
-            with subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                command,
-                cwd=workspace,
-                env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            ) as process:
-                try:
-                    _write_liveness(liveness, process.pid)
-                    heartbeat = threading.Thread(
-                        target=_heartbeat_loop,
-                        args=(liveness, process.pid, heartbeat_stop),
-                        daemon=True,
-                    )
-                    heartbeat.start()
-                    status, output_exceeded, timed_out = _drain_output(
-                        process,
-                        instruction.encode("utf-8"),
-                        stdout_file,
-                        stderr_file,
-                        cancel,
-                        timeout,
-                    )
-                finally:
-                    if process.poll() is None:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
-            exit_code = process.returncode
-            stdout_file.flush()
-            stderr_file.flush()
-            stdout_bytes = stdout_path.stat().st_size
-            stderr_bytes = stderr_path.stat().st_size
+
+        # cancel() may run after dispatch but before this worker is scheduled.
+        # Consume that request before starting any untrusted process.
+        if cancel.exists():
+            status = "CANCELLED"
+        else:
+            instruction = prompt.read_text(encoding="utf-8")
+            prompt.unlink()
+            command = [
+                executable,
+                "exec",
+                "--ignore-user-config",
+                "--model",
+                model,
+                "-c",
+                f'model_reasoning_effort="{reasoning_effort}"',
+                "--sandbox",
+                "workspace-write",
+                "--cd",
+                workspace,
+            ]
+            if kind == "OPERATIONAL":
+                command.append("--skip-git-repo-check")
+            command.extend(("--output-last-message", str(message), "-"))
+
+            with stdout_path.open("xb") as stdout_file, stderr_path.open("xb") as stderr_file:
+                if cancel.exists():
+                    status = "CANCELLED"
+                else:
+                    with subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                        command,
+                        cwd=workspace,
+                        env={
+                            key: value for key, value in os.environ.items() if key != "PYTHONPATH"
+                        },
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        start_new_session=True,
+                    ) as process:
+                        try:
+                            _write_liveness(liveness, process.pid)
+                            heartbeat = threading.Thread(
+                                target=_heartbeat_loop,
+                                args=(liveness, process.pid, heartbeat_stop),
+                                daemon=True,
+                            )
+                            heartbeat.start()
+                            status, output_exceeded, timed_out = _drain_output(
+                                process,
+                                instruction.encode("utf-8"),
+                                stdout_file,
+                                stderr_file,
+                                cancel,
+                                timeout,
+                            )
+                        finally:
+                            if process.poll() is None:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            process.wait()
+                    exit_code = process.returncode
+                    stdout_file.flush()
+                    stderr_file.flush()
+                    stdout_bytes = stdout_path.stat().st_size
+                    stderr_bytes = stderr_path.stat().st_size
+
+            # A marker observed while the child was exiting wins over its exit
+            # status. This closes the final drain-vs-cancel race.
+            if cancel.exists():
+                status = "CANCELLED"
+
         if (
             status != "CANCELLED"
             and not timed_out
             and (kind == "CODE" or not output_exceeded)
+            and process is not None
             and process.returncode == 0
             and _valid_result(message)
         ):
@@ -135,6 +156,9 @@ def run(
             encoding="ascii",
         )
         os.replace(temporary, result)
+        # Publish terminal evidence before consuming cancellation. A concurrent
+        # cancel() will then observe the result and avoid leaving a stale marker.
+        cancel.unlink(missing_ok=True)
 
 
 def _write_liveness(path: Path, codex_pid: int | None = None) -> None:
@@ -199,7 +223,14 @@ def _drain_output(
             if remaining <= 0:
                 timed_out = process.poll() is None
                 break
-            for key, _ in selector.select(min(_POLL_SECONDS, remaining)):
+            events = selector.select(min(_POLL_SECONDS, remaining))
+            # Cancellation is checked again after select: readiness and a
+            # marker can arrive together, and cancellation must not depend on
+            # which order the kernel reports them in.
+            if cancel.exists():
+                status = "CANCELLED"
+                break
+            for key, _ in events:
                 stream = cast(BinaryIO, key.fileobj)
                 if stream is process.stdin:
                     try:
