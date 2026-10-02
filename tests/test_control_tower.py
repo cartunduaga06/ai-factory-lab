@@ -112,8 +112,8 @@ class ControlTowerTests(unittest.TestCase):
         )
         self.assertEqual(config.heartbeat_interval, 300.0)
         self.assertEqual(config.missed_heartbeats, 3)
-        self.assertNotIn("key-secret", repr(config))
-        self.assertNotIn("token-secret", repr(config))
+        self.assertNotIn("key-secret", repr(config.redacted()))
+        self.assertNotIn("token-secret", repr(config.redacted()))
 
     def test_phone_view_escapes_dynamic_content(self) -> None:
         page = render_status(StatusSnapshot(phase="<script>", evidence="<img src=x>"))

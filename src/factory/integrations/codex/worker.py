@@ -139,7 +139,9 @@ def run(
 
 def _write_liveness(path: Path, codex_pid: int | None = None) -> None:
     """Publish worker-owned process identity while this worker is executing."""
-    temporary = path.with_suffix(".alive.tmp")
+    # A unique temporary file lets the heartbeat and pipe-drain writers publish
+    # independently without replacing each other's in-progress file.
+    temporary = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
     temporary.write_text(
         json.dumps(
             {

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Timer
 from time import monotonic
@@ -10,6 +12,37 @@ from time import monotonic
 import pytest
 
 from factory.integrations.codex import worker
+
+
+def test_liveness_writers_use_independent_atomic_temporaries(tmp_path: Path) -> None:
+    """Concurrent publishers cannot unlink the other's in-progress temporary."""
+    path = tmp_path / "run.alive"
+    ready = threading.Barrier(2)
+    write = worker._write_liveness
+    errors: list[BaseException] = []
+    original = Path.write_text
+
+    def paused_write(target: Path, *args: object, **kwargs: object) -> int:
+        ready.wait(timeout=2)
+        return original(target, *args, **kwargs)  # type: ignore[arg-type]
+
+    Path.write_text = paused_write  # type: ignore[method-assign]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as writers:
+            futures = [writers.submit(write, path, 101 + index) for index in range(2)]
+            for future in futures:
+                try:
+                    future.result(timeout=3)
+                except BaseException as exc:  # surfaced from the writer thread
+                    errors.append(exc)
+    finally:
+        Path.write_text = original  # type: ignore[method-assign]
+
+    assert errors == []
+    assert json.loads(path.read_text(encoding="ascii"))["codex_pid"] in {
+        101,
+        102,
+    }
 
 
 def _execute(

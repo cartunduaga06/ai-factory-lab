@@ -325,13 +325,8 @@ class TerminalRecoveryService:
             raise TerminalRecoveryRefused("active Codex run is missing")
         if self._runs.find_active_run(task_id) != run:
             raise TerminalRecoveryRefused("active run identity is ambiguous")
-        if (
-            self._sprint is None
-            or not self._sprint.allows_review(task)
-            or task.source is None
-            or not self._eligible(task)
-        ):
-            raise TerminalRecoveryRefused("source Issue or authorized Sprint is not eligible")
+        if task.source is None or not self._eligible(task):
+            raise TerminalRecoveryRefused("source Issue is not eligible")
         if self._prs.find_by_branch(task.target_repository, workspace.branch) is not None:
             raise TerminalRecoveryRefused("existing local PR requires human review")
         if (

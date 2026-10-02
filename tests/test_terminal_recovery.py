@@ -197,6 +197,28 @@ def test_orphaned_running_codex_recovers_only_after_explicit_ack(timeout_case) -
     )
 
 
+def test_orphaned_running_codex_recovers_without_live_sprint(timeout_case) -> None:
+    service, task, run, root, tasks, runs, _, _, _ = timeout_case
+    service._sprint = None
+    task.status = TaskStatus.RUNNING
+    tasks.update(task)
+    run.status = RunStatus.RUNNING
+    run.finished_at = None
+    runs.update_run(run)
+    state = root / ".factory-codex-runs"
+    (state / f"{run.run_id}.result").unlink()
+    (state / f"{run.run_id}.alive").write_text(
+        json.dumps({"worker_pid": 2147483000, "codex_pid": 2147483001}),
+        encoding="ascii",
+    )
+
+    recovered = service.authorize_orphaned_codex(task.task_id, run.run_id, acknowledge_orphan=True)
+
+    assert recovered.status is TaskStatus.BLOCKED
+    assert recovered.blocked_reason == f"orphaned-codex-recovery:{run.run_id}"
+    assert runs.get_run(run.run_id).status is RunStatus.FAILED  # type: ignore[union-attr]
+
+
 def test_orphan_recovery_refuses_live_worker_and_terminal_result(timeout_case) -> None:
     service, task, run, root, tasks, runs, _, _, _ = timeout_case
     task.status = TaskStatus.RUNNING
