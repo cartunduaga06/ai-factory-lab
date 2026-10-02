@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import select
 import signal
-import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -958,14 +960,17 @@ def _run_pool(config: FactoryConfig) -> int:
     except Exception as exc:  # noqa: BLE001 - no provider details in output
         print(f"pool failed: {type(exc).__name__}")
         return EXIT_INTAKE_ERROR
-    stop = threading.Event()
-    previous_handlers = _install_stop_handlers(stop)
+    stop = _CooperativeStop()
+    previous_handlers, previous_wakeup_fd = _install_stop_handlers(
+        stop.request, wakeup_fd=stop.wakeup_fd
+    )
     try:
         WorkerPool(
             lambda: _build_runtime(config, pool_mode=True),
             max_concurrency=config.max_concurrency,
             idle_interval=config.watch_idle_interval,
             should_stop=stop.is_set,
+            sleep=stop.sleep,
             on_session=_print_worker_session,
         ).run()
     except Exception as exc:  # noqa: BLE001 - no provider details in output
@@ -974,6 +979,8 @@ def _run_pool(config: FactoryConfig) -> int:
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        signal.set_wakeup_fd(previous_wakeup_fd)
+        stop.close()
     return EXIT_OK
 
 
@@ -985,22 +992,92 @@ def _print_worker_session(session: WorkerSession) -> None:
         print(f"Worker {session.task_id} failed: {session.error_type}")
 
 
-def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
+class _CooperativeStop:
+    """Signal-safe stop flag with a pipe-backed idle wakeup."""
+
+    def __init__(self) -> None:
+        self._requested = False
+        self._read_fd, self._write_fd = os.pipe()
+        os.set_blocking(self._read_fd, False)
+        os.set_blocking(self._write_fd, False)
+
+    def request(self) -> None:
+        self._requested = True
+        if self._write_fd < 0:
+            return
+        try:
+            os.write(self._write_fd, b"\0")
+        except (BlockingIOError, OSError):
+            return
+
+    def is_set(self) -> bool:
+        return self._requested
+
+    @property
+    def wakeup_fd(self) -> int:
+        return self._write_fd
+
+    def sleep(self, seconds: float) -> None:
+        if self._requested:
+            return
+        timeout = max(0.0, seconds)
+        try:
+            readable, _, _ = select.select([self._read_fd], [], [], timeout)
+        except OSError:
+            return
+        if readable:
+            self._drain()
+
+    def close(self) -> None:
+        for fd in (self._read_fd, self._write_fd):
+            if fd >= 0:
+                with suppress(OSError):
+                    os.close(fd)
+        self._read_fd = -1
+        self._write_fd = -1
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                if not os.read(self._read_fd, 1024):
+                    return
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+
+
+def _install_stop_handlers(
+    request_stop: Callable[[], None], *, wakeup_fd: int | None = None
+) -> tuple[dict[int, Any], int]:
     """Install SIGINT/SIGTERM handlers that request a cooperative stop.
 
     Returns the previous handlers so the caller can restore them. A signal only
-    sets the event; the watch loop observes it between iterations, so a stop
-    request never interrupts an in-flight task or corrupts persisted state.
+    flips a lock-free flag and wakes idle sleep; the watch loop observes it
+    between iterations, so a stop request never interrupts an in-flight task or
+    corrupts persisted state.
     """
     installed: dict[int, Any] = {}
+    previous_wakeup_fd = -1
+    if wakeup_fd is not None:
+        previous_wakeup_fd = signal.set_wakeup_fd(wakeup_fd)
 
     def _request_stop(signum: int, frame: FrameType | None) -> None:
         del signum, frame
-        stop.set()
+        request_stop()
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         installed[signum] = signal.signal(signum, _request_stop)
-    return installed
+    return installed, previous_wakeup_fd
+
+
+def _stop_aware_sleep(stop: _CooperativeStop) -> Callable[[float], None]:
+    """Return an idle sleeper that wakes as soon as shutdown is requested."""
+
+    def _sleep(seconds: float) -> None:
+        stop.sleep(seconds)
+
+    return _sleep
 
 
 def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> FactoryRuntime:
