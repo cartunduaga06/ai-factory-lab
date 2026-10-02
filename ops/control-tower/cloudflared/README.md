@@ -16,21 +16,22 @@ prerequisites and cannot be provisioned by this repository. Do not use a quick
 tunnel or a public hostname without an Access policy.
 
 Install `cloudflared` using the host's approved package process. Copy
-`config.yml.example` to `/etc/cloudflared/config.yml`, fill the tunnel UUID and
-hostname, and install the dashboard-issued credential JSON at the configured
-path with mode `0600`, owned by the service account. These files are secrets or
-environment-specific configuration and must not be committed.
+`config.yml.example` to `/etc/cloudflared/control-tower.yml`, fill the tunnel UUID
+and hostname, and install the dashboard-issued credential JSON at
+`/etc/cloudflared/control-tower-credentials.json` with mode `0600`, owned by the
+cloudflared service account. These files are secrets or environment-specific
+configuration and must not be committed.
 
-Run the factory status process with explicit loopback arguments:
-
-```sh
-python -m factory status --serve --host 127.0.0.1 --port 8765
-```
-
-Run cloudflared under the host's service manager using that config. A persistent
-named tunnel reconnects after process or host restarts. Keep port 8765 closed at
-the host firewall as defense in depth. Do not add any other ingress rule or
-origin service.
+Install `systemd/factory-control-tower.service` and
+`systemd/cloudflared-control-tower.service` into `/etc/systemd/system/`, then
+reload systemd and enable/start both units. The Factory unit loads
+`/srv/ai-factory/config/runtime.env`, uses the production `DATABASE_URL` from
+that file, and binds only `127.0.0.1:8765`. The file must be readable by the
+`factory` service account and should not be world-readable. Keep the database
+read-only to this service account. The cloudflared unit runs the persistent named
+tunnel against its dedicated config path and restarts after process/host restart.
+Keep port 8765 closed at the host firewall as defense in depth. Do not add any
+other ingress rule or origin service.
 
 ## Smoke checks
 

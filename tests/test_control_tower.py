@@ -37,7 +37,7 @@ class ControlTowerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        path = str(Path(self.temporary.name) / "factory.db")
+        path = str(Path(self.temporary.name) / "fallback" / "factory.db")
         self.tasks = SqliteTaskRepository(path)
         self.runs = SqliteRunRepository(path)
         self.prs = SqlitePullRequestRepository(path)
@@ -100,6 +100,40 @@ class ControlTowerTests(unittest.TestCase):
         self.assertEqual(recovered.phase, "RUNNING")
         self.events.observe(recovered)
         self.assertEqual(len(self.events.pending()), 2)
+
+    def test_status_http_reads_the_configured_database(self) -> None:
+        configured_dir = Path(self.temporary.name) / "configured"
+        configured_dir.mkdir()
+        fallback_dir = Path(self.temporary.name) / "fallback"
+        configured_path = f"sqlite:///{configured_dir / 'production.sqlite'}"
+        configured_config = FactoryConfig.from_env({"DATABASE_URL": configured_path})
+        database_path = configured_config.database.path
+        configured_tasks = SqliteTaskRepository(database_path)
+        configured_runs = SqliteRunRepository(database_path)
+        configured_prs = SqlitePullRequestRepository(database_path)
+        for repository in (configured_tasks, configured_runs, configured_prs):
+            repository.initialize()
+        known_task = FactoryTask(
+            title="Configured database task",
+            target_repository="example/project",
+            source=TaskSource("github", "example/project", 116),
+            status=TaskStatus.READY,
+        )
+        configured_tasks.save(known_task)
+        service = StatusService(
+            configured_tasks,
+            configured_runs,
+            configured_prs,
+            heartbeat_interval=180,
+            missed_heartbeats=2,
+        )
+
+        snapshot = service.for_task(known_task.task_id)
+        self.assertEqual(snapshot.task_id, str(known_task.task_id))
+        self.assertEqual(snapshot.phase, "READY")
+        fallback_db = fallback_dir / "factory.db"
+        self.assertEqual(fallback_db, Path(self.temporary.name) / "fallback" / "factory.db")
+        self.assertNotEqual(fallback_db, Path(database_path))
 
     def test_config_masks_trello_credentials_and_bounds_heartbeat(self) -> None:
         config = FactoryConfig.from_env(
