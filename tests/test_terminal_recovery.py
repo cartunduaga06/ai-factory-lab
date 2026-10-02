@@ -219,6 +219,50 @@ def test_orphaned_running_codex_recovers_without_live_sprint(timeout_case) -> No
     assert runs.get_run(run.run_id).status is RunStatus.FAILED  # type: ignore[union-attr]
 
 
+def test_orphan_recovery_does_not_block_on_independent_running_worker(timeout_case) -> None:
+    service, task_a, run_a, root, tasks, runs, _, _, _ = timeout_case
+    task_a.status = TaskStatus.RUNNING
+    tasks.update(task_a)
+    run_a.status = RunStatus.RUNNING
+    run_a.finished_at = None
+    runs.update_run(run_a)
+    state = root / ".factory-codex-runs"
+    (state / f"{run_a.run_id}.result").unlink()
+    (state / f"{run_a.run_id}.alive").write_text(
+        json.dumps({"worker_pid": 2147483000, "codex_pid": 2147483001}),
+        encoding="ascii",
+    )
+
+    task_b = tasks.save(
+        FactoryTask(
+            "Independent worker",
+            "example/target",
+            status=TaskStatus.RUNNING,
+            source=TaskSource("github", "example/control", 68),
+        )
+    )
+    workspace_b = new_workspace(task_b, str(root))
+    run_b = runs.save_run(
+        AgentRun(
+            task_id=task_b.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.RUNNING,
+            workspace=workspace_b,
+            started_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+    )
+
+    recovered = service.authorize_orphaned_codex(
+        task_a.task_id, run_a.run_id, acknowledge_orphan=True
+    )
+
+    assert recovered.status is TaskStatus.BLOCKED
+    assert runs.get_run(run_a.run_id).status is RunStatus.FAILED  # type: ignore[union-attr]
+    assert tasks.get(task_b.task_id).status is TaskStatus.RUNNING  # type: ignore[union-attr]
+    untouched_b = runs.get_run(run_b.run_id)
+    assert untouched_b is not None and untouched_b.status is RunStatus.RUNNING
+
+
 def test_orphan_recovery_refuses_live_worker_and_terminal_result(timeout_case) -> None:
     service, task, run, root, tasks, runs, _, _, _ = timeout_case
     task.status = TaskStatus.RUNNING

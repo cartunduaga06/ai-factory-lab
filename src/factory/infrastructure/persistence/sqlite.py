@@ -326,12 +326,11 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                         ORDER BY x.created_at DESC, x.rowid DESC LIMIT 1
                       )
                       AND NOT EXISTS (SELECT 1 FROM pull_requests p WHERE p.task_id = t.task_id)
-                      AND NOT EXISTS (SELECT 1 FROM {AGENT_RUNS_TABLE} a
-                        WHERE a.task_id != t.task_id AND a.status IN ('PENDING','RUNNING'))""",
+                      """,
                 (task_id, run_id),
             ).fetchone()
             if row is None:
-                raise ValueError("orphan recovery concurrency guard rejected")
+                raise ValueError("orphan recovery identity guard rejected")
             conn.execute(
                 f"UPDATE {AGENT_RUNS_TABLE} SET status='FAILED', summary=?, "
                 "finished_at=? WHERE run_id=? AND status='RUNNING'",
