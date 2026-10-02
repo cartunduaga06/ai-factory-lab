@@ -13,7 +13,7 @@ from factory.orchestration.transitions import TaskLifecycleService
 
 
 class RetryService:
-    """Make one recoverable task eligible for a fresh attempt, without starting it."""
+    """Authorize a fresh attempt or resume the exact blocked publication."""
 
     def __init__(
         self, tasks: TaskRepository, runs: RunRepository, policy: RecoveryPolicy | None = None
@@ -24,7 +24,7 @@ class RetryService:
         self._policy = policy or RecoveryPolicy(base_backoff_seconds=0)
 
     def retry(self, task_id: str) -> FactoryTask:
-        """Make a blocked task or a failed legacy claim READY without dispatch.
+        """Resume blocked publication or make a failed attempt READY without dispatch.
 
         Repeated requests fail clearly; the lifecycle compare-and-swap prevents
         concurrent callers from recording duplicate retry transitions. A legacy
@@ -80,6 +80,11 @@ class RetryService:
             self._lifecycle.transition(
                 task_id, TaskStatus.BLOCKED, expected_from=TaskStatus.CLAIMED
             )
-        return self._lifecycle.transition(
-            task_id, TaskStatus.READY, expected_from=TaskStatus.BLOCKED
+        # A publication retry keeps the successful run and its validated revision.
+        # READY would dispatch a new agent/workspace and lose crash-window idempotency.
+        target = (
+            TaskStatus.VALIDATING
+            if self._policy.is_publication_retry(task, latest)
+            else TaskStatus.READY
         )
+        return self._lifecycle.transition(task_id, target, expected_from=TaskStatus.BLOCKED)

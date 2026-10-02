@@ -281,3 +281,14 @@ Recovery atomically records the run as FAILED and moves the task from RUNNING to
 BLOCKED. It does not dispatch; `retry` remains the only path to READY. A live
 worker cannot be recovered, and timeout/worker-failure recovery semantics remain
 separate.
+
+
+### Retry a blocked publication
+
+An explicit `factory retry --task-id TASK_UUID` for a successful, validated run
+blocked by a publication failure resumes `BLOCKED → VALIDATING`, rather than
+starting a new coding attempt. The durable marker must match the latest run and
+workspace exactly, and the run must retain its validated revision and project
+identity. Normal scheduling reuses the same run, branch and revision; publication
+reconciles a provider PR already created before a lost response. Security review
+still applies. Other blocked retries retain their existing READY behavior.
