@@ -61,16 +61,29 @@ class RecoveryPolicy:
             and latest.validation_outcome is ValidationOutcome.GATES_FAILED
         ):
             return FailureClass.CORRECTABLE
-        if (
-            task.status is TaskStatus.BLOCKED
-            and latest.status is RunStatus.SUCCEEDED
-            and latest.validation_outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
-            and (task.blocked_reason or "").startswith("publication failed: run ")
-        ):
+        if RecoveryPolicy.is_publication_retry(task, latest):
             return FailureClass.CORRECTABLE
         if task.status is TaskStatus.CLAIMED and rework_claim and latest.is_terminal:
             return FailureClass.CORRECTABLE
         return FailureClass.NON_RECOVERABLE
+
+    @staticmethod
+    def is_publication_retry(task: FactoryTask, latest: AgentRun | None) -> bool:
+        """Bind operator recovery to the exact validated run and isolated workspace."""
+        return bool(
+            task.status is TaskStatus.BLOCKED
+            and latest is not None
+            and latest.task_id == task.task_id
+            and latest.status is RunStatus.SUCCEEDED
+            and latest.validation_outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+            and latest.validated_revision
+            and latest.validated_revision.strip()
+            and latest.project_id == task.project_id
+            and latest.workspace is not None
+            and latest.workspace.repository_slug == task.target_repository
+            and task.blocked_reason
+            == f"publication failed: run {latest.run_id}, workspace {latest.workspace.workspace_id}"
+        )
 
     def delay_for(self, correction_number: int) -> float:
         """Return the bounded delay before correction number 1, 2, and so on."""

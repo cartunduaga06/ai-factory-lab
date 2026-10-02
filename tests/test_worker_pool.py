@@ -6,9 +6,18 @@ import threading
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from factory.domain.enums import AgentKind, RepositoryRole, RunStatus, TaskStatus, ValidationOutcome
-from factory.domain.errors import RevisionNotPublishableError
-from factory.domain.models import AgentRun, FactoryTask, PublishedRevision, Repository, TaskSource
+from factory.domain.errors import RetryNotAllowedError, RevisionNotPublishableError
+from factory.domain.models import (
+    AgentRun,
+    FactoryTask,
+    PublishedRevision,
+    PullRequest,
+    Repository,
+    TaskSource,
+)
 from factory.domain.security import SecurityReview
 from factory.infrastructure.persistence import (
     SqlitePullRequestRepository,
@@ -18,6 +27,7 @@ from factory.infrastructure.persistence import (
 from factory.infrastructure.persistence.audit import SqliteAuditEventStore
 from factory.infrastructure.persistence.security import SqliteSecurityReviewGate
 from factory.orchestration.intake import IntakeSummary, IssueIntakeService
+from factory.orchestration.retry import RetryService
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 from factory.orchestration.worker_pool import WorkerPool
 from tests.fake_adapter import FakeAgentAdapter
@@ -206,3 +216,87 @@ def test_publication_refusal_blocks_only_its_session_and_restart_skips_it(
     )
     assert factory().pool_candidates() == ()
     assert WorkerPool(factory, max_concurrency=2).run_pass() == ()
+
+
+class InterruptedSink(FakePullRequestSink):
+    """Simulate an uncertain provider response after it created the PR."""
+
+    def open_pull_request(self, pull_request: PullRequest) -> PullRequest:
+        opened = super().open_pull_request(pull_request)
+        raise RuntimeError(f"response lost for PR {opened.number}")
+
+
+@pytest.mark.parametrize("failure", ["before_push", "before_pr", "after_pr"])
+def test_publication_retry_resumes_same_run_after_restart(tmp_path: Path, failure: str) -> None:
+    db = str(tmp_path / "retry-pool.db")
+    tasks, runs, prs = (
+        SqliteTaskRepository(db),
+        SqliteRunRepository(db),
+        SqlitePullRequestRepository(db),
+    )
+    tasks.initialize()
+    runs.initialize()
+    prs.initialize()
+    task = tasks.save(FactoryTask("publication recovery", "example/factory"))
+    adapter = FakeAgentAdapter(kind=AgentKind.OTHER, status=RunStatus.SUCCEEDED)
+    publisher = FakeWorkspacePublisher(
+        fail_with=RuntimeError("push failed") if failure == "before_push" else None
+    )
+    sink = (
+        InterruptedSink()
+        if failure == "after_pr"
+        else FakePullRequestSink(fail_create=failure == "before_pr")
+    )
+
+    def factory() -> FactoryRuntime:
+        own_tasks, own_runs, own_prs = (
+            SqliteTaskRepository(db),
+            SqliteRunRepository(db),
+            SqlitePullRequestRepository(db),
+        )
+        return FactoryRuntime(
+            intake=IssueIntakeService(EmptyIssueSource(), own_tasks),
+            intake_repository=Repository("example/factory", role=RepositoryRole.CONTROL_PLANE),
+            tasks=own_tasks,
+            runs=own_runs,
+            pull_requests=own_prs,
+            adapter=adapter,
+            provisioner=FakeWorkspaceProvisioner(),
+            workspace_root=str(tmp_path / "workspaces"),
+            gate_specs=specs("tests"),
+            gate_runner=FakeQualityGateRunner(),
+            revision_inspector=FakeRevisionInspector(),
+            publisher=publisher,
+            pull_request_sink=sink,
+            base_branch="main",
+            security_review=SqliteSecurityReviewGate(db, CleanSecurityInspector()),
+            poll_interval=0,
+            timeout=1,
+            pool_mode=True,
+        )
+
+    assert WorkerPool(factory).run_pass()[0].error_type is not None
+    original = runs.list_runs(task.task_id)[0]
+    assert original.workspace is not None
+    assert tasks.get(task.task_id).status is TaskStatus.BLOCKED
+    assert factory().pool_candidates() == ()
+    publisher._fail_with = None
+    sink._fail_create = False
+    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.VALIDATING
+    # Repeated authorization cannot record another transition.
+    with pytest.raises(RetryNotAllowedError):
+        RetryService(tasks, runs).retry(task.task_id)
+    recovered = WorkerPool(factory).run_pass()[0]
+    assert recovered.error_type is None
+    assert recovered.result is not None
+    assert recovered.result.task_status is TaskStatus.WAITING_HUMAN
+    assert runs.list_runs(task.task_id) == [original]
+    assert adapter.dispatched == [(task.task_id, original.workspace.workspace_id)]
+    pr = prs.get_for_run(original.run_id)
+    assert pr is not None and pr.head_branch == original.workspace.branch
+    assert pr.commit_sha is not None
+    assert sink.create_calls == (2 if failure == "before_pr" else 1)
+    assert len(sink._open) == 1
+    assert (TaskStatus.BLOCKED, TaskStatus.VALIDATING) in [
+        (edge.from_status, edge.to_status) for edge in tasks.history(task.task_id)
+    ]

@@ -16,7 +16,7 @@ from factory.domain.enums import (
     ValidationOutcome,
 )
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
-from factory.domain.models import AgentRun, FactoryTask, QualityGate
+from factory.domain.models import AgentRun, FactoryTask, QualityGate, Workspace
 from factory.infrastructure.persistence import SqliteRunRepository, SqliteTaskRepository
 from factory.orchestration.reconciliation import ReconciliationService
 from factory.orchestration.recovery import FailureClass, RecoveryPolicy
@@ -343,11 +343,20 @@ def test_explicit_retry_allows_durable_publication_failure_after_green_run(tmp_p
             adapter=AgentKind.OTHER,
             status=RunStatus.SUCCEEDED,
             gates=(QualityGate("tests", QualityGateStatus.PASSED),),
+            workspace=Workspace(
+                repository_slug="example/target", branch="factory/test/run", path=str(tmp_path)
+            ),
+            validated_revision="validated-sha",
         )
     )
+    assert run.workspace is not None
+    task.blocked_reason = (
+        f"publication failed: run {run.run_id}, workspace {run.workspace.workspace_id}"
+    )
+    tasks.update(task)
 
     assert run.validation_outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
-    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.VALIDATING
 
 
 def test_explicit_retry_rejects_green_run_without_publication_failure_evidence(
@@ -376,3 +385,33 @@ def test_explicit_retry_rejects_green_run_without_publication_failure_evidence(
 
     with pytest.raises(RetryNotAllowedError, match="latest run is not recoverable"):
         RetryService(tasks, runs).retry(task.task_id)
+
+
+@pytest.mark.parametrize("case", ["wrong_run", "wrong_workspace", "no_revision", "no_workspace"])
+def test_publication_retry_refuses_ambiguous_identity(tmp_path: Path, case: str) -> None:
+    path = str(tmp_path / "identity.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(FactoryTask("publication", "example/target", status=TaskStatus.BLOCKED))
+    workspace = Workspace(
+        repository_slug="example/target", branch="factory/test/run", path=str(tmp_path)
+    )
+    run = runs.save_run(
+        AgentRun(
+            task.task_id,
+            AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            workspace=workspace if case != "no_workspace" else None,
+            validated_revision="sha" if case != "no_revision" else None,
+            gates=(QualityGate("tests", QualityGateStatus.PASSED),),
+        )
+    )
+    task.blocked_reason = (
+        f"publication failed: run {'wrong' if case == 'wrong_run' else run.run_id}, "
+        f"workspace {'wrong' if case == 'wrong_workspace' else workspace.workspace_id}"
+    )
+    tasks.update(task)
+    with pytest.raises(RetryNotAllowedError, match="not recoverable"):
+        RetryService(tasks, runs).retry(task.task_id)
+    assert tasks.history(task.task_id) == []

@@ -156,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     sprint.add_argument("--manifest", help="JSON file with sprint_id and ordered items.")
     sprint.add_argument("--sprint-id", help="Authorized sprint id for a state decision.")
     retry = subparsers.add_parser(
-        "retry", help="Make one BLOCKED task or failed legacy CLAIMED task READY."
+        "retry", help="Recover one blocked task: resume publication or authorize a fresh attempt."
     )
     retry.add_argument("--task-id", required=True, type=UUID, help="UUID of the task to recover.")
     override = subparsers.add_parser(
