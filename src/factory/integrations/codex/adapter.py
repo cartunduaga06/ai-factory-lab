@@ -238,6 +238,11 @@ class CodexAdapter(AgentAdapterBase):
         except FileExistsError:
             return
         os.close(descriptor)
+        # The worker may publish terminal evidence after the first result check
+        # but before this marker is created. Re-check and consume the marker so
+        # cancel() cannot leave stale state after a terminal result.
+        if (state_dir / f"{run.run_id}.result").exists():
+            cancel.unlink(missing_ok=True)
 
     def read_agent_heartbeat(self, run: AgentRun) -> datetime | None:
         """Read trusted worker liveness without conflating it with supervisor polling."""

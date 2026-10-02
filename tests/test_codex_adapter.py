@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -313,6 +314,38 @@ def test_cancel_after_terminal_result_is_published_leaves_no_marker(tmp_path: Pa
     CodexAdapter().cancel(run)
 
     assert not (state / f"{run.run_id}.cancel").exists()
+
+
+def test_cancel_race_with_terminal_result_publication_leaves_no_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    workspace = _workspace(checkout)
+    state = CodexAdapter._state_dir(workspace)
+    state.mkdir()
+    run = AgentRun(
+        task_id=_task().task_id,
+        adapter=AgentKind.CODEX,
+        status=RunStatus.RUNNING,
+        workspace=workspace,
+        started_at=datetime.now(UTC),
+    )
+    result = state / f"{run.run_id}.result"
+    cancel = state / f"{run.run_id}.cancel"
+    real_open = os.open
+
+    def racing_open(path, flags, mode=0o777):
+        if Path(path) == cancel:
+            result.write_text("SUCCEEDED", encoding="ascii")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", racing_open)
+
+    CodexAdapter().cancel(run)
+
+    assert result.exists()
+    assert not cancel.exists()
 
 
 def test_missing_or_malformed_worker_result_fails_closed(tmp_path: Path) -> None:
