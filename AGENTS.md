@@ -134,16 +134,22 @@ ruff format --check .       # formatting check
 ruff format .               # apply formatting
 mypy                        # strict type checking
 python -m factory --show-config   # redacted config dump
+python -m factory pool      # continuous bounded worker pool
 ```
 
 `python -m factory intake` runs one manual GitHub intake pass (read-only) and
-persists eligible issues. `python -m factory run` runs at most one task through
-the existing phases and stops at `WAITING_HUMAN`. `python -m factory watch` is
-the automatic worker: it calls the same one-shot runtime sequentially (WIP=1),
-waits `FACTORY_WATCH_IDLE_INTERVAL` seconds when there is no eligible work, and
-stops cleanly on `SIGINT`/`SIGTERM`. Neither mode merges, deploys or mutates an
-Issue; there is still no scheduler — `watch` is a foreground loop an operator or
-a service manager supervises.
+persists eligible issues. `python -m factory run` retains serial capacity one:
+it runs at most one resumable task through the existing phases and stops at
+`WAITING_HUMAN` for code work. `python -m factory pool` is the continuous
+bounded worker supervisor. It schedules independent task IDs into isolated
+worker sessions up to `FACTORY_MAX_CONCURRENCY`; the current MVP supports a
+maximum concurrency of 2. Each session constructs its own `FactoryRuntime`
+while SQLite task, run, workspace and PR records remain authoritative.
+`python -m factory watch` is a compatibility alias for the same continuous
+pool supervisor. The pool waits `FACTORY_WATCH_IDLE_INTERVAL` seconds between
+idle passes and handles `SIGINT`/`SIGTERM` cooperatively: it stops new
+scheduling and allows active bounded invocations to finish. No runtime mode
+merges or deploys, and independent worker failure must not stop a healthy peer.
 
 All four checks must pass before a change is proposed. Python 3.11+.
 
