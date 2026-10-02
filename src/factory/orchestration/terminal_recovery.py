@@ -34,6 +34,7 @@ class TerminalRecoveryTasks(Protocol):
 
     def authorize_terminal_timeout_recovery(self, task_id: str, run_id: str) -> FactoryTask: ...
     def authorize_terminal_worker_recovery(self, task_id: str, run_id: str) -> FactoryTask: ...
+    def authorize_terminal_legacy_recovery(self, task_id: str, run_id: str) -> FactoryTask: ...
 
 
 class TerminalRecoveryRefused(ValueError):
@@ -245,3 +246,78 @@ class TerminalRecoveryService:
         if not clean:
             raise TerminalRecoveryRefused("workspace contains unpublished changes")
         return self._tasks.authorize_terminal_worker_recovery(task_id, expected_run_id)
+
+    def authorize_legacy(
+        self, task_id: str, expected_run_id: str, *, acknowledge_legacy: bool
+    ) -> FactoryTask:
+        """Return a pre-result-evidence clean Codex failure to READY, without dispatch."""
+        if not acknowledge_legacy:
+            raise TerminalRecoveryRefused("explicit legacy recovery acknowledgement is required")
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        try:
+            base = (
+                self._registry.resolve(task.project_id, task.target_repository).base_ref
+                if self._registry is not None
+                else self._base
+            )
+        except ProjectRoutingError:
+            raise TerminalRecoveryRefused("project identity mismatch") from None
+        if task.status is not TaskStatus.FAILED or task.kind is not TaskKind.CODE:
+            raise TerminalRecoveryRefused("task must be terminal FAILED CODE")
+        history = self._runs.list_runs(task_id)
+        if not history or history[-1].run_id != expected_run_id:
+            raise TerminalRecoveryRefused("expected run is not the latest attempt")
+        if sum(r.status is RunStatus.FAILED for r in history) >= self._policy.run_retry_limit:
+            raise TerminalRecoveryRefused("bounded failure limit reached")
+        last = history[-1]
+        workspace = last.workspace
+        if (
+            last.status is not RunStatus.FAILED
+            or last.project_id != task.project_id
+            or last.adapter is not AgentKind.CODEX
+            or workspace is None
+            or workspace.kind is not TaskKind.CODE
+            or workspace.repository_slug != task.target_repository
+        ):
+            raise TerminalRecoveryRefused("latest failed CODEX run/workspace required")
+        path = Path(workspace.path).expanduser()
+        root = Path(self._root).expanduser().resolve(strict=True)
+        if (
+            path.is_symlink()
+            or not path.is_dir()
+            or path.resolve(strict=True).parent != root
+            or workspace.branch != f"factory/{task.task_id}/{workspace.workspace_id}"
+            or workspace.branch == base
+        ):
+            raise TerminalRecoveryRefused("factory workspace identity is not valid")
+        evidence = root / ".factory-codex-runs" / (expected_run_id + ".result")
+        state_dir = root / ".factory-codex-runs"
+        if state_dir.is_symlink() or (state_dir.exists() and not state_dir.is_dir()):
+            raise TerminalRecoveryRefused("legacy worker state path is invalid")
+        if evidence.exists() or evidence.is_symlink():
+            raise TerminalRecoveryRefused("trusted worker result exists; use normal recovery")
+        if self._runs.find_active_run(task_id) is not None:
+            raise TerminalRecoveryRefused("task has an active run")
+        if self._sprint is None or not self._sprint.allows_review(task):
+            raise TerminalRecoveryRefused("an authorized Sprint is required for recovery")
+        if task.source is None or not self._eligible(task):
+            raise TerminalRecoveryRefused("source Issue is not currently eligible")
+        if self._prs.find_by_branch(task.target_repository, workspace.branch) is not None:
+            raise TerminalRecoveryRefused("existing local PR requires human review")
+        remote = self._sink.find_open_pull_request(
+            Repository(task.target_repository, role=RepositoryRole.TARGET), workspace.branch, base
+        )
+        if remote is not None:
+            raise TerminalRecoveryRefused("existing provider PR requires human review")
+        self._provisioner.repair(task, workspace)
+        if self._workspace_is_clean is None:
+            raise TerminalRecoveryRefused("workspace cleanliness verifier is unavailable")
+        try:
+            clean = self._workspace_is_clean(workspace, base)
+        except Exception:  # noqa: BLE001 - verifier details never cross this boundary
+            clean = False
+        if not clean:
+            raise TerminalRecoveryRefused("workspace contains unpublished changes")
+        return self._tasks.authorize_terminal_legacy_recovery(task_id, expected_run_id)

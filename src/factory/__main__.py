@@ -188,6 +188,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly attest that the reviewed worker failure may be recovered.",
     )
+    legacy_recovery = subparsers.add_parser(
+        "recover-legacy",
+        help="Explicitly recover a clean legacy FAILED Codex run without trusted result evidence.",
+    )
+    legacy_recovery.add_argument("--task-id", required=True, type=UUID)
+    legacy_recovery.add_argument("--run-id", required=True, type=UUID)
+    legacy_recovery.add_argument(
+        "--acknowledge-legacy-recovery",
+        action="store_true",
+        help="Attest that the legacy attempt was reviewed and may return to READY.",
+    )
     rework = subparsers.add_parser(
         "request-changes", help="Record human QA feedback for an open PR."
     )
@@ -237,6 +248,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(args.task_id),
             str(args.run_id),
             args.acknowledge_worker_failure,
+        )
+    if args.command == "recover-legacy":
+        return _recover_legacy(
+            config,
+            str(args.task_id),
+            str(args.run_id),
+            args.acknowledge_legacy_recovery,
         )
     if args.command == "request-changes":
         return _request_changes(config, str(args.task_id), args.feedback_file)
@@ -721,6 +739,80 @@ def _recover_worker_failure(
     print(f"Task: {result.task_id}")
     print("Task status: BLOCKED")
     print("Next steps: explicit factory retry.")
+    return EXIT_OK
+
+
+def _recover_legacy(config: FactoryConfig, task_id: str, run_id: str, acknowledged: bool) -> int:
+    """Return one evidenced-clean legacy Codex task to READY without dispatch."""
+    if not acknowledged:
+        print("recover-legacy refused: --acknowledge-legacy-recovery is required")
+        return EXIT_INTAKE_ERROR
+    try:
+        token, write_token = config.github.token, config.github_write_token
+        source_checkout = config.source_checkout
+        if not token or not write_token or (not source_checkout and not config.project_registry):
+            raise ConfigurationError(
+                "GitHub read/write credentials and source checkout are required"
+            )
+        tasks, runs, prs = (
+            SqliteTaskRepository(config.database.path),
+            SqliteRunRepository(config.database.path),
+            SqlitePullRequestRepository(config.database.path),
+        )
+        tasks.initialize()
+        runs.initialize()
+        prs.initialize()
+        raw_source = GitHubIssueSource(
+            GitHubClient(token=token, api_url=config.github.api_url),
+            target_repository=None if config.project_registry else config.github.target_repo,
+        )
+        source: IssueSource = (
+            ProjectIssueSource(raw_source, config.project_registry)
+            if config.project_registry
+            else raw_source
+        )
+        intake = IssueIntakeService(source=source, repository=tasks)
+        service = TerminalRecoveryService(
+            tasks,
+            runs,
+            prs,
+            GitHubPullRequestSink(GitHubWriteClient(write_token, config.github.api_url)),
+            (
+                ProjectWorkspaceProvisioner(config.project_registry)
+                if config.project_registry
+                else GitWorktreeWorkspaceProvisioner(
+                    source_checkout or "", base_ref=config.workspace_base_ref
+                )
+            ),
+            workspace_root=config.workspace_root,
+            base_branch=config.target_default_branch,
+            registry=config.project_registry,
+            source_is_eligible=lambda task: (
+                task.source is not None
+                and intake.is_eligible(
+                    Repository(task.source.repository_slug, role=RepositoryRole.CONTROL_PLANE),
+                    task.source,
+                )
+            ),
+            workspace_is_clean=git_workspace_is_clean_unpublished,
+            sprint=_build_sprint(config, tasks),
+        )
+        result = service.authorize_legacy(task_id, run_id, acknowledge_legacy=True)
+    except (ConfigurationError, UnsupportedDatabaseError) as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+    except KeyError:
+        print("recover-legacy refused: task was not found")
+        return EXIT_INTAKE_ERROR
+    except (TerminalRecoveryRefused, TaskStateChangedError) as exc:
+        print(f"recover-legacy refused: {exc}")
+        return EXIT_INTAKE_ERROR
+    except Exception as exc:  # noqa: BLE001 - do not expose remote/provider values
+        print(f"recover-legacy failed: {type(exc).__name__}")
+        return EXIT_INTAKE_ERROR
+    print(f"Task: {result.task_id}")
+    print("Task status: READY")
+    print("Next steps: normal factory scheduling; this command did not dispatch.")
     return EXIT_OK
 
 

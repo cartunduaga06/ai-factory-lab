@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Thread
@@ -169,6 +170,83 @@ def test_worker_failure_recovery_rejects_dirty_workspace(timeout_case) -> None:
     service._workspace_is_clean = lambda *_: False
     with pytest.raises(TerminalRecoveryRefused, match="unpublished changes"):
         service.authorize_worker_failure(task.task_id, run.run_id, acknowledge_failure=True)
+    assert tasks.get(task.task_id).status is TaskStatus.FAILED
+    assert tasks.history(task.task_id) == []
+
+
+def test_legacy_recovery_requires_absent_result_and_returns_ready(timeout_case) -> None:
+    service, task, run, root, tasks, runs, _, _, _ = timeout_case
+    (root / ".factory-codex-runs" / (run.run_id + ".result")).unlink()
+    service._workspace_is_clean = lambda *_: True
+    with pytest.raises(TerminalRecoveryRefused, match="acknowledgement"):
+        service.authorize_legacy(task.task_id, run.run_id, acknowledge_legacy=False)
+    result = service.authorize_legacy(task.task_id, run.run_id, acknowledge_legacy=True)
+    assert result.status is TaskStatus.READY
+    assert result.blocked_reason == f"terminal-legacy-recovery:{run.run_id}"
+    assert [(t.from_status, t.to_status) for t in tasks.history(task.task_id)] == [
+        (TaskStatus.FAILED, TaskStatus.READY)
+    ]
+    assert len(runs.list_runs(task.task_id)) == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "dirty",
+        "result",
+        "active",
+        "ineligible",
+        "wrong_run",
+        "local_pr",
+        "provider_pr",
+        "wrong_kind",
+        "wrong_adapter",
+    ],
+)
+def test_legacy_recovery_refuses_unsafe_cases(timeout_case, case: str) -> None:
+    service, task, run, root, tasks, runs, prs, sink, availability = timeout_case
+    (root / ".factory-codex-runs" / (run.run_id + ".result")).unlink()
+    service._workspace_is_clean = lambda *_: case != "dirty"
+    if case == "result":
+        _set_worker_failure(root, run)
+    elif case == "active":
+        other = tasks.save(FactoryTask("Other", "example/target"))
+        runs.save_run(AgentRun(other.task_id, AgentKind.CODEX, RunStatus.RUNNING))
+    elif case == "ineligible":
+        availability[0] = False
+    elif case in {"local_pr", "provider_pr"}:
+        pr = PullRequest(
+            repository_slug=task.target_repository,
+            head_branch=run.workspace.branch,
+            base_branch="main",
+            title="Already published",
+            number=68,
+            url="https://example.invalid/68",
+            task_id=task.task_id,
+            run_id=run.run_id,
+        )
+        if case == "local_pr":
+            prs.save(pr)
+        else:
+            sink.seed(pr)
+    elif case == "wrong_kind":
+        with sqlite3.connect(tasks.path) as connection:
+            connection.execute(
+                "UPDATE tasks SET kind = 'OPERATIONAL' WHERE task_id = ?",
+                (task.task_id,),
+            )
+    elif case == "wrong_adapter":
+        with sqlite3.connect(tasks.path) as connection:
+            connection.execute(
+                "UPDATE agent_runs SET adapter = 'OTHER' WHERE run_id = ?",
+                (run.run_id,),
+            )
+    with pytest.raises((TerminalRecoveryRefused, ValueError)):
+        service.authorize_legacy(
+            task.task_id,
+            "wrong" if case == "wrong_run" else run.run_id,
+            acknowledge_legacy=True,
+        )
     assert tasks.get(task.task_id).status is TaskStatus.FAILED
     assert tasks.history(task.task_id) == []
 

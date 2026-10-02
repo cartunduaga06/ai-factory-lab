@@ -259,3 +259,7 @@ its own merits; this feature must not alter E4's historical FAILED/PAUSED
 production records merely to make the dashboard appear complete.
 
 Terminal recovery requires the new worker's explicit `timed_out: true` result evidence as well as exit_code -9; SIGKILL alone is not proof of a timeout. Legacy results without that marker are not eligible for automatic operator recovery and require separate human review.
+
+### Explicit legacy Codex recovery without result evidence
+
+For a pre-result-evidence attempt only, `factory recover-legacy --task-id TASK_UUID --run-id FAILED_RUN_UUID --acknowledge-legacy-recovery` is a separate compatibility operation. It accepts only the exact latest FAILED CODEX run with no `.result` file, a clean isolated Factory workspace with no commits ahead of base, no active run or local/provider PR, an eligible source Issue, and remaining retry budget. Project/workspace identity and Sprint authorization are checked as for other terminal recovery. It records one atomic, auditable `FAILED → READY` transition with a `terminal-legacy-recovery:<run>` marker. It does not dispatch; normal scheduling handles READY. If trusted `.result` exists, use the corresponding regular evidence-based recovery command.

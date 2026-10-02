@@ -308,10 +308,16 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
             task_id, run_id, marker="terminal-worker-recovery:" + run_id
         )
 
+    def authorize_terminal_legacy_recovery(self, task_id: str, run_id: str) -> FactoryTask:
+        """Exceptional operator-approved pre-result recovery, atomically audited."""
+        return self._authorize_terminal_recovery(
+            task_id, run_id, marker="terminal-legacy-recovery:" + run_id, target=TaskStatus.READY
+        )
+
     def _authorize_terminal_recovery(
-        self, task_id: str, run_id: str, *, marker: str
+        self, task_id: str, run_id: str, *, marker: str, target: TaskStatus = TaskStatus.BLOCKED
     ) -> FactoryTask:
-        """Atomically record one exceptional FAILED -> BLOCKED recovery."""
+        """Atomically record one exceptional terminal recovery transition."""
         timestamp = encode_datetime(datetime.now(UTC))
         with self._connect() as conn:
             cursor = conn.execute(
@@ -338,7 +344,7 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
                      WHERE pr.task_id = {TASKS_TABLE}.task_id
                    )
                 """,
-                (TaskStatus.BLOCKED.value, marker, timestamp, task_id, run_id),
+                (target.value, marker, timestamp, task_id, run_id),
             )
             if cursor.rowcount != 1:
                 row = conn.execute(
@@ -355,8 +361,8 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
             conn.execute(
                 f"""INSERT INTO {TRANSITIONS_TABLE}
                     (transition_id, task_id, from_status, to_status, occurred_at)
-                    VALUES (?, ?, 'FAILED', 'BLOCKED', ?)""",
-                (str(uuid.uuid4()), task_id, timestamp),
+                    VALUES (?, ?, 'FAILED', ?, ?)""",
+                (str(uuid.uuid4()), task_id, target.value, timestamp),
             )
             updated = conn.execute(
                 f"SELECT * FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
