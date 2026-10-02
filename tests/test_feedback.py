@@ -47,6 +47,16 @@ class Issues(IssueCompletionSink):
     def complete(self, identity: FeedbackIdentity) -> None:
         self.closed.add((identity.repository_slug, identity.issue_number))
 
+    def state(self, repository_slug: str, issue_number: int) -> tuple[str, str | None]:
+        return (
+            ("closed", "completed")
+            if (repository_slug, issue_number) in self.closed
+            else ("open", None)
+        )
+
+    def close(self, identity: FeedbackIdentity, reason: str) -> None:
+        self.closed.add((identity.repository_slug, identity.issue_number))
+
 
 class Cards(WorkItemFeedbackSink):
     def __init__(self) -> None:
@@ -399,6 +409,23 @@ def test_unverified_merge_does_not_change_local_pr(tmp_path: Path) -> None:
     assert "PRUpdated" not in [
         event.name for event in SqliteAuditEventStore(str(path)).for_task(task.task_id)
     ]
+
+
+def test_provider_closed_issue_marks_done_and_records_resolution(tmp_path: Path) -> None:
+    path = tmp_path / "closed-issue.db"
+    task, run = _records(path, "project-a", 24, None)
+    tasks = SqliteTaskRepository(str(path))
+    task = tasks.get(task.task_id)
+    assert task is not None
+    task.status = TaskStatus.WAITING_HUMAN
+    tasks.update(task)
+    issues, cards = Issues(), Cards()
+    issues.closed.add(("example/project-a", 24))
+    service = _service(path, False, issues, cards)
+    assert service.reconcile_provider_closure(task, run)
+    assert tasks.get(task.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+    names = [event.name for event in SqliteAuditEventStore(str(path)).for_task(task.task_id)]
+    assert names.count("DeliveryReconciled") == 1
 
 
 def test_mismatched_run_cannot_record_merge(tmp_path: Path) -> None:

@@ -60,7 +60,10 @@ class GitHubTransport:
         if method == "GET" and "/comments" in url:
             return list(self.comments)
         if method == "GET":
-            return dict(self.issue)
+            result = dict(self.issue)
+            if result.get("state") == "closed" and result.get("state_reason") is None:
+                result["state_reason"] = "not_planned"
+            return result
         self.writes += 1
         assert body is not None
         if method == "POST":
@@ -86,6 +89,20 @@ def test_issue_completion_retries_without_duplicate_writes() -> None:
     sink.complete(_identity())
     assert transport.writes == 3
     assert len(transport.comments) == 1
+
+
+def test_issue_resolution_state_and_reason_are_exact_and_idempotent() -> None:
+    transport = GitHubTransport()
+    sink = GitHubIssueCompletionSink(
+        GitHubWriteClient("secret", "https://api.github.com", transport)
+    )
+    assert sink.state("example/project-a", 7) == ("open", None)
+    sink.close(_identity(), "not_planned")
+    assert sink.state("example/project-a", 7) == ("closed", "not_planned")
+    assert len(transport.comments) == 1
+    writes = transport.writes
+    sink.close(_identity(), "not_planned")
+    assert transport.writes == writes
 
 
 class TrelloTransport:

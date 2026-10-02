@@ -74,6 +74,116 @@ class FeedbackReconciliationService:
             self._cards.sync(identity, "MERGED" if facts.merged else task.status.value)
         return False
 
+    def reconcile_external(self, task: FactoryTask, run: AgentRun) -> bool:
+        """Reconcile explicit provider closures and merged PRs without unsafe run changes."""
+        task = self._tasks.get(task.task_id) or task
+        if run.status is not RunStatus.SUCCEEDED:
+            return False
+        matched = self._identity(task, run)
+        if matched is None or task.status in {
+            TaskStatus.DISCOVERED,
+            TaskStatus.READY,
+            TaskStatus.CLAIMED,
+            TaskStatus.RUNNING,
+            TaskStatus.PR_OPEN,
+            TaskStatus.CHANGES_REQUESTED,
+            TaskStatus.BLOCKED,
+        }:
+            return False
+        identity, pr = matched
+        try:
+            issue_state, reason = self._issues.state(
+                identity.repository_slug, identity.issue_number
+            )
+        except Exception:
+            issue_state, reason = "unknown", None
+        facts = self._evidence.evidence(identity)
+        superseded = "superseded" in task.body.lower() or "superseded" in task.title.lower()
+        completed_issue = issue_state == "closed" and reason in {
+            "completed",
+            "not_planned",
+            "duplicate",
+        }
+        merge_resolution = facts.merged and (
+            facts.complete or task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}
+        )
+        if facts.merged and task.status is TaskStatus.WAITING_HUMAN:
+            # Persist provider merge immediately; task completion still waits for
+            # CI, integration and deployment evidence in the delivery path.
+            self._prs.record_merged(pr)
+        if not merge_resolution and not completed_issue and not superseded:
+            return False
+        if facts.merged and merge_resolution:
+            self._prs.record_merged(pr)
+        if task.status is not TaskStatus.DONE:
+            if task.status not in {
+                TaskStatus.WAITING_HUMAN,
+                TaskStatus.VALIDATING,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            }:
+                return False
+            task = self._lifecycle.transition(task.task_id, TaskStatus.DONE)
+        task = self._tasks.get(task.task_id) or task
+        if task.blocked_reason is not None:
+            task.blocked_reason = None
+            self._tasks.update(task)
+        if facts.complete:
+            self._issues.complete(identity)
+        elif superseded:
+            self._issues.close(identity, "not_planned")
+        elif completed_issue and reason is not None:
+            self._issues.close(identity, reason)
+        if identity.work_item_provider == "trello" and self._cards is not None:
+            self._cards.sync(identity, "DONE")
+        if facts.complete or superseded or completed_issue:
+            self._events.record_resolution(identity, reason or "completed")
+        return facts.complete or superseded or completed_issue
+
+    def reconcile_provider_closure(self, task: FactoryTask, run: AgentRun) -> bool:
+        """Apply a completed Issue closure even when delivery CI policy is stricter."""
+        task = self._tasks.get(task.task_id) or task
+        if run.status is not RunStatus.SUCCEEDED:
+            return False
+        stored_run = self._runs.get_run(run.run_id)
+        if stored_run is None or stored_run.status is not RunStatus.SUCCEEDED:
+            return False
+        matched = self._identity(task, run)
+        if matched is None or task.status in {
+            TaskStatus.DISCOVERED,
+            TaskStatus.READY,
+            TaskStatus.CLAIMED,
+            TaskStatus.RUNNING,
+            TaskStatus.PR_OPEN,
+            TaskStatus.CHANGES_REQUESTED,
+            TaskStatus.BLOCKED,
+        }:
+            return False
+        identity, _ = matched
+        try:
+            state, reason = self._issues.state(identity.repository_slug, identity.issue_number)
+        except Exception:
+            return False
+        if state != "closed" or reason not in {"completed", "not_planned", "duplicate"}:
+            return False
+        if task.status is not TaskStatus.DONE:
+            if task.status not in {
+                TaskStatus.WAITING_HUMAN,
+                TaskStatus.VALIDATING,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            }:
+                return False
+            task = self._lifecycle.transition(task.task_id, TaskStatus.DONE)
+        task = self._tasks.get(task.task_id) or task
+        if task.blocked_reason is not None:
+            task.blocked_reason = None
+            self._tasks.update(task)
+        if identity.work_item_provider == "trello" and self._cards is not None:
+            self._cards.sync(identity, "DONE")
+        self._events.record_resolution(identity, reason)
+        return True
+
     def sync(self, task: FactoryTask, run: AgentRun, phase: str) -> None:
         matched = self._identity(task, run)
         if (

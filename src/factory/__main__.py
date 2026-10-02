@@ -261,11 +261,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _show_status(config, serve=args.serve, host=args.host, port=args.port)
     if args.command == "sync-status":
         publisher = _status_publisher(config)
-        if publisher is None:
-            print("configuration error: Trello status card, key and token are required")
-            return EXIT_CONFIG_ERROR
         try:
-            publisher.flush()
+            if config.project_registry is not None:
+                runtime = _build_runtime(config)
+                runtime.prepare_pool()
+            if publisher is not None:
+                publisher.flush()
+            elif config.project_registry is None:
+                print("configuration error: provider reconciliation requires project registry")
+                return EXIT_CONFIG_ERROR
         except Exception as exc:  # noqa: BLE001 - provider errors may contain credentials
             print(f"status sync failed: {type(exc).__name__}")
             return EXIT_INTAKE_ERROR

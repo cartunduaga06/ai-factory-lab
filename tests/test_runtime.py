@@ -258,6 +258,10 @@ def test_human_review_reconciles_from_persisted_pr(
     runtime._pull_request_state = StateSource()
     second = runtime.run_once()
     assert tasks.get(first.task_id).status is expected  # type: ignore[union-attr]
+    if expected is TaskStatus.CANCELLED:
+        assert tasks.get(first.task_id).blocked_reason == (  # type: ignore[union-attr]
+            "pull request closed without merge; human review required"
+        )
     assert second.outcome == (
         "WAITING_HUMAN" if expected is TaskStatus.WAITING_HUMAN else "NO_ELIGIBLE_TASK"
     )

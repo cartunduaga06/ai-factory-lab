@@ -20,6 +20,88 @@ class SqliteFeedbackEventRepository(SqliteRepository, FeedbackEventRepository):
             ).fetchone()
         return row is not None
 
+    def record_resolution(self, identity: FeedbackIdentity, reason: str) -> None:
+        if reason not in {"completed", "not_planned", "duplicate"}:
+            raise ValueError("invalid resolution reason")
+        evidence = json.dumps(
+            {
+                "source": "github_issue",
+                "reason": reason,
+                "project_id": identity.project_id,
+                "work_item_provider": identity.work_item_provider,
+                "work_item_id": identity.work_item_id,
+                "issue_number": identity.issue_number,
+                "pull_request_number": identity.pull_request_number,
+                "commit_sha": identity.commit_sha,
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT t.status FROM tasks t JOIN agent_runs r ON r.task_id=t.task_id "
+                "JOIN workspaces w ON w.workspace_id=r.workspace_id "
+                "JOIN pull_requests p ON p.task_id=t.task_id AND p.run_id=r.run_id "
+                "WHERE t.task_id=? AND t.project_id=? AND t.target_repository=? "
+                "AND t.source_repository=? AND t.source_issue_number=? "
+                "AND t.source_provider='github' "
+                "AND t.reconciliation_origin IN ('trello', 'github-direct') "
+                "AND ((t.reconciliation_origin='github-direct' AND t.expected_work_item_id IS NULL "
+                "AND ? IS NULL) OR (t.reconciliation_origin='trello' "
+                "AND t.expected_work_item_id=? AND ?='trello')) "
+                "AND r.run_id=? AND r.project_id=? AND w.workspace_id=? "
+                "AND w.repository_slug=t.target_repository "
+                "AND p.repository_slug=t.target_repository AND p.head_branch=w.branch "
+                "AND p.number=? AND p.commit_sha=?",
+                (
+                    identity.task_id,
+                    identity.project_id,
+                    identity.repository_slug,
+                    identity.repository_slug,
+                    identity.issue_number,
+                    identity.work_item_provider,
+                    identity.work_item_id,
+                    identity.work_item_provider,
+                    identity.run_id,
+                    identity.project_id,
+                    identity.workspace_id,
+                    identity.pull_request_number,
+                    identity.commit_sha,
+                ),
+            ).fetchone()
+            if row is None or row["status"] != "DONE":
+                raise ValueError("resolution identity mismatch")
+            conn.execute(
+                "INSERT OR IGNORE INTO audit_events "
+                "(event_key, correlation_id, event_seq, name, task_id, run_id, workspace_id, "
+                "pull_request_id, causation_id, source_provider, source_repository, "
+                "source_issue_number, aggregate_type, aggregate_id, aggregate_version, "
+                "occurred_at, evidence) VALUES (?, ?, "
+                "(SELECT count(*) + 1 FROM audit_events WHERE correlation_id=?), "
+                "'DeliveryReconciled', ?, ?, ?, "
+                "(SELECT pull_request_id FROM pull_requests WHERE task_id=? AND run_id=?), ?, "
+                "'github', ?, ?, 'task', ?, "
+                "(SELECT count(*) + 1 FROM audit_events WHERE aggregate_type='task' "
+                "AND aggregate_id=?), "
+                "?, ?)",
+                (
+                    "resolution:" + identity.task_id + ":" + reason,
+                    identity.task_id,
+                    identity.task_id,
+                    identity.task_id,
+                    identity.run_id,
+                    identity.workspace_id,
+                    identity.task_id,
+                    identity.run_id,
+                    identity.run_id,
+                    identity.repository_slug,
+                    identity.issue_number,
+                    identity.task_id,
+                    identity.task_id,
+                    datetime.now(UTC).isoformat(),
+                    evidence,
+                ),
+            )
+
     def record_completed(self, identity: FeedbackIdentity) -> None:
         evidence = json.dumps(
             {
