@@ -257,6 +257,36 @@ def test_runtime_passes_configured_write_username_to_publisher(tmp_path: Path) -
     assert runtime._publication._publisher._write_username == "publication-user"
 
 
+def test_runtime_reconciles_configured_trello_backlog(tmp_path: Path) -> None:
+    config = FactoryConfig.from_env(
+        _runtime_env(
+            tmp_path,
+            FACTORY_TRELLO_BACKLOG_LIST_ID="backlog123",
+            FACTORY_TRELLO_READY_LABEL_ID="ready123",
+            FACTORY_TRELLO_KEY="trello-key",
+            FACTORY_TRELLO_TOKEN="trello-token",
+        )
+    )
+
+    runtime = cli._build_runtime(config)
+
+    assert runtime._backlog_reconcile is not None
+
+
+def test_legacy_watch_command_uses_pool_supervisor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[bool] = []
+
+    def run_pool(config: FactoryConfig) -> int:
+        seen.append(config.max_concurrency == 2)
+        return cli.EXIT_OK
+
+    monkeypatch.setattr(cli, "_run_pool", run_pool)
+    assert cli.main(["watch"]) == cli.EXIT_OK
+    assert seen == [True]
+
+
 def test_explicit_openhands_selection_preserves_local_adapter(tmp_path: Path) -> None:
     config = FactoryConfig.from_env(_runtime_env(tmp_path, FACTORY_AGENT_ENGINE="openhands"))
     assert isinstance(cli._build_agent_adapter(config), OpenHandsAdapter)
@@ -464,8 +494,16 @@ def test_watch_cli_builds_runtime_and_reports_outcome(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     seen: dict[str, object] = {}
-    _install_fake_watcher(monkeypatch, max_iterations=2, seen=seen)
-    monkeypatch.setattr(cli, "FactoryRuntime", _stub_runtime())
+
+    class FakePool:
+        def __init__(self, runtime_factory: object, **kwargs: object) -> None:
+            del runtime_factory
+            seen.update(kwargs)
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "WorkerPool", FakePool)
     for key, value in _runtime_env(tmp_path, FACTORY_WATCH_IDLE_INTERVAL="3").items():
         monkeypatch.setenv(key, value)
 
@@ -473,12 +511,9 @@ def test_watch_cli_builds_runtime_and_reports_outcome(
     captured = capsys.readouterr()
 
     assert code == cli.EXIT_OK
-    assert "Iterations: 2" in captured.out
-    assert "Processed: 0" in captured.out
-    assert "Idle waits: 2" in captured.out
     assert TOKEN not in captured.out
-    # The configured idle interval reaches the watcher.
     assert seen["idle_interval"] == 3.0
+    assert seen["max_concurrency"] == 2
 
 
 def test_watch_cli_fails_closed_without_write_token(
@@ -505,15 +540,14 @@ def test_watch_cli_does_not_echo_provider_secret(
 ) -> None:
     provider_secret = "watch-provider-secret-must-not-escape"
 
-    class ExplodingWatcher:
-        def __init__(self, **kwargs: object) -> None:
-            del kwargs
+    class ExplodingPool:
+        def __init__(self, runtime_factory: object, **kwargs: object) -> None:
+            del runtime_factory, kwargs
 
-        def run(self) -> WatchOutcome:
+        def run(self) -> None:
             raise RuntimeError(provider_secret)
 
-    monkeypatch.setattr(cli, "FactoryRuntime", _stub_runtime())
-    monkeypatch.setattr(cli, "FactoryWatcher", ExplodingWatcher)
+    monkeypatch.setattr(cli, "WorkerPool", ExplodingPool)
     for key, value in _runtime_env(tmp_path).items():
         monkeypatch.setenv(key, value)
 
@@ -521,7 +555,7 @@ def test_watch_cli_does_not_echo_provider_secret(
     captured = capsys.readouterr()
 
     assert code == cli.EXIT_INTAKE_ERROR
-    assert "watch failed" in captured.out
+    assert "pool failed" in captured.out
     assert provider_secret not in captured.out
     assert provider_secret not in captured.err
 
@@ -541,8 +575,15 @@ def test_watch_cli_installs_and_restores_stop_handlers(
         return previous[signum]
 
     monkeypatch.setattr(cli.signal, "signal", fake_signal)
-    _install_fake_watcher(monkeypatch, max_iterations=1, seen={})
-    monkeypatch.setattr(cli, "FactoryRuntime", _stub_runtime())
+
+    class FakePool:
+        def __init__(self, runtime_factory: object, **kwargs: object) -> None:
+            del runtime_factory, kwargs
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "WorkerPool", FakePool)
     for key, value in _runtime_env(tmp_path).items():
         monkeypatch.setenv(key, value)
 
@@ -576,7 +617,7 @@ def test_installed_stop_handler_requests_a_cooperative_stop(
     assert stop.is_set()
 
 
-def test_run_remains_one_shot_and_does_not_construct_a_watcher(
+def test_run_remains_one_shot_and_does_not_construct_a_worker_pool(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -601,12 +642,12 @@ def test_run_remains_one_shot_and_does_not_construct_a_watcher(
                 IntakeSummary(),
             )
 
-    class ForbiddenWatcher:
+    class ForbiddenPool:
         def __init__(self, **kwargs: object) -> None:
-            raise AssertionError("watch must not be constructed by `factory run`")
+            raise AssertionError("pool must not be constructed by `factory run`")
 
     monkeypatch.setattr(cli, "FactoryRuntime", OneShotRuntime)
-    monkeypatch.setattr(cli, "FactoryWatcher", ForbiddenWatcher)
+    monkeypatch.setattr(cli, "WorkerPool", ForbiddenPool)
     for key, value in _runtime_env(tmp_path).items():
         monkeypatch.setenv(key, value)
 

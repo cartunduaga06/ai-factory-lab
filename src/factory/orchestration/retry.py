@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from factory.domain.enums import RunStatus, TaskStatus
+from factory.domain.enums import RunStatus, TaskStatus, ValidationOutcome
 from factory.domain.errors import RetryNotAllowedError
 from factory.domain.models import FactoryTask
 from factory.domain.ports import RunRepository, TaskRepository
@@ -52,8 +52,13 @@ class RetryService:
                 else "latest run is not recoverable"
             )
             raise RetryNotAllowedError(f"task {task_id} {reason}")
-        failed_count = sum(run.status is RunStatus.FAILED for run in history)
-        if failed_count >= self._policy.run_retry_limit:
+        retryable_count = sum(
+            run.status is RunStatus.FAILED
+            or (run.is_terminal and run.validation_outcome is ValidationOutcome.GATES_FAILED)
+            for run in history
+        )
+        failed_run_count = sum(run.status is RunStatus.FAILED for run in history)
+        if retryable_count >= self._policy.run_retry_limit:
             raise RetryNotAllowedError(f"task {task_id} retry limit reached")
         if latest is not None and latest.status is RunStatus.FAILED:
             last_attempt = latest.finished_at or latest.started_at
@@ -61,7 +66,7 @@ class RetryService:
                 self._policy.base_backoff_seconds
                 and last_attempt is not None
                 and (datetime.now(UTC) - last_attempt).total_seconds()
-                < self._policy.delay_for(failed_count)
+                < self._policy.delay_for(failed_run_count)
             ):
                 raise RetryNotAllowedError(f"task {task_id} retry backoff pending")
         if task.status is TaskStatus.CLAIMED:
