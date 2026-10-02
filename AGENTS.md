@@ -23,6 +23,7 @@ application code into this repository.**
 6. Never commit a secret. `.env` is git-ignored; `.env.example` holds placeholders only.
 7. Never modify `finanza-ia`.
 8. Do not perform destructive git operations (force-push, history rewrite, branch deletion).
+
 ## Code review policy
 
 When reviewing a Pull Request, act as a defensive reviewer of the AI Factory
@@ -73,6 +74,61 @@ Review comments must identify a concrete defect or meaningful risk and explain
 its impact. Avoid blocking a Pull Request for purely stylistic preferences
 already covered by Ruff or formatting tools.
 
+### Automatic code review contract
+
+When acting as a Pull Request reviewer, operate read-only.
+
+- Do not edit files, commit, push, merge, deploy, modify Issues, change repository
+  settings or mutate Factory state.
+- Review the PR diff together with surrounding code, affected callers, tests,
+  persistence paths and the relevant base-branch behavior.
+- Passing CI is necessary but not sufficient. Green pytest, Ruff and Mypy results
+  do not prove architectural correctness, concurrency safety or recovery safety.
+- Report only concrete defects or meaningful risks. Each finding should identify
+  the affected file/line, the failure mechanism, its impact and the expected
+  correction.
+- Prefer a small number of high-confidence findings over speculative comments.
+- Do not report formatting or style issues already enforced by Ruff or formatting
+  tools.
+
+### Cross-cutting compatibility
+
+When a PR changes a Protocol, port, public method, enum, persisted model, schema,
+configuration field, CLI contract or state transition, inspect all implementations,
+test doubles, callers and persistence paths for compatibility.
+
+A locally correct change that breaks another adapter, fake, migration path or
+consumer is a defect. In particular, engine-specific capabilities must not be
+added to a general protocol unless every supported engine is intentionally
+required to implement them. Prefer optional capabilities or narrower protocols
+when behavior is engine-specific.
+
+### Persistence and migration safety
+
+For SQLite or schema changes, review both:
+
+- creation of a fresh database; and
+- migration of an existing production database.
+
+Check atomicity, idempotency, concurrent access, transition history and fail-closed
+behavior. Do not accept a schema change that works only for a new database.
+
+### Worker liveness and recovery invariants
+
+- Supervisor heartbeat and agent/worker liveness are separate evidence.
+- A persisted RUNNING task or refreshed supervisor heartbeat alone never proves
+  that an agent process is alive.
+- Never recover a demonstrably live worker.
+- Orphan recovery must validate the exact latest run, workspace and branch
+  identity, project routing/source eligibility, absence of a PR, absence of
+  trusted terminal result evidence and workspace cleanliness.
+- Missing or ambiguous recovery evidence must fail closed.
+- Recovery requires explicit operator authorization.
+- Recovery must not merge, deploy or dispatch a replacement run implicitly.
+- Run/task recovery transitions must remain atomic and auditable.
+- Review restart and supervisor-interruption behavior for changes involving
+  workers, subprocesses or durable RUNNING state.
+
 Pay particular attention to changes involving:
 - task claiming;
 - parallel workers;
@@ -82,18 +138,34 @@ Pay particular attention to changes involving:
 - Git publication;
 - GitHub PR creation;
 - quality gates;
-- agent adapters;
-- recovery after worker failure.
+- agent adapters and optional capabilities;
+- protocols, ports and public contracts;
+- database schemas and migrations;
+- worker/supervisor liveness;
+- recovery after worker failure or supervisor restart.
+
 ## Layering rules
 
 Dependencies point inward only. Violating this is the most likely way to break
-the architecture.
+the architecture. `tests/test_layering.py` is the executable source of truth for
+these import boundaries.
 
 ```
-infrastructure ─┐
-integrations  ──┼──► orchestration ──► domain
-                ┘
+                  composition root
+                 /       |        \
+        orchestration  integrations  infrastructure
+              |
+              v
+            domain
 ```
+
+Core import rules:
+
+- `domain` imports no outer Factory layer.
+- `orchestration` imports neither `integrations` nor `infrastructure`.
+- `infrastructure` does not import `orchestration`.
+- Concrete engines, Git, GitHub, subprocess execution and persistence stay outside
+  `domain` and `orchestration` unless represented through domain ports.
 
 - `factory/domain` — pure typed model. **No I/O**: no network, DB, filesystem,
   `os.environ`, `subprocess` or git access.
