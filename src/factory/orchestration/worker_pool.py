@@ -8,10 +8,13 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
+from factory.domain.errors import DuplicateTaskError, TaskStateChangedError
 from factory.domain.models import AgentAdapter, AgentRun
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 
 logger = logging.getLogger(__name__)
+
+_RECOVERABLE_PREPARATION_ERRORS = (DuplicateTaskError, TaskStateChangedError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,15 +56,20 @@ class WorkerPool:
         self._on_session = on_session
 
     def run_pass(self) -> tuple[WorkerSession, ...]:
-        """Intake once and drain eligible sessions; isolate worker failures."""
+        """Intake once and drain eligible sessions; isolate worker failures.
+
+        Preparation is recoverable only for explicit concurrent-state conflicts
+        that leave no worker submitted. Infrastructure, invariant and programming
+        failures propagate to the CLI boundary so the watcher fails closed.
+        """
         if self._should_stop():
             return ()
         try:
             coordinator = self._factory()
             coordinator.prepare_pool()
             candidates = coordinator.pool_candidates()
-        except Exception as exc:  # noqa: BLE001 - a pass failure must not kill the watcher
-            logger.error("pool pass failed during preparation: %s", type(exc).__name__)
+        except _RECOVERABLE_PREPARATION_ERRORS as exc:
+            logger.error("pool pass recovered during preparation: %s", type(exc).__name__)
             return ()
         sessions: list[WorkerSession] = []
         with ThreadPoolExecutor(max_workers=self._max_concurrency) as executor:

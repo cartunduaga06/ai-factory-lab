@@ -8,13 +8,18 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 from factory.domain.enums import AgentKind, RepositoryRole, RunStatus, TaskStatus, ValidationOutcome
-from factory.domain.errors import RetryNotAllowedError, RevisionNotPublishableError
+from factory.domain.errors import (
+    DuplicateTaskError,
+    RetryNotAllowedError,
+    RevisionNotPublishableError,
+)
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
@@ -85,7 +90,7 @@ def test_two_sessions_overlap_and_failure_does_not_stop_peer() -> None:
     assert len(instances) == 3  # coordinator and two independent runtimes
 
 
-def test_pool_continues_after_isolated_pass_preparation_error(
+def test_pool_continues_after_recoverable_pass_preparation_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     stop = threading.Event()
@@ -97,7 +102,7 @@ def test_pool_continues_after_isolated_pass_preparation_error(
             nonlocal prepared
             prepared += 1
             if prepared == 1:
-                raise RuntimeError("provider failed")
+                raise DuplicateTaskError(TaskSource("github", "example/factory", 1))
 
         def pool_candidates(self) -> tuple[str, ...]:
             return ()
@@ -118,7 +123,19 @@ def test_pool_continues_after_isolated_pass_preparation_error(
         ).run()
 
     assert prepared == 2
-    assert "pool pass failed during preparation: RuntimeError" in caplog.text
+    assert "pool pass recovered during preparation: DuplicateTaskError" in caplog.text
+
+
+def test_pool_preparation_programming_error_fails_closed() -> None:
+    class BrokenCoordinator:
+        def prepare_pool(self) -> None:
+            raise RuntimeError("programming failure")
+
+        def pool_candidates(self) -> tuple[str, ...]:
+            return ()
+
+    with pytest.raises(RuntimeError, match="programming failure"):
+        WorkerPool(lambda: cast("FactoryRuntime", BrokenCoordinator())).run_pass()
 
 
 def test_pool_shutdown_while_idle_returns_without_waiting() -> None:
@@ -239,9 +256,7 @@ def test_pool_shutdown_cancels_active_cycle_and_reaps_child_process(tmp_path: Pa
 def test_sigterm_stops_local_idle_pool_process_cleanly() -> None:
     script = textwrap.dedent(
         """
-        import threading
-
-        from factory.__main__ import _install_stop_handlers, _stop_aware_sleep
+        from factory.__main__ import _CooperativeStop, _install_stop_handlers
         from factory.orchestration.worker_pool import WorkerPool
 
         class Runtime:
@@ -251,21 +266,32 @@ def test_sigterm_stops_local_idle_pool_process_cleanly() -> None:
             def pool_candidates(self):
                 return ()
 
-        stop = threading.Event()
-        _install_stop_handlers(stop)
-        print("ready", flush=True)
-        WorkerPool(
-            lambda: Runtime(),
-            idle_interval=30.0,
-            should_stop=stop.is_set,
-            sleep=_stop_aware_sleep(stop),
-        ).run()
-        print("stopped", flush=True)
+        stop = _CooperativeStop()
+        previous_handlers, previous_wakeup_fd = _install_stop_handlers(
+            stop.request, wakeup_fd=stop.wakeup_fd
+        )
+        try:
+            print("ready", flush=True)
+            WorkerPool(
+                lambda: Runtime(),
+                idle_interval=30.0,
+                should_stop=stop.is_set,
+                sleep=stop.sleep,
+            ).run()
+            print("stopped", flush=True)
+        finally:
+            import signal
+
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+            signal.set_wakeup_fd(previous_wakeup_fd)
+            stop.close()
         """
     )
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    durations: list[float] = []
 
-    for _ in range(2):
+    for _ in range(20):
         process = subprocess.Popen(
             [sys.executable, "-c", script],
             stdout=subprocess.PIPE,
@@ -275,11 +301,14 @@ def test_sigterm_stops_local_idle_pool_process_cleanly() -> None:
         )
         assert process.stdout is not None
         assert process.stdout.readline().strip() == "ready"
+        started = time.perf_counter()
         process.send_signal(signal.SIGTERM)
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=2)
+        durations.append(time.perf_counter() - started)
 
         assert process.returncode == 0, stderr
         assert "stopped" in stdout
+    assert max(durations) < 1.0
 
 
 def test_pool_rejects_more_than_mvp_capacity() -> None:

@@ -600,11 +600,16 @@ Design intent:
   a second worker waits instead of launching another agent. A CODE task at
   ``WAITING_HUMAN`` holds later CODE tasks until human review, but a separate
   OPERATIONAL scratch task may run while that review is pending.
-- **Cooperative stop.** The CLI installs ``SIGINT``/``SIGTERM`` handlers that only
-  set a flag. Idle waits wake as soon as the flag is set; pool shutdown stops
-  scheduling, requests adapter cancellation for active runs, and drains those
-  sessions without inventing lifecycle transitions. Previous handlers are
-  restored on exit.
+- **Cooperative stop.** The CLI installs ``SIGINT``/``SIGTERM`` handlers that
+  flip a lock-free stop flag and wake the idle wait through a nonblocking pipe.
+  Pool shutdown stops scheduling, requests adapter cancellation for active runs,
+  and drains those sessions without inventing lifecycle transitions. Previous
+  handlers are restored on exit.
+- **Fail-closed preparation boundary.** A pool preparation pass is recoverable
+  only for explicit concurrent-state conflicts (`DuplicateTaskError` and
+  `TaskStateChangedError`) before any worker is submitted. Infrastructure,
+  invariant and programming errors propagate to the CLI boundary; task-bound
+  worker futures remain isolated after a durable task identity has been assigned.
 - **Injected seams.** ``sleep`` and ``should_stop`` are constructor arguments, so
   the loop is deterministic and offline under test — no wall-clock or signal
   dependence in the tests.

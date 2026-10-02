@@ -1,90 +1,125 @@
 # Worker A Report
 
-## Root Cause
-
-The watcher/pool had two shutdown robustness gaps:
-
-- `factory pool`/`factory watch` installed cooperative SIGTERM handlers, but idle sleeps used plain `time.sleep`, so a SIGTERM during `FACTORY_WATCH_IDLE_INTERVAL` could wait for the full idle interval before exiting.
-- `WorkerPool.run_pass()` waited indefinitely for active worker futures and did not request adapter cancellation on shutdown. Long-running agent sessions could therefore outlive systemd's 30 second stop window. Preparation/cycle errors before task submission also escaped the pass boundary and could terminate the watcher process.
-
 ## Branch
 
 `hardening/worker-a-watcher-worker-a-watch-20261002T201407Z-2789209`
 
-## Commit SHA
+## Intermittent SIGTERM Root Cause
 
-`c6474ba0a8f1d161d64d6be54a3484b1685457fb`
+The intermittent >5s shutdown was a signal-handler deadlock/restart race in the
+idle path. The old SIGTERM handler called `threading.Event.set()` while the main
+thread could be interrupted inside `threading.Event.wait()`. In the reproduced
+hang, the handler tried to reacquire the event condition lock already held by the
+interrupted wait. A first pipe-based attempt still saw rare delay because Python
+can restart `select()` before the Python-level handler writes to the pipe.
 
-## Files Changed
+## SIGTERM Correction
 
-- `src/factory/orchestration/worker_pool.py`
-- `src/factory/__main__.py`
-- `tests/test_worker_pool.py`
-- `docs/architecture.md`
-- `docs/parallel-worker-runtime.md`
+`factory pool`/`factory watch` now use `_CooperativeStop`: a plain stop flag plus
+a nonblocking pipe registered with `signal.set_wakeup_fd()`. CPython writes to
+the pipe from the low-level signal path, waking idle `select()` deterministically
+before the Python handler runs. The CLI restores both previous signal handlers
+and the previous wakeup fd on exit.
+
+Graceful shutdown is preserved: no product SIGKILL path was added, active cycles
+still request adapter cancellation and drain through the existing worker-pool
+logic, and no lifecycle transition or persistence path was changed.
+
+## Controlled SIGTERM Evidence
+
+Before the fix, the idle SIGTERM reproduction timed out 8/50 times with a max of
+about 5.009s and fast cases around 30ms.
+
+After the fix, 50 consecutive controlled idle SIGTERM iterations completed:
+
+- min: `0.028083s`
+- max: `0.038502s`
+- approximate mean: `0.030114s`
+- failures: `0`
+
+## Exception-Boundary Design
+
+`WorkerPool.run_pass()` no longer catches `Exception` around
+`runtime_factory()`, `prepare_pool()` and `pool_candidates()`.
+
+Recoverable preparation exceptions:
+
+- `DuplicateTaskError`
+- `TaskStateChangedError`
+
+Those are explicit concurrent-state conflicts before any worker future is
+submitted, so the affected scheduling pass is abandoned with sanitized
+exception-type evidence and the watcher may continue.
+
+Fatal behavior:
+
+- runtime construction errors, configuration errors, infrastructure/storage
+  errors, provider errors, invariant violations and programming errors propagate
+  to the CLI boundary;
+- the CLI prints only the sanitized exception type and exits fail-closed;
+- task-bound worker future isolation remains unchanged after a durable task id
+  has been assigned.
+
+## Files Modified
+
 - `WORKER_A_REPORT.md`
+- `docs/architecture.md`
+- `src/factory/__main__.py`
+- `src/factory/orchestration/worker_pool.py`
+- `tests/test_cli.py`
+- `tests/test_worker_pool.py`
 
-## Tests Added
+## Tests Added/Changed
 
-- `test_pool_continues_after_isolated_pass_preparation_error`
-- `test_pool_shutdown_while_idle_returns_without_waiting`
-- `test_pool_shutdown_cancels_active_cycle_and_reaps_child_process`
-- `test_sigterm_stops_local_idle_pool_process_cleanly`
+- Strengthened `test_sigterm_stops_local_idle_pool_process_cleanly` to run 20
+  consecutive SIGTERM subprocess iterations and assert sub-second shutdown.
+- Changed preparation-boundary coverage to
+  `test_pool_continues_after_recoverable_pass_preparation_error`.
+- Added `test_pool_preparation_programming_error_fails_closed`.
+- Updated CLI signal-handler tests for wakeup-fd restoration.
 
-## Targeted Pytest Result
+## Validation
 
-`.venv/bin/python -m pytest tests/test_worker_pool.py tests/test_cli.py::test_watch_cli_installs_and_restores_stop_handlers tests/test_cli.py::test_installed_stop_handler_requests_a_cooperative_stop`
+- Targeted regression tests:
+  `.venv/bin/python -m pytest tests/test_worker_pool.py::test_sigterm_stops_local_idle_pool_process_cleanly tests/test_worker_pool.py::test_pool_continues_after_recoverable_pass_preparation_error tests/test_worker_pool.py::test_pool_preparation_programming_error_fails_closed tests/test_cli.py::test_installed_stop_handler_requests_a_cooperative_stop tests/test_cli.py::test_watch_cli_installs_and_restores_stop_handlers`
+  Result: `5 passed in 4.16s`
+- Full pytest: `.venv/bin/python -m pytest`
+  Result: `983 passed, 1 skipped in 37.32s`
+- Ruff check: `.venv/bin/python -m ruff check .`
+  Result: `All checks passed!`
+- Ruff format: `.venv/bin/python -m ruff format --check .`
+  Result: `169 files already formatted`
+- Mypy: `.venv/bin/python -m mypy`
+  Result: `Success: no issues found in 103 source files`
 
-Result: `12 passed in 1.19s`
+## Security Review
 
-## Full Pytest Result
+Pass. The signal handler path no longer re-enters a `threading.Event` lock. The
+wakeup pipe uses nonblocking file descriptors, restores the process-global
+wakeup fd, and does not run shell commands or expose secrets. Logs still include
+only task ids and exception type names. No merge, deployment, host, Docker,
+SQLite-manual, product-repository or GitHub-settings behavior was added.
 
-`.venv/bin/python -m pytest`
+## Orphan-Process Verification
 
-Result: `982 passed, 1 skipped in 34.45s`
+After the 50-iteration SIGTERM run, a focused process check found no remaining
+test children matching `_CooperativeStop`, `idle_interval=30.0`,
+`test_sigterm_stops_local_idle_pool_process_cleanly` or `time.sleep(30)`.
 
-## Ruff Check Result
+## Reserved-File Verification
 
-`.venv/bin/ruff check .`
+Confirmed by `git diff --name-only`: no reserved Worker B files were modified.
 
-Result: `All checks passed!`
-
-## Ruff Format Result
-
-`.venv/bin/ruff format --check .`
-
-Result: `168 files already formatted`
-
-## Mypy Result
-
-`.venv/bin/mypy`
-
-Result: `Success: no issues found in 103 source files`
-
-## Security Review Result
-
-Pass. The signal handler only sets a `threading.Event`; no complex work runs inside the handler. Pool shutdown now stops scheduling, requests cancellation through the existing engine-agnostic `AgentAdapter.cancel(run)` contract, and drains active sessions without inventing lifecycle transitions. No shell execution was added. New subprocess test code uses argv form, starts an isolated local test process group, and forcibly cleans it in test teardown if needed. Logs record task id and exception type only, avoiding raw provider messages, paths, command lines, or secrets.
-
-## Controlled SIGTERM Test Result
-
-`.venv/bin/python -m pytest tests/test_worker_pool.py::test_sigterm_stops_local_idle_pool_process_cleanly`
-
-Result: `1 passed in 0.47s`
-
-## Pending Risks
-
-- Active shutdown still depends on the concrete adapter honoring `cancel(run)` and returning from its bounded collect/poll path. Codex is covered by cancel-marker/process-group behavior and the new no-orphan regression; remote OpenHands cancellation remains bounded by its existing HTTP timeouts and server behavior.
-- Preparation errors are logged and isolated by type so provider/Trello failures do not kill the watcher. The raw exception message is intentionally not logged to avoid credential leakage.
-
-## Worker B Boundary
-
-Confirmed: reserved Worker B files were not modified:
+Reserved files not touched:
 
 - `src/factory/domain/errors.py`
 - `src/factory/integrations/github/pr_state.py`
 - `src/factory/orchestration/lifecycle.py`
 - `src/factory/orchestration/runtime.py`
 
-## Readiness
+## Pending Risks
 
-Ready for human review. Not pushed, not merged, not deployed.
+- Active shutdown still depends on the concrete adapter honoring `cancel(run)`
+  and returning from its bounded collect/poll path.
+- The final commit SHA is self-referential and cannot be embedded in this file
+  before the commit exists; the final response reports the immutable SHA.
