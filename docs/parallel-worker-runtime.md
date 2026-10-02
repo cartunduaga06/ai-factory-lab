@@ -25,8 +25,12 @@ refuses branches containing only an agent-created commit. One-shot `run` and
 
 Use `FACTORY_MAX_CONCURRENCY=2 python -m factory pool` after configuring
 the normal runtime credentials, project profiles and quality gates. `1` is the
-supported serial setting. `SIGINT` and `SIGTERM` stop new scheduling and allow
-active sessions to finish their current bounded invocation. The pool waits
+supported serial setting. The historical `factory watch` command is a
+compatibility alias for this same continuous pool supervisor. Both entrypoints
+reconcile the configured Trello backlog before GitHub intake on every
+scheduling pass. A task at `WAITING_HUMAN` remains persisted for review and
+does not stop intake or an independent worker. `SIGINT` and `SIGTERM` stop new
+scheduling and allow active sessions to finish their current bounded invocation. The pool waits
 `FACTORY_WATCH_IDLE_INTERVAL` seconds between passes. Results print task ID,
 run ID, branch, gate result, PR and outcome; inspect the SQLite task transitions,
 run/workspace and PR rows for the complete trace. No pool path merges or deploys.

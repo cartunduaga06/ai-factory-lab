@@ -253,6 +253,11 @@ class SprintService:
             return False
         return self._matches_current(task, current)
 
+    def has_live_sprint(self) -> bool:
+        """Whether ACTIVE or PAUSED sprint authorization owns backlog intake."""
+        current = self._sprints.current()
+        return current is not None and current[1] in {SprintState.ACTIVE, SprintState.PAUSED}
+
     def allows_review(self, task: FactoryTask) -> bool:
         """Let a paused sprint observe its own PR decision without dispatch."""
         current = self._sprints.current()

@@ -101,7 +101,7 @@ from factory.orchestration.terminal_recovery import (
     TerminalRecoveryService,
 )
 from factory.orchestration.transitions import TaskLifecycleService
-from factory.orchestration.watch import FactoryWatcher, WatchOutcome
+from factory.orchestration.watch import WatchOutcome
 from factory.orchestration.worker_pool import WorkerPool, WorkerSession
 
 EXIT_OK = 0
@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser(
         "watch",
-        help="Automatic worker: sequential one-task iterations (WIP=1) with idle waits.",
+        help="Compatibility alias for the continuous concurrent worker pool.",
     )
     subparsers.add_parser("pool", help="Run up to two isolated task workers concurrently.")
     status = subparsers.add_parser("status", help="Read the current factory status.")
@@ -243,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "run":
         return _run_runtime(config)
     if args.command == "watch":
-        return _run_watch(config)
+        return _run_pool(config)
     if args.command == "pool":
         return _run_pool(config)
     if args.command == "status":
@@ -858,34 +858,8 @@ def _run_runtime(config: FactoryConfig) -> int:
 
 
 def _run_watch(config: FactoryConfig) -> int:
-    """Drive the automatic worker until a signal or human gate, WIP=1."""
-    try:
-        runtime = _build_runtime(config)
-    except (ConfigurationError, UnsupportedDatabaseError) as exc:
-        print(f"configuration error: {exc}")
-        return EXIT_CONFIG_ERROR
-    except Exception as exc:  # noqa: BLE001 - build boundary is secret-safe by design
-        print(f"watch failed: {type(exc).__name__}")
-        return EXIT_INTAKE_ERROR
-
-    stop = threading.Event()
-    previous_handlers = _install_stop_handlers(stop)
-    try:
-        watcher = FactoryWatcher(
-            runtime=runtime,
-            idle_interval=config.watch_idle_interval,
-            should_stop=stop.is_set,
-        )
-        outcome = watcher.run()
-    except Exception as exc:  # noqa: BLE001 - runtime boundary is secret-safe by design
-        print(f"watch failed: {type(exc).__name__}")
-        return EXIT_INTAKE_ERROR
-    finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
-
-    _print_watch_outcome(outcome)
-    return EXIT_OK
+    """Drive the automatic worker until a signal, using the concurrent pool."""
+    return _run_pool(config)
 
 
 def _run_pool(config: FactoryConfig) -> int:
@@ -978,6 +952,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
     pull_requests.initialize()
     status_publisher = _status_publisher(config)
     sprint = _build_sprint(config, tasks)
+    backlog = _build_backlog(config)
 
     read_client = GitHubClient(token=config.github.token or "", api_url=config.github.api_url)
     issue_source = GitHubIssueSource(
@@ -1108,6 +1083,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         timeout=config.run_timeout,
         heartbeat_interval=config.heartbeat_interval,
         status_pulse=status_publisher.flush if status_publisher else None,
+        backlog_reconcile=backlog.reconcile if backlog is not None else None,
         sprint=sprint,
         recovery_policy=RecoveryPolicy(),
     )
