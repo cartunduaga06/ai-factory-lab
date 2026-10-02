@@ -13,6 +13,7 @@ from factory.domain.enums import (
     QualityGateStatus,
     RunStatus,
     TaskStatus,
+    ValidationOutcome,
 )
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
 from factory.domain.models import AgentRun, FactoryTask, QualityGate
@@ -321,3 +322,57 @@ def test_explicit_retry_rejects_other_terminal_runs(tmp_path: Path, latest: Agen
         RetryService(tasks, runs).retry(task.task_id)
     assert tasks.get(task.task_id).status is TaskStatus.BLOCKED  # type: ignore[union-attr]
     assert tasks.history(task.task_id) == []
+
+
+def test_explicit_retry_allows_durable_publication_failure_after_green_run(tmp_path: Path) -> None:
+    path = str(tmp_path / "publication-retry.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(
+        FactoryTask(
+            "publication recovery",
+            "example/target",
+            status=TaskStatus.BLOCKED,
+            blocked_reason="publication failed: run run-1, workspace ws-1",
+        )
+    )
+    run = runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            gates=(QualityGate("tests", QualityGateStatus.PASSED),),
+        )
+    )
+
+    assert run.validation_outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+    assert RetryService(tasks, runs).retry(task.task_id).status is TaskStatus.READY
+
+
+def test_explicit_retry_rejects_green_run_without_publication_failure_evidence(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "publication-retry-refused.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(
+        FactoryTask(
+            "unrelated block",
+            "example/target",
+            status=TaskStatus.BLOCKED,
+            blocked_reason="security review blocked publication",
+        )
+    )
+    runs.save_run(
+        AgentRun(
+            task_id=task.task_id,
+            adapter=AgentKind.OTHER,
+            status=RunStatus.SUCCEEDED,
+            gates=(QualityGate("tests", QualityGateStatus.PASSED),),
+        )
+    )
+
+    with pytest.raises(RetryNotAllowedError, match="latest run is not recoverable"):
+        RetryService(tasks, runs).retry(task.task_id)

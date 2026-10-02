@@ -61,6 +61,13 @@ class RecoveryPolicy:
             and latest.validation_outcome is ValidationOutcome.GATES_FAILED
         ):
             return FailureClass.CORRECTABLE
+        if (
+            task.status is TaskStatus.BLOCKED
+            and latest.status is RunStatus.SUCCEEDED
+            and latest.validation_outcome is ValidationOutcome.READY_FOR_NEXT_PHASE
+            and (task.blocked_reason or "").startswith("publication failed: run ")
+        ):
+            return FailureClass.CORRECTABLE
         if task.status is TaskStatus.CLAIMED and rework_claim and latest.is_terminal:
             return FailureClass.CORRECTABLE
         return FailureClass.NON_RECOVERABLE
