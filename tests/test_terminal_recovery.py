@@ -210,8 +210,9 @@ def test_legacy_recovery_refuses_unsafe_cases(timeout_case, case: str) -> None:
     if case == "result":
         _set_worker_failure(root, run)
     elif case == "active":
-        other = tasks.save(FactoryTask("Other", "example/target"))
-        runs.save_run(AgentRun(other.task_id, AgentKind.CODEX, RunStatus.RUNNING))
+        # Preserve the terminal attempt while introducing an orphan active run
+        # for this same task. The production guard is scoped by task_id.
+        runs.save_run(AgentRun(task.task_id, AgentKind.CODEX, RunStatus.RUNNING))
     elif case == "ineligible":
         availability[0] = False
     elif case in {"local_pr", "provider_pr"}:
