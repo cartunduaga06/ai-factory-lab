@@ -21,6 +21,7 @@ from factory.domain.errors import (
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
+    PublishedRevision,
     PullRequest,
     QualityGate,
     TaskSource,
@@ -748,6 +749,67 @@ def test_persisted_pr_identity_error_is_sanitized(db_path: str, tmp_path: Path) 
         assert text not in repr(error)
         assert text not in formatted
     assert error.__cause__ is None and error.__context__ is None
+
+
+def test_post_rebase_revalidation_rebinds_pr_to_new_exact_head(
+    db_path: str, tmp_path: Path
+) -> None:
+    old_head = "39e9863d952d31899417d1b308f74ca5f9e1c485"
+    new_head = "101527debd1d367faa86522050ef4b5596e374d7"
+    tasks = _tasks(db_path)
+    task = _task(tasks)
+    runs = _runs(db_path)
+    first = _validated_run(runs, task, tmp_path, run_id="run-before-rebase")
+    sink = FakePullRequestSink()
+
+    class ExactHeadPublisher(FakeWorkspacePublisher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heads = [old_head, new_head]
+
+        def publish(self, task: FactoryTask, run: AgentRun) -> PublishedRevision:
+            workspace = run.workspace
+            assert workspace is not None
+            self.calls += 1
+            self.published.append((task.task_id, workspace.branch))
+            return PublishedRevision(self.heads.pop(0), workspace.branch)
+
+    publisher = ExactHeadPublisher()
+    initial = _service(db_path, publisher=publisher, sink=sink).publish(task.task_id, first.run_id)
+    persisted = _prs(db_path).get_for_run(first.run_id)
+    assert persisted is not None
+    assert persisted.commit_sha == old_head
+    assert initial.task_status is TaskStatus.WAITING_HUMAN
+
+    tasks.request_rework(task.task_id, first.run_id, "revalidate rebased head")
+    for source, target in (
+        (TaskStatus.CHANGES_REQUESTED, TaskStatus.READY),
+        (TaskStatus.READY, TaskStatus.CLAIMED),
+        (TaskStatus.CLAIMED, TaskStatus.RUNNING),
+        (TaskStatus.RUNNING, TaskStatus.VALIDATING),
+    ):
+        tasks.apply_transition(task.task_id, source, target)
+    second = AgentRun(
+        task_id=task.task_id,
+        adapter=first.adapter,
+        run_id="run-after-rebase",
+        status=RunStatus.SUCCEEDED,
+        workspace=first.workspace,
+        gates=(QualityGate("tests", QualityGateStatus.PASSED, required=True),),
+        validated_revision="tree-after-rebase",
+    )
+    runs.save_run(second)
+
+    result = _service(db_path, publisher=publisher, sink=sink).publish(task.task_id, second.run_id)
+
+    rebound = _prs(db_path).get_for_run(second.run_id)
+    assert rebound is not None
+    assert rebound.commit_sha == new_head
+    assert rebound.number == initial.pull_request.number
+    assert _prs(db_path).get_for_run(first.run_id) is None
+    assert result.task_status is TaskStatus.WAITING_HUMAN
+    assert publisher.calls == 2
+    assert sink.create_calls == 1
 
 
 def test_rework_publication_recovers_after_durable_rebind_before_reconciliation(

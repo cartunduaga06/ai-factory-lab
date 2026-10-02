@@ -258,6 +258,21 @@ class WorkspaceRevisionError(FactoryError):
         self.workspace_id = workspace_id
 
 
+class PullRequestHeadMismatchError(FactoryError):
+    """The provider PR head no longer matches the Factory-persisted revision.
+
+    This is a revalidation signal, not a publication failure: an operator or
+    provider-side rebase/update moved the open PR branch after the Factory
+    persisted the exact head that passed validation. The error deliberately
+    carries no SHA or provider payload so stale/current revisions never leak
+    through exception text.
+    """
+
+    def __init__(self, pull_request_number: int) -> None:
+        super().__init__(f"pull request {pull_request_number} head requires revalidation")
+        self.pull_request_number = pull_request_number
+
+
 class PullRequestIdentityError(PublicationError):
     """A recovered pull request's identity is not the intended publication.
 
@@ -326,6 +341,7 @@ __all__ = [
     "FactoryError",
     "PersistenceError",
     "PublicationError",
+    "PullRequestHeadMismatchError",
     "RetryNotAllowedError",
     "RevisionNotPublishableError",
     "TaskNotPublishableError",

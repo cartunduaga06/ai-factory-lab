@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from factory.domain.errors import PullRequestHeadMismatchError
 from factory.domain.models import PullRequest
 from factory.domain.ports import PullRequestState, PullRequestStateSource
 from factory.integrations.github.client import GitHubClient
@@ -35,6 +36,14 @@ class GitHubPullRequestStateSource(PullRequestStateSource):
             or _repo(base.get("repo")) != pull_request.repository_slug
         ):
             raise ValueError("pull request identity mismatch")
+        provider_head = head.get("sha")
+        if (
+            not isinstance(provider_head, str)
+            or not provider_head.strip()
+            or not pull_request.commit_sha
+            or provider_head != pull_request.commit_sha
+        ):
+            raise PullRequestHeadMismatchError(pull_request.number)
         state = item.get("state")
         merged_at = item.get("merged_at")
         if state == "open" and merged_at is None:

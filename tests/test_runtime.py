@@ -13,6 +13,7 @@ from factory.domain.enums import (
     RunStatus,
     TaskStatus,
 )
+from factory.domain.errors import PullRequestHeadMismatchError
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
@@ -298,6 +299,30 @@ def test_pool_reconciles_waiting_pr_outside_current_sprint_without_dispatch(runt
     runtime.prepare_pool()
 
     assert tasks.get(first.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+    assert len(runs.list_runs(first.task_id)) == 1
+    assert len(adapter.dispatched) == 1
+    assert publisher.calls == 1
+    assert sink.create_calls == 1
+
+
+def test_waiting_human_provider_head_mismatch_blocks_for_revalidation(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    first = runtime.run_once()
+    assert first.task_id is not None
+    assert first.pull_request_number is not None
+
+    class RebasedSource(PullRequestStateSource):
+        def state(self, pull_request: PullRequest) -> PullRequestState:
+            assert pull_request.number == first.pull_request_number
+            raise PullRequestHeadMismatchError(pull_request.number)
+
+    runtime._pull_request_state = RebasedSource()
+    runtime.run_once()
+
+    task = tasks.get(first.task_id)
+    assert task is not None
+    assert task.status is TaskStatus.BLOCKED
+    assert task.blocked_reason == "pull request head changed; revalidation required"
     assert len(runs.list_runs(first.task_id)) == 1
     assert len(adapter.dispatched) == 1
     assert publisher.calls == 1

@@ -17,7 +17,7 @@ from factory.domain.enums import (
     TaskStatus,
     ValidationOutcome,
 )
-from factory.domain.errors import AgentCollectError
+from factory.domain.errors import AgentCollectError, PullRequestHeadMismatchError
 from factory.domain.models import (
     AgentAdapter,
     AgentRun,
@@ -633,6 +633,10 @@ class FactoryRuntime:
                 continue
             try:
                 state = self._pull_request_state.state(pr)
+            except PullRequestHeadMismatchError:
+                if task.status in {TaskStatus.WAITING_HUMAN, TaskStatus.VALIDATING}:
+                    self._block(task.task_id, "pull request head changed; revalidation required")
+                continue
             except Exception:
                 if self._feedback is not None:
                     self._feedback.reconcile_provider_closure(task, run)

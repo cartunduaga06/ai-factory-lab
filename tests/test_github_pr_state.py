@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from factory.domain.errors import PullRequestHeadMismatchError
 from factory.domain.models import PullRequest
 from factory.domain.ports import PullRequestState
 from factory.integrations.github.client import GitHubClient
@@ -24,8 +25,19 @@ class Transport:
         return self.payload
 
 
+OLD_HEAD = "39e9863d952d31899417d1b308f74ca5f9e1c485"
+NEW_HEAD = "101527debd1d367faa86522050ef4b5596e374d7"
+
+
 def _pr() -> PullRequest:
-    return PullRequest("example/target", "factory/one", "main", "title", number=38)
+    return PullRequest(
+        "example/target",
+        "factory/one",
+        "main",
+        "title",
+        number=38,
+        commit_sha=OLD_HEAD,
+    )
 
 
 def _payload(state: str, merged_at: str | None = None) -> dict[str, object]:
@@ -33,7 +45,11 @@ def _payload(state: str, merged_at: str | None = None) -> dict[str, object]:
         "number": 38,
         "state": state,
         "merged_at": merged_at,
-        "head": {"ref": "factory/one", "repo": {"full_name": "example/target"}},
+        "head": {
+            "sha": OLD_HEAD,
+            "ref": "factory/one",
+            "repo": {"full_name": "example/target"},
+        },
         "base": {"ref": "main", "repo": {"full_name": "example/target"}},
     }
 
@@ -66,3 +82,35 @@ def test_mismatch_or_ambiguity_never_transitions(field: str) -> None:
     )
     with pytest.raises(ValueError):
         source.state(_pr())
+
+
+def test_provider_head_change_requires_revalidation() -> None:
+    payload = _payload("open")
+    head = payload["head"]
+    assert isinstance(head, dict)
+    head["sha"] = NEW_HEAD
+    source = GitHubPullRequestStateSource(
+        GitHubClient("token", "https://api.github.com", Transport(payload))
+    )
+
+    with pytest.raises(PullRequestHeadMismatchError):
+        source.state(_pr())
+
+
+def test_missing_persisted_or_provider_head_requires_revalidation() -> None:
+    payload = _payload("open")
+    head = payload["head"]
+    assert isinstance(head, dict)
+    head.pop("sha")
+    source = GitHubPullRequestStateSource(
+        GitHubClient("token", "https://api.github.com", Transport(payload))
+    )
+    with pytest.raises(PullRequestHeadMismatchError):
+        source.state(_pr())
+
+    pr_without_revision = PullRequest("example/target", "factory/one", "main", "title", number=38)
+    source = GitHubPullRequestStateSource(
+        GitHubClient("token", "https://api.github.com", Transport(_payload("open")))
+    )
+    with pytest.raises(PullRequestHeadMismatchError):
+        source.state(pr_without_revision)

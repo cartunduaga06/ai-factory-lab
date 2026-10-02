@@ -239,6 +239,23 @@ def test_delivery_can_use_successful_local_gates_without_provider_ci_queries() -
     )
 
 
+def test_delivery_ci_for_old_head_cannot_certify_rebased_head() -> None:
+    from dataclasses import replace
+
+    from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
+
+    client = DeliveryClient()
+    expected_new_head = "c" * 40
+    evidence = GitHubDeliveryEvidenceSource(client, _delivery_registry()).evidence(
+        replace(_identity(), commit_sha=expected_new_head)
+    )  # type: ignore[arg-type]
+
+    assert not evidence.merged
+    assert not evidence.required_ci_passed
+    assert not evidence.complete
+    assert not any("/check-runs" in path or path.endswith("/status") for path in client.paths)
+
+
 def test_delivery_fails_closed_when_configured_ci_check_is_missing() -> None:
     from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
 
