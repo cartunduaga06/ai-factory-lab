@@ -55,20 +55,37 @@ class OperationalPolicy:
             return capability in self.enabled and not any((host, path, command, target))
         if capability is OperationalCapability.BACKUP or capability not in self.enabled:
             return False
-        if capability is OperationalCapability.DOCKER_INSPECT and target not in self.docker_targets:
+        if not (host and path and command and target):
             return False
-        allowed_targets = (
-            self.docker_targets
-            if capability is OperationalCapability.DOCKER_INSPECT
-            else self.targets
-        )
-        return (
-            bool(host and path and command and target)
-            and host in self.hosts
-            and path in self.paths
-            and command in self.commands
-            and target in allowed_targets
-        )
+        if capability is OperationalCapability.DATABASE_READONLY:
+            return (
+                host == "local"
+                and command in {"inspect", "read"}
+                and host in self.hosts
+                and path in self.paths
+                and command in self.commands
+                and target in self.targets
+            )
+        if capability is OperationalCapability.DOCKER_INSPECT:
+            return (
+                host == "local"
+                and path == "docker-engine-api"
+                and command == "inspect"
+                and host in self.hosts
+                and path in self.paths
+                and command in self.commands
+                and target in self.docker_targets
+            )
+        if capability is OperationalCapability.SERVICE_HEALTH:
+            return (
+                host == "https"
+                and command == "get"
+                and host in self.hosts
+                and path in self.paths
+                and command in self.commands
+                and target in self.targets
+            )
+        return False
 
 
 @dataclass(slots=True, frozen=True)
@@ -123,6 +140,27 @@ def parse_database_readonly(body: str) -> str:
     return value["target_id"]
 
 
+def parse_service_health(body: str) -> str:
+    """Accept only an operator-selected service id, never a URL or probe."""
+    blocks = _BLOCK.findall(body)
+    if len(blocks) != 1:
+        raise ValueError("exactly one factory-operational block is required")
+    try:
+        value = json.loads(blocks[0])
+    except json.JSONDecodeError:
+        raise ValueError("invalid operational declaration") from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"mode", "target_id"}
+        or value["mode"] != "service_health"
+        or not isinstance(value["target_id"], str)
+        or not _NAME.fullmatch(value["target_id"])
+        or value["target_id"] in {".", ".."}
+    ):
+        raise ValueError("unsupported operational declaration")
+    return value["target_id"]
+
+
 def parse_docker_inspect(body: str) -> str:
     """Accept only an operator registered Docker inspection target id."""
     blocks = _BLOCK.findall(body)
@@ -153,8 +191,12 @@ def canonical_operational_body(body: str) -> str:
             target_id = parse_database_readonly(body)
             mode = "database_readonly"
         except ValueError:
-            target_id = parse_docker_inspect(body)
-            mode = "docker_inspect"
+            try:
+                target_id = parse_service_health(body)
+                mode = "service_health"
+            except ValueError:
+                target_id = parse_docker_inspect(body)
+                mode = "docker_inspect"
         value = {"mode": mode, "target_id": target_id}
         return "```factory-operational\n" + json.dumps(value, sort_keys=True) + "\n```"
 
