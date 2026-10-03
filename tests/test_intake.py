@@ -13,9 +13,11 @@ from pathlib import Path
 import pytest
 
 from factory.domain.enums import RepositoryRole, TaskStatus
-from factory.domain.models import FactoryTask, Repository, TaskSource
+from factory.domain.models import FactoryTask, QualityGateSpec, Repository, TaskSource
 from factory.domain.ports import IssueSource
+from factory.domain.projects import ProjectProfile, ProjectRegistry
 from factory.infrastructure.persistence import SqliteTaskRepository
+from factory.integrations.github.project_issues import ProjectIssueSource
 from factory.orchestration.intake import IssueIntakeService
 
 REPO = Repository(slug="cartunduaga06/ai-factory-lab", role=RepositoryRole.CONTROL_PLANE)
@@ -164,3 +166,47 @@ def test_intake_does_not_transition_task_status(repo: SqliteTaskRepository) -> N
     assert summary.created == 1
     stored = repo.list()[0]
     assert stored.status is TaskStatus.DISCOVERED
+
+
+def test_registered_multi_repo_intake_routes_and_is_idempotent(repo: SqliteTaskRepository) -> None:
+    slug = "cartunduaga06/finanza-ia"
+    incoming = FactoryTask(
+        title="Issue 158",
+        target_repository=slug,
+        source=TaskSource("github", slug, 158),
+        labels=("factory-ready",),
+    )
+    profile = ProjectProfile(
+        project_id="finanza-ia",
+        repository_slug=slug,
+        source_checkout="/work/finanza-ia",
+        base_ref="main",
+        gates=(QualityGateSpec("pytest", ("pytest",), True),),
+    )
+    source = ProjectIssueSource(FakeIssueSource([incoming]), ProjectRegistry((profile,)))
+    service = IssueIntakeService(source, repo)
+    first = service.intake(REPO)
+    second = service.intake(REPO)
+    saved = repo.find_by_source(incoming.source)
+    assert (first.discovered, first.created, second.created, second.existing) == (1, 1, 0, 1)
+    assert saved is not None
+    assert (saved.project_id, saved.target_repository) == ("finanza-ia", slug)
+
+
+def test_registered_intake_rejects_unregistered_source(repo: SqliteTaskRepository) -> None:
+    foreign = FactoryTask(
+        title="Unregistered",
+        target_repository="other/project",
+        source=TaskSource("github", "other/project", 9),
+    )
+    profile = ProjectProfile(
+        project_id="finanza-ia",
+        repository_slug="cartunduaga06/finanza-ia",
+        source_checkout="/work/finanza-ia",
+        base_ref="main",
+        gates=(QualityGateSpec("pytest", ("pytest",), True),),
+    )
+    source = ProjectIssueSource(FakeIssueSource([foreign]), ProjectRegistry((profile,)))
+    with pytest.raises(ValueError, match="unregistered project repository"):
+        IssueIntakeService(source, repo).intake(REPO)
+    assert repo.list() == []

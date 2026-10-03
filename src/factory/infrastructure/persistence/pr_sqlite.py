@@ -32,6 +32,9 @@ from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
     """Durable pull-request storage backed by a SQLite file."""
 
+    def __init__(self, path: str, *, read_only: bool = False) -> None:
+        super().__init__(path, read_only=read_only)
+
     def __repr__(self) -> str:
         return f"SqlitePullRequestRepository(path={self._path!r})"
 

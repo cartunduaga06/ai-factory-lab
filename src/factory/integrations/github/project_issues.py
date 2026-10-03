@@ -23,7 +23,13 @@ class ProjectIssueSource(IssueSource):
         tasks: list[FactoryTask] = []
         for profile in self._registry.profiles:
             repo = Repository(profile.repository_slug, role=RepositoryRole.TARGET)
-            tasks.extend(self._bind(task) for task in self._source.list_open_tasks(repo))
+            for task in self._source.list_open_tasks(repo):
+                if task.source is None or task.source.repository_slug != profile.repository_slug:
+                    if task.source is not None:
+                        # Keep rejected routing evidence specific and auditable.
+                        self._registry.for_repository(task.source.repository_slug)
+                    raise ValueError("issue source returned an issue for the wrong repository")
+                tasks.append(self._bind(task))
         return tasks
 
     def get_task(self, repository: Repository, source: TaskSource) -> FactoryTask:

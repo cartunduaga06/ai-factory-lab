@@ -47,6 +47,7 @@ from factory.infrastructure.persistence.feedback_sqlite import SqliteFeedbackEve
 from factory.infrastructure.persistence.metrics import SqliteSprintMetrics
 from factory.infrastructure.persistence.security import SqliteSecurityReviewGate
 from factory.infrastructure.persistence.sprint_sqlite import SqliteSprintRepository
+from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
 from factory.integrations.context.repository import RepositoryContextSource
@@ -344,15 +345,15 @@ def _run_intake(config: FactoryConfig) -> int:
 
 def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | None:
     """Build optional backlog reconciliation without changing GitHub intake."""
-    list_id = config.trello_backlog_list_id
+    list_ids = config.trello_backlog_list_ids
     label_id = config.trello_ready_label_id
-    if list_id is None and label_id is None:
+    if not list_ids and label_id is None:
         return None
-    if not all((list_id, label_id, config.trello_key, config.trello_token)):
+    if not all((list_ids, label_id, config.trello_key, config.trello_token)):
         raise ConfigurationError("Trello backlog list, READY label, key and token are required")
     if config.github.control_plane_repo is None or config.github_write_token is None:
         raise ConfigurationError("GitHub repository and write token are required for backlog")
-    assert list_id is not None and label_id is not None
+    assert label_id is not None
     assert config.trello_key is not None and config.trello_token is not None
     links = SqliteBacklogLinkRepository(config.database.path)
     links.initialize()
@@ -360,7 +361,7 @@ def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | Non
         TrelloBacklogSource(
             config.trello_key,
             config.trello_token,
-            list_id,
+            list_ids,
             label_id,
             config.github.control_plane_repo,
             registry=config.project_registry,
@@ -373,11 +374,11 @@ def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | Non
 
 def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintService | None:
     """Use E2's exact ports with an immutable, authorized source guard."""
-    if config.trello_backlog_list_id is None and config.trello_ready_label_id is None:
+    if not config.trello_backlog_list_ids and config.trello_ready_label_id is None:
         return None
     if not all(
         (
-            config.trello_backlog_list_id,
+            config.trello_backlog_list_ids,
             config.trello_ready_label_id,
             config.trello_key,
             config.trello_token,
@@ -387,11 +388,11 @@ def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintS
     if config.github.control_plane_repo is None or config.github_write_token is None:
         raise ConfigurationError("GitHub repository and write token are required for backlog")
     assert config.trello_key is not None and config.trello_token is not None
-    assert config.trello_backlog_list_id is not None and config.trello_ready_label_id is not None
+    assert config.trello_backlog_list_ids and config.trello_ready_label_id is not None
     source = TrelloBacklogSource(
         config.trello_key,
         config.trello_token,
-        config.trello_backlog_list_id,
+        config.trello_backlog_list_ids,
         config.trello_ready_label_id,
         config.github.control_plane_repo,
         registry=config.project_registry,
@@ -536,12 +537,59 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
         return EXIT_CONFIG_ERROR
     try:
         path = config.database.path
-        tasks = SqliteTaskRepository(path)
-        runs = SqliteRunRepository(path)
-        prs = SqlitePullRequestRepository(path)
-        tasks.initialize()
-        runs.initialize()
-        prs.initialize()
+        if serve:
+            SqliteRepository.validate_read_only_schema(
+                path,
+                {
+                    "tasks": frozenset(
+                        {
+                            "task_id",
+                            "title",
+                            "status",
+                            "source_provider",
+                            "source_repository",
+                            "source_issue_number",
+                            "project_id",
+                        }
+                    ),
+                    "agent_runs": frozenset(
+                        {
+                            "run_id",
+                            "task_id",
+                            "status",
+                            "started_at",
+                            "last_heartbeat",
+                            "agent_heartbeat",
+                            "finished_at",
+                            "gates",
+                            "workspace_id",
+                        }
+                    ),
+                    "pull_requests": frozenset({"task_id", "run_id", "repository_slug", "number"}),
+                    "audit_events": frozenset(
+                        {
+                            "event_seq",
+                            "task_id",
+                            "name",
+                            "correlation_id",
+                            "run_id",
+                            "workspace_id",
+                            "pull_request_id",
+                            "causation_id",
+                            "aggregate_type",
+                            "aggregate_id",
+                            "aggregate_version",
+                            "occurred_at",
+                            "source_provider",
+                            "source_issue_number",
+                            "evidence",
+                        }
+                    ),
+                },
+            )
+        tasks = SqliteTaskRepository(path, read_only=True)
+        runs = SqliteRunRepository(path, read_only=True)
+        prs = SqlitePullRequestRepository(path, read_only=True)
         service = StatusService(
             tasks,
             runs,
@@ -550,13 +598,11 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
             missed_heartbeats=config.missed_heartbeats,
         )
         if serve:
-            publisher = _status_publisher(config)
             serve_status(
                 service,
                 host,
                 port,
-                publisher.flush if publisher else None,
-                SqliteAuditEventStore(path),
+                audit=SqliteAuditEventStore(path, read_only=True),
             )
         else:
             from dataclasses import asdict
@@ -1340,6 +1386,13 @@ def _resolve_repository(config: FactoryConfig) -> Repository:
     """Validate the runtime configuration intake needs and build the repo handle."""
     if config.github.token is None:
         raise ConfigurationError("GITHUB_TOKEN is required for intake")
+    # A project registry is the explicit allowlist for multi-repository intake;
+    # in that mode the caller's placeholder repository is not an authorization.
+    if config.project_registry is not None:
+        slug = config.github.control_plane_repo
+        if slug is None:
+            slug = config.project_registry.profiles[0].repository_slug
+        return Repository(slug=slug, role=RepositoryRole.CONTROL_PLANE)
     slug = config.github.control_plane_repo
     if not slug:
         raise ConfigurationError("FACTORY_GITHUB_REPO is required for intake")
