@@ -98,6 +98,8 @@ def render_status(snapshot: StatusSnapshot) -> str:
     escape = html.escape
     rows = (
         ("Task", snapshot.task_id),
+        ("Project", snapshot.project_id),
+        ("Repository", snapshot.repository),
         ("Agent", snapshot.agent),
         ("Run", snapshot.run_id),
         ("Workspace", snapshot.workspace_id),
@@ -109,7 +111,9 @@ def render_status(snapshot: StatusSnapshot) -> str:
         ("Last transition", snapshot.last_transition),
         ("Finished", snapshot.finished_at),
         ("Evidence", snapshot.evidence),
+        ("Blocked reason", snapshot.blocked_reason),
         ("Action", snapshot.action),
+        ("Commit", snapshot.commit_sha),
     )
     details = "".join(
         f"<dt>{escape(label)}</dt><dd>{escape(value)}</dd>"
