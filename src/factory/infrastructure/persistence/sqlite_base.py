@@ -10,6 +10,7 @@ re-instantiating it.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -29,9 +30,10 @@ from factory.infrastructure.persistence.schema import (
 class SqliteRepository:
     """Base class holding the file path, connection factory and schema setup."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, read_only: bool = False) -> None:
         # ``:memory:`` is honoured; any other value is a filesystem path.
         self._path = path
+        self._read_only = read_only
 
     @property
     def path(self) -> str:
@@ -49,6 +51,8 @@ class SqliteRepository:
         error. The workspace index is replaced by its active-run variant;
         stored task and run rows are not rewritten.
         """
+        if self._read_only:
+            raise ValueError("read-only repository cannot be initialized")
         if self._path != ":memory:":
             Path(self._path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -268,7 +272,11 @@ class SqliteRepository:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self._path)
+        if self._read_only:
+            uri = Path(self._path).expanduser().resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+        else:
+            conn = sqlite3.connect(self._path)
         try:
             conn.row_factory = sqlite3.Row
             # Enforce the foreign keys from transitions/runs to their parents.
@@ -277,6 +285,33 @@ class SqliteRepository:
                 yield conn
         finally:
             conn.close()
+
+    @staticmethod
+    def validate_read_only_schema(path: str, required_columns: dict[str, frozenset[str]]) -> None:
+        """Fail closed when a status database is missing required tables or columns.
+
+        This opens SQLite in URI read-only mode and performs metadata queries only;
+        it deliberately does not call repository initialization or migrations.
+        """
+        database = Path(path).expanduser().resolve()
+        if not database.is_file():
+            raise ValueError("required database schema is absent or incompatible")
+        uri = database.as_uri() + "?mode=ro"
+        try:
+            if any(re.fullmatch(r"[a-z_][a-z0-9_]*", name) is None for name in required_columns):
+                raise ValueError("invalid internal schema identifier")
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                conn.execute("PRAGMA query_only = ON")
+                for table, expected in required_columns.items():
+                    rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                    present = {str(row[1]) for row in rows}
+                    if not expected.issubset(present):
+                        raise ValueError("required database schema is absent or incompatible")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            raise ValueError("required database schema is absent or incompatible") from None
 
 
 __all__ = ["SqliteRepository"]
