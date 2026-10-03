@@ -1103,6 +1103,22 @@ and transient content. The builder rejects missing or changed content, conflicti
 fragment identities, and packs over its explicit 48,000 character budget. It sorts and
 deduplicates fragments before hashing canonical JSON metadata.
 
+The controlled memory MVP extends this same Context Pack through the optional
+`memory` source. SQLite stores typed incident, lesson, decision, runbook and
+known-failure records with repository and issue/PR/commit/task/run/gate evidence,
+versions, expiry and supersession links. Candidate content is screened for
+credential-like values and email addresses. An explicit lifecycle transition
+records actor and time; only a human-attributed `APPROVED` record can be retrieved.
+Retrieval is repository-scoped, expiry-aware, keyword-ranked and limited to ten
+records (three by default). Memory prose is labeled advisory and cannot grant
+permissions or override task instructions, deterministic policy, gates or human
+review. It has no authority to alter the skill registry or lifecycle state.
+
+SQLite was selected for this MVP because it is already the Factory's durable
+control-plane store and the bounded corpus does not justify a second database
+service. Vector embeddings and pgvector remain deferred until measured retrieval
+quality and corpus size justify their operational cost.
+
 If any mandatory source is absent, invalid, or over budget, dispatch persists a
 sanitized `BLOCKED` reason and task transition before any workspace or agent starts.
 The watcher therefore cannot repeatedly select that READY task. CODE adapters

@@ -31,6 +31,7 @@ from uuid import UUID
 from factory import __version__
 from factory.domain.enums import RepositoryRole, TaskStatus
 from factory.domain.errors import RetryNotAllowedError, TaskStateChangedError
+from factory.domain.memory import ApprovedMemoryContextSource
 from factory.domain.models import AgentAdapter, Repository
 from factory.domain.operational import OperationalCapability, OperationalPolicy
 from factory.domain.ports import IssueSource
@@ -38,6 +39,7 @@ from factory.infrastructure.config import AgentEngine, FactoryConfig, Unsupporte
 from factory.infrastructure.logging import configure_logging
 from factory.infrastructure.persistence import (
     SqliteBacklogLinkRepository,
+    SqliteMemoryRepository,
     SqlitePullRequestRepository,
     SqliteRunRepository,
     SqliteTaskRepository,
@@ -640,6 +642,7 @@ def _status_publisher(config: FactoryConfig) -> StatusEventPublisher | None:
     prs = SqlitePullRequestRepository(path)
     events = SqliteStatusEventStore(path)
     tasks.initialize()
+    SqliteMemoryRepository(config.database.path).initialize()
     runs.initialize()
     prs.initialize()
     events.initialize()
@@ -1178,6 +1181,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
     tasks.initialize()
     runs.initialize()
     pull_requests.initialize()
+    SqliteMemoryRepository(database.path).initialize()
     status_publisher = _status_publisher(config)
     sprint = _build_sprint(config, tasks)
     backlog = _build_backlog(config)
@@ -1279,6 +1283,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         adapter=adapter,
         context_builder=ContextPackBuilder(
             (
+                ApprovedMemoryContextSource(SqliteMemoryRepository(config.database.path)),
                 (
                     ProjectContextSource(config.project_registry)
                     if config.project_registry
