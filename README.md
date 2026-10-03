@@ -40,6 +40,11 @@ successful deployment is found when the project profile sets
 `"deploy_required": true`. A project may set `"required_ci_checks"` to an
 operator-owned list of exact GitHub check-run names; when configured, E6 verifies
 those checks directly and does not require branch-protection administration access.
+The check-run rows themselves must identify the exact PR head SHA and a concrete
+GitHub check-run id; a missing, stale, or unreadable required run blocks
+completion. Provider CI remains separate from the configured local Factory gates
+and is evaluated again against the persisted PR head before a delivery can become
+DONE. The task stays at `WAITING_HUMAN` until a human merges the PR.
 Projects that intentionally rely on the Factory's successful required local gates
 may set `"provider_ci_required": false`; this skips GitHub branch-protection,
 status and check-run lookups while still requiring the exact merged PR identity and

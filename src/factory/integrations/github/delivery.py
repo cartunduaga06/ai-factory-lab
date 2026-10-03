@@ -102,10 +102,24 @@ class GitHubDeliveryEvidenceSource(DeliveryEvidenceSource):
             return False
         state: dict[str, bool] = {}
         for row in reversed(status_rows):
-            if isinstance(row, Mapping) and isinstance(row.get("context"), str):
+            if (
+                isinstance(row, Mapping)
+                and row.get("sha") == sha
+                and isinstance(row.get("context"), str)
+            ):
                 state[str(row["context"])] = row.get("state") == "success"
         for row in check_rows:
-            if isinstance(row, Mapping) and isinstance(row.get("name"), str):
+            # The SHA-scoped endpoint is useful routing, but the returned run
+            # itself is the evidence. Require its immutable identity too so a
+            # stale or malformed provider row cannot satisfy this delivery.
+            if (
+                isinstance(row, Mapping)
+                and row.get("head_sha") == sha
+                and isinstance(row.get("id"), int)
+                and not isinstance(row.get("id"), bool)
+                and row.get("id", 0) > 0
+                and isinstance(row.get("name"), str)
+            ):
                 state[str(row["name"])] = (
                     row.get("status") == "completed" and row.get("conclusion") == "success"
                 )

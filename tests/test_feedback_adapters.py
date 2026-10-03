@@ -251,9 +251,10 @@ def test_trello_feedback_preserves_source_snapshot_and_project() -> None:
 
 
 class DeliveryClient:
-    def __init__(self, *, missing_check: bool = False) -> None:
+    def __init__(self, *, missing_check: bool = False, stale_check: bool = False) -> None:
         self.paths: list[str] = []
         self.missing_check = missing_check
+        self.stale_check = stale_check
 
     def get(self, path: str, params: Mapping[str, str | int] | None = None) -> Any:  # noqa: ANN401
         self.paths.append(path)
@@ -277,8 +278,20 @@ class DeliveryClient:
             return {"statuses": []}
         if path.endswith("/commits/" + "a" * 40 + "/check-runs"):
             rows = [
-                {"name": "ci-3.11", "status": "completed", "conclusion": "success"},
-                {"name": "ci-3.12", "status": "completed", "conclusion": "success"},
+                {
+                    "id": 101,
+                    "name": "ci-3.11",
+                    "head_sha": "c" * 40 if self.stale_check else "a" * 40,
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+                {
+                    "id": 102,
+                    "name": "ci-3.12",
+                    "head_sha": "a" * 40,
+                    "status": "completed",
+                    "conclusion": "success",
+                },
             ]
             if self.missing_check:
                 rows = rows[:1]
@@ -343,6 +356,16 @@ def test_delivery_fails_closed_when_configured_ci_check_is_missing() -> None:
 
     evidence = GitHubDeliveryEvidenceSource(  # type: ignore[arg-type]
         DeliveryClient(missing_check=True), _delivery_registry()
+    ).evidence(_identity())
+    assert not evidence.required_ci_passed
+    assert not evidence.complete
+
+
+def test_delivery_rejects_successful_check_run_for_stale_head_sha() -> None:
+    from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
+
+    evidence = GitHubDeliveryEvidenceSource(  # type: ignore[arg-type]
+        DeliveryClient(stale_check=True), _delivery_registry()
     ).evidence(_identity())
     assert not evidence.required_ci_passed
     assert not evidence.complete
