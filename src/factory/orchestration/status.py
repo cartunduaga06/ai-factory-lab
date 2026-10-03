@@ -90,6 +90,8 @@ class StatusService:
                 phase = "STALLED"
         pr_url = self._pr_url(run) if run is not None else None
         evidence = self._evidence(task, run, phase)
+        blocked_reason = self._safe_blocked_reason(task.blocked_reason)
+        action = self._action(phase, blocked_reason, self._latest_run_failed_gates(task.task_id))
         source = task.source
         issue_url = None
         if source is not None and source.provider == "github":
@@ -100,6 +102,8 @@ class StatusService:
         return StatusSnapshot(
             phase=phase,
             task_id=task.task_id,
+            project_id=task.project_id,
+            repository=task.target_repository,
             issue_url=issue_url,
             # Provider run IDs are opaque input and may contain echoed secrets.
             run_id=hashlib.sha256(run.run_id.encode()).hexdigest()[:12] if run else None,
@@ -118,13 +122,9 @@ class StatusService:
                 else (run.finished_at if run else None)
             ),
             pr_url=pr_url,
-            action=(
-                "Review the pull request"
-                if phase == "WAITING_HUMAN"
-                else "QA rework queued"
-                if phase == "READY" and self._latest_run_failed_gates(task_id)
-                else None
-            ),
+            commit_sha=self._commit_sha(run),
+            blocked_reason=blocked_reason,
+            action=action,
             evidence=evidence,
             gates=self._gates(run),
             previous_gates=tuple(
@@ -172,6 +172,45 @@ class StatusService:
         if pr is None or pr.task_id != run.task_id or pr.number is None or pr.number <= 0:
             return None
         return f"https://github.com/{quote(pr.repository_slug, safe='/')}/pull/{pr.number}"
+
+    def _commit_sha(self, run: AgentRun | None) -> str | None:
+        if run is None:
+            return None
+        pr = self._pull_requests.get_for_run(run.run_id)
+        if pr is None and run.workspace is not None:
+            pr = self._pull_requests.find_by_branch(
+                run.workspace.repository_slug, run.workspace.branch
+            )
+        if pr is None or pr.task_id != run.task_id:
+            return None
+        sha = pr.commit_sha
+        return sha if sha is not None and re.fullmatch(r"[0-9a-fA-F]{40,64}", sha) else None
+
+    @staticmethod
+    def _safe_blocked_reason(reason: str | None) -> str | None:
+        if reason == "security review blocked publication":
+            return "Security review requires operator attention"
+        if reason == "pull request closed without merge; human review required":
+            return "Pull request closed without merge"
+        if reason == "security review unavailable":
+            return "Security review could not be completed"
+        if reason is not None and re.fullmatch(r"[A-Za-z0-9 _.-]{1,80}", reason):
+            return reason
+        return "Blocked; inspect the task record" if reason else None
+
+    @staticmethod
+    def _action(phase: str, blocked_reason: str | None, failed_gates: bool) -> str | None:
+        if phase == "WAITING_HUMAN":
+            return "Review the pull request"
+        if phase == "STALLED":
+            return "Check worker liveness"
+        if blocked_reason:
+            return "Review the blocking reason"
+        if phase == "READY" and failed_gates:
+            return "QA rework queued"
+        if phase == "FAILED":
+            return "Review the failed run"
+        return None
 
     @staticmethod
     def _evidence(task: FactoryTask, run: AgentRun | None, phase: str) -> str | None:

@@ -393,6 +393,35 @@ class ControlTowerTests(unittest.TestCase):
         self.assertEqual(failure.evidence, "Agent reported failure")
         self.assertNotIn("ghp_private", render_status(failure))
 
+    def test_status_includes_routing_published_commit_and_safe_blocked_action(self) -> None:
+        task = self._task(TaskStatus.BLOCKED)
+        task.blocked_reason = "security review blocked publication: token=ghp_private"
+        self.tasks.update(task)
+        run = self._run(task)
+        self.runs.update_run(run)
+        self.prs.save(
+            PullRequest(
+                repository_slug="example/project",
+                head_branch="factory/task/run",
+                base_branch="main",
+                title="work",
+                number=18,
+                task_id=task.task_id,
+                run_id=run.run_id,
+                commit_sha="a" * 40,
+            )
+        )
+        snapshot = self.service.for_task(task.task_id)
+        self.assertEqual(snapshot.project_id, task.project_id)
+        self.assertEqual(snapshot.repository, "example/project")
+        self.assertEqual(snapshot.commit_sha, "a" * 40)
+        self.assertEqual(snapshot.blocked_reason, "Blocked; inspect the task record")
+        self.assertEqual(snapshot.action, "Review the blocking reason")
+        page = render_status(snapshot)
+        self.assertIn("example/project", page)
+        self.assertIn("Review the blocking reason", page)
+        self.assertNotIn("ghp_private", page)
+
     def test_transition_outbox_and_trello_payload_exclude_secret_prose(self) -> None:
         task = self._task(TaskStatus.CLAIMED)
         self.tasks.apply_transition(task.task_id, TaskStatus.CLAIMED, TaskStatus.RUNNING)

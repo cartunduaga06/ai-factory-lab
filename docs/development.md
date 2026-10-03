@@ -63,9 +63,13 @@ The read-only phone view is at `/factory/status` (add `?task_id=<id>` for one
 task). It binds to loopback only; use a trusted, authenticated reverse proxy or
 tunnel for remote phone access. JSON is available with `Accept: application/json`.
 No write routes exist. The page uses allowlisted identifiers, timestamps and
-deterministic evidence; agent summaries, task bodies, provider payloads and
-workspace paths are omitted. `STALLED` is derived from the persisted heartbeat
-and configured missed interval, leaving the task's lifecycle status `RUNNING`.
+deterministic evidence, including project/repository routing, the recorded PR
+commit, safe blocked reasons and a suggested human action; agent summaries,
+task bodies, provider payloads and workspace paths are omitted. `STALLED` is
+derived from the persisted heartbeat and configured missed interval, leaving
+the task's lifecycle status `RUNNING`. Server health and provider review approval
+are not inferred by this local projection; external access remains the
+responsibility of an authenticated proxy.
 
 When the Trello card ID, key and token are configured, meaningful transitions
 are queued transactionally and delivered during `run`/`watch` and by the status
