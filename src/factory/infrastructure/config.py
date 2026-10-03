@@ -10,6 +10,7 @@ See ``.env.example`` for the full, placeholder-only reference.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
@@ -17,6 +18,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 from factory.domain.models import QualityGateSpec
 from factory.domain.projects import ProjectProfile, ProjectRegistry
@@ -89,6 +91,87 @@ def _parse_database_targets(raw: str | None) -> tuple[tuple[str, str], ...]:
         )
     ):
         raise ValueError("FACTORY_DATABASE_READONLY_TARGETS is invalid")
+    return tuple(sorted(value.items()))
+
+
+def _parse_service_health_targets(raw: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse exact HTTPS health probe URLs from operator-owned configuration."""
+    if not raw:
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("FACTORY_SERVICE_HEALTH_TARGETS is invalid") from None
+    if not isinstance(value, dict) or len(value) > 16:
+        raise ValueError("FACTORY_SERVICE_HEALTH_TARGETS is invalid")
+    targets: list[tuple[str, str]] = []
+    for key, url in value.items():
+        if (
+            not isinstance(key, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", key) is None
+            or key in {".", ".."}
+            or not isinstance(url, str)
+        ):
+            raise ValueError("FACTORY_SERVICE_HEALTH_TARGETS is invalid")
+        parsed = urlsplit(url)
+        try:
+            port = parsed.port
+        except ValueError:
+            raise ValueError("FACTORY_SERVICE_HEALTH_TARGETS is invalid") from None
+        try:
+            address = ipaddress.ip_address(parsed.hostname or "")
+        except ValueError:
+            address = None
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.hostname.lower() in {"localhost"}
+            or parsed.hostname.lower().endswith(".localhost")
+            or parsed.hostname.lower().endswith(".local")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or port not in (None, 443)
+            or "\\" in url
+            or parsed.path == ""
+            or (address is not None and not address.is_global)
+            or any(ord(char) < 32 or ord(char) == 127 for char in url)
+        ):
+            raise ValueError("FACTORY_SERVICE_HEALTH_TARGETS is invalid")
+        targets.append((key, url))
+    return tuple(sorted(targets))
+
+
+def _parse_docker_targets(raw: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse an exact target-id to container-id/name mapping."""
+    if not raw:
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("FACTORY_DOCKER_INSPECT_TARGETS is invalid") from None
+    if (
+        not isinstance(value, dict)
+        or not 1 <= len(value) <= 16
+        or any(
+            not isinstance(key, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", key) is None
+            or key in {".", ".."}
+            or not isinstance(container, str)
+            or not (
+                re.fullmatch(r"[A-Fa-f0-9]{64}", container)
+                or re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", container)
+            )
+            or (
+                re.fullmatch(r"[A-Fa-f0-9]{12,63}", container) is not None
+                and re.fullmatch(r"[A-Fa-f0-9]{64}", container) is None
+            )
+            for key, container in value.items()
+        )
+        or len(set(value.values())) != len(value)
+    ):
+        raise ValueError("FACTORY_DOCKER_INSPECT_TARGETS is invalid")
     return tuple(sorted(value.items()))
 
 
@@ -318,6 +401,8 @@ class FactoryConfig:
     openhands_shared_workspace_hook_command: str | None = None
     operational_scratch_root: str | None = None
     database_readonly_targets: tuple[tuple[str, str], ...] = ()
+    service_health_targets: tuple[tuple[str, str], ...] = ()
+    docker_inspect_targets: tuple[tuple[str, str], ...] = ()
     project_registry: ProjectRegistry | None = None
 
     @property
@@ -443,6 +528,12 @@ class FactoryConfig:
             database_readonly_targets=_parse_database_targets(
                 source.get("FACTORY_DATABASE_READONLY_TARGETS")
             ),
+            service_health_targets=_parse_service_health_targets(
+                source.get("FACTORY_SERVICE_HEALTH_TARGETS")
+            ),
+            docker_inspect_targets=_parse_docker_targets(
+                source.get("FACTORY_DOCKER_INSPECT_TARGETS")
+            ),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -520,6 +611,8 @@ class FactoryConfig:
             ),
             "operational_scratch_root": self.operational_scratch_root,
             "database_readonly_target_ids": [name for name, _ in self.database_readonly_targets],
+            "service_health_target_ids": [name for name, _ in self.service_health_targets],
+            "docker_inspect_target_ids": [name for name, _ in self.docker_inspect_targets],
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
 

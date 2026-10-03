@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import sys
+import textwrap
 import threading
+import time
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 from factory.domain.enums import AgentKind, RepositoryRole, RunStatus, TaskStatus, ValidationOutcome
-from factory.domain.errors import RetryNotAllowedError, RevisionNotPublishableError
+from factory.domain.errors import (
+    DuplicateTaskError,
+    RetryNotAllowedError,
+    RevisionNotPublishableError,
+)
 from factory.domain.models import (
     AgentRun,
     FactoryTask,
@@ -78,6 +88,227 @@ def test_two_sessions_overlap_and_failure_does_not_stop_peer() -> None:
     )
     assert next(session for session in sessions if session.task_id == "task-b").result is not None
     assert len(instances) == 3  # coordinator and two independent runtimes
+
+
+def test_pool_continues_after_recoverable_pass_preparation_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop = threading.Event()
+    prepared = 0
+    sleeps = 0
+
+    class FlakyCoordinator:
+        def prepare_pool(self) -> None:
+            nonlocal prepared
+            prepared += 1
+            if prepared == 1:
+                raise DuplicateTaskError(TaskSource("github", "example/factory", 1))
+
+        def pool_candidates(self) -> tuple[str, ...]:
+            return ()
+
+    def sleep(seconds: float) -> None:
+        nonlocal sleeps
+        assert seconds == 0.0
+        sleeps += 1
+        if sleeps == 2:
+            stop.set()
+
+    with caplog.at_level("ERROR"):
+        WorkerPool(
+            lambda: cast("FactoryRuntime", FlakyCoordinator()),
+            idle_interval=0.0,
+            should_stop=stop.is_set,
+            sleep=sleep,
+        ).run()
+
+    assert prepared == 2
+    assert "pool pass recovered during preparation: DuplicateTaskError" in caplog.text
+
+
+def test_pool_preparation_programming_error_fails_closed() -> None:
+    class BrokenCoordinator:
+        def prepare_pool(self) -> None:
+            raise RuntimeError("programming failure")
+
+        def pool_candidates(self) -> tuple[str, ...]:
+            return ()
+
+    with pytest.raises(RuntimeError, match="programming failure"):
+        WorkerPool(lambda: cast("FactoryRuntime", BrokenCoordinator())).run_pass()
+
+
+def test_pool_shutdown_while_idle_returns_without_waiting() -> None:
+    stop = threading.Event()
+    sleeps: list[float] = []
+    prepared = 0
+
+    class EmptyCoordinator:
+        def prepare_pool(self) -> None:
+            nonlocal prepared
+            prepared += 1
+
+        def pool_candidates(self) -> tuple[str, ...]:
+            return ()
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        stop.set()
+
+    WorkerPool(
+        lambda: cast("FactoryRuntime", EmptyCoordinator()),
+        idle_interval=30.0,
+        should_stop=stop.is_set,
+        sleep=sleep,
+    ).run()
+
+    assert prepared == 1
+    assert sleeps == [30.0]
+
+
+class ActiveRunRepository:
+    def __init__(self, run: AgentRun) -> None:
+        self._run = run
+
+    def find_active_run(self, task_id: str) -> AgentRun | None:
+        return self._run if task_id == self._run.task_id else None
+
+
+class ProcessKillingAdapter:
+    def __init__(self, child: subprocess.Popen[bytes]) -> None:
+        self._child = child
+        self.cancelled = threading.Event()
+
+    @property
+    def kind(self) -> AgentKind:
+        return AgentKind.OTHER
+
+    def cancel(self, run: AgentRun) -> None:
+        del run
+        self.cancelled.set()
+        if self._child.poll() is None:
+            os.killpg(self._child.pid, signal.SIGTERM)
+
+
+def test_pool_shutdown_cancels_active_cycle_and_reaps_child_process(tmp_path: Path) -> None:
+    stop = threading.Event()
+    started = threading.Event()
+    task_id = "task-active"
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    run = AgentRun(task_id=task_id, adapter=AgentKind.OTHER, status=RunStatus.RUNNING)
+    adapter = ProcessKillingAdapter(child)
+
+    class Coordinator:
+        def prepare_pool(self) -> None:
+            return None
+
+        def pool_candidates(self) -> tuple[str, ...]:
+            return (task_id,)
+
+    class ActiveRuntime:
+        _runs = ActiveRunRepository(run)
+        _adapter = adapter
+
+        def run_task(self, task_id: str) -> RuntimeResult:
+            started.set()
+            assert child.wait(timeout=5) is not None
+            return RuntimeResult(
+                task_id, run.run_id, None, None, None, None, None, "CANCELLED", IntakeSummary()
+            )
+
+    def request_stop() -> None:
+        assert started.wait(timeout=2)
+        stop.set()
+
+    stopper = threading.Thread(target=request_stop)
+    runtimes = [Coordinator(), ActiveRuntime()]
+
+    def factory() -> FactoryRuntime:
+        return cast("FactoryRuntime", runtimes.pop(0))
+
+    stopper.start()
+    try:
+        sessions = WorkerPool(
+            factory,
+            max_concurrency=1,
+            wait_interval=0.01,
+            should_stop=stop.is_set,
+        ).run_pass()
+    finally:
+        stopper.join(timeout=2)
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+
+    assert adapter.cancelled.is_set()
+    assert child.poll() is not None
+    assert len(sessions) == 1
+    assert sessions[0].task_id == task_id
+    assert sessions[0].result is not None
+
+
+def test_sigterm_stops_local_idle_pool_process_cleanly() -> None:
+    script = textwrap.dedent(
+        """
+        from factory.__main__ import _CooperativeStop, _install_stop_handlers
+        from factory.orchestration.worker_pool import WorkerPool
+
+        class Runtime:
+            def prepare_pool(self):
+                return None
+
+            def pool_candidates(self):
+                return ()
+
+        stop = _CooperativeStop()
+        previous_handlers, previous_wakeup_fd = _install_stop_handlers(
+            stop.request, wakeup_fd=stop.wakeup_fd
+        )
+        try:
+            print("ready", flush=True)
+            WorkerPool(
+                lambda: Runtime(),
+                idle_interval=30.0,
+                should_stop=stop.is_set,
+                sleep=stop.sleep,
+            ).run()
+            print("stopped", flush=True)
+        finally:
+            import signal
+
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+            signal.set_wakeup_fd(previous_wakeup_fd)
+            stop.close()
+        """
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    durations: list[float] = []
+
+    for _ in range(20):
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        started = time.perf_counter()
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=2)
+        durations.append(time.perf_counter() - started)
+
+        assert process.returncode == 0, stderr
+        assert "stopped" in stdout
+    assert max(durations) < 1.0
 
 
 def test_pool_rejects_more_than_mvp_capacity() -> None:

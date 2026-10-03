@@ -402,6 +402,30 @@ class DatabaseReadonlyInspector(ABC):
         """Return the registered path for a policy decision, or empty if unknown."""
 
 
+class ServiceHealthChecker(ABC):
+    """Factory-owned bounded health observations for an operator registered id."""
+
+    @abstractmethod
+    def check(self, target_id: str) -> str:
+        """Return timestamped sanitized status evidence."""
+
+    @abstractmethod
+    def target_url(self, target_id: str) -> str:
+        """Return the registered target for policy matching, or empty if unknown."""
+
+
+class DockerInspector(ABC):
+    """Factory-owned fixed Docker observations for an operator registered id."""
+
+    @abstractmethod
+    def inspect(self, target_id: str) -> str:
+        """Return bounded sanitized evidence or raise ValueError on unsafe state."""
+
+    @abstractmethod
+    def registered_container(self, target_id: str) -> str:
+        """Return the configured container selector or empty if unknown."""
+
+
 class OperationalAcceptance(ABC):
     """Verify task-specific host evidence without trusting an agent's exit code."""
 
