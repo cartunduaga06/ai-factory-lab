@@ -271,6 +271,39 @@ def test_human_review_reconciles_from_persisted_pr(
     assert tasks.get(first.task_id).status is expected  # type: ignore[union-attr]
 
 
+def test_pool_reconciles_waiting_pr_outside_current_sprint_without_dispatch(runtime_parts) -> None:
+    runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
+    first = runtime.run_once()
+    assert first.task_id is not None
+
+    class MergedSource(PullRequestStateSource):
+        def state(self, pull_request: PullRequest) -> PullRequestState:
+            assert pull_request.run_id == first.run_id
+            return PullRequestState.MERGED
+
+    class SprintWithoutTask:
+        def allows_review(self, task: FactoryTask) -> bool:
+            del task
+            return False
+
+        def resume_completed(self) -> None:
+            pass
+
+        def prepare(self) -> bool:
+            return True
+
+    runtime._pull_request_state = MergedSource()
+    runtime._sprint = SprintWithoutTask()  # type: ignore[assignment]
+
+    runtime.prepare_pool()
+
+    assert tasks.get(first.task_id).status is TaskStatus.DONE  # type: ignore[union-attr]
+    assert len(runs.list_runs(first.task_id)) == 1
+    assert len(adapter.dispatched) == 1
+    assert publisher.calls == 1
+    assert sink.create_calls == 1
+
+
 def test_human_review_read_failure_preserves_waiting_state(runtime_parts) -> None:
     runtime, tasks, runs, adapter, publisher, sink, _ = runtime_parts
     first = runtime.run_once()

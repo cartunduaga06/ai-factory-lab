@@ -30,10 +30,11 @@ compatibility alias for this same continuous pool supervisor. Both entrypoints
 reconcile the configured Trello backlog before GitHub intake on every
 scheduling pass. A task at `WAITING_HUMAN` remains persisted for review and
 does not stop intake or an independent worker. `SIGINT` and `SIGTERM` stop new
-scheduling and allow active sessions to finish their current bounded invocation. The pool waits
-`FACTORY_WATCH_IDLE_INTERVAL` seconds between passes. Results print task ID,
-run ID, branch, gate result, PR and outcome; inspect the SQLite task transitions,
-run/workspace and PR rows for the complete trace. No pool path merges or deploys.
+scheduling, wake any idle wait immediately, request cancellation for active
+agent runs through the engine adapter, and then drain the affected sessions.
+Results print task ID, run ID, branch, gate result, PR and outcome; inspect the
+SQLite task transitions, run/workspace and PR rows for the complete trace. No
+pool path merges or deploys.
 
 For an acceptance run, authorize two independent real Issues, one for this
 repository and one for Dulces El Jericoano, with separate project profiles and

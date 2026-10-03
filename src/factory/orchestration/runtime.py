@@ -672,13 +672,6 @@ class FactoryRuntime:
                     self._registry.resolve(task.project_id, task.target_repository)
                 except ProjectRoutingError:
                     continue
-            if (
-                self._sprint is not None
-                and task.status is not TaskStatus.DONE
-                and not self._sprint.allows_review(task)
-                and (self._feedback is None or not self._feedback.is_github_direct(task))
-            ):
-                continue
             if task.kind is not TaskKind.CODE:
                 continue
             run = self._latest_run(task.task_id)
@@ -725,6 +718,7 @@ class FactoryRuntime:
             elif self._feedback is not None and task.status in {
                 TaskStatus.WAITING_HUMAN,
                 TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
             }:
                 self._feedback.sync(task, run, task.status.value)
             if self._feedback is not None:

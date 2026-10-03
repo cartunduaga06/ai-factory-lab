@@ -640,7 +640,6 @@ def test_installed_stop_handler_requests_a_cooperative_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import signal
-    import threading
 
     handlers: dict[int, object] = {}
 
@@ -649,12 +648,23 @@ def test_installed_stop_handler_requests_a_cooperative_stop(
         return signal.SIG_DFL
 
     monkeypatch.setattr(cli.signal, "signal", fake_signal)
-    stop = threading.Event()
-    cli._install_stop_handlers(stop)
+    stop = cli._CooperativeStop()
+    previous_handlers: dict[int, object] = {}
+    previous_wakeup_fd = -1
 
-    assert not stop.is_set()
-    handlers[signal.SIGINT](signal.SIGINT, None)  # type: ignore[operator]
-    assert stop.is_set()
+    try:
+        previous_handlers, previous_wakeup_fd = cli._install_stop_handlers(
+            stop.request, wakeup_fd=stop.wakeup_fd
+        )
+
+        assert not stop.is_set()
+        handlers[signal.SIGINT](signal.SIGINT, None)  # type: ignore[operator]
+        assert stop.is_set()
+    finally:
+        signal.set_wakeup_fd(previous_wakeup_fd)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        stop.close()
 
 
 def test_run_remains_one_shot_and_does_not_construct_a_worker_pool(
