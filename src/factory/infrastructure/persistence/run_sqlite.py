@@ -38,6 +38,9 @@ _ACTIVE_STATUSES = (RunStatus.PENDING, RunStatus.RUNNING)
 class SqliteRunRepository(SqliteRepository, RunRepository):
     """Durable workspace and agent-run storage backed by a SQLite file."""
 
+    def __init__(self, path: str, *, read_only: bool = False) -> None:
+        super().__init__(path, read_only=read_only)
+
     def __repr__(self) -> str:
         return f"SqliteRunRepository(path={self._path!r})"
 
