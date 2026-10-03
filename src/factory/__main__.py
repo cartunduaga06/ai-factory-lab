@@ -66,6 +66,7 @@ from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
 from factory.integrations.github.issue_completion import GitHubIssueCompletionSink
 from factory.integrations.github.pr_state import GitHubPullRequestStateSource
 from factory.integrations.github.project_issues import ProjectIssueSource
+from factory.integrations.host_health import HostHealthCollector
 from factory.integrations.openhands import (
     OpenHandsAdapter,
     OpenHandsClient,
@@ -598,11 +599,23 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
             missed_heartbeats=config.missed_heartbeats,
         )
         if serve:
+            publisher = _status_publisher(config)
+            service_targets = dict(config.service_health_targets)
+            docker_targets = dict(config.docker_inspect_targets)
+            service_checker = ServiceHealthChecker(service_targets) if service_targets else None
+            docker_inspector = DockerReadonlyInspector(docker_targets) if docker_targets else None
             serve_status(
                 service,
                 host,
                 port,
+                publisher.flush if publisher else None,
                 audit=SqliteAuditEventStore(path, read_only=True),
+                host_health=HostHealthCollector(
+                    service_checker=service_checker,
+                    service_targets=tuple(service_targets),
+                    docker_inspector=docker_inspector,
+                    docker_targets=tuple(docker_targets),
+                ),
             )
         else:
             from dataclasses import asdict
