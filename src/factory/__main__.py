@@ -63,6 +63,7 @@ from factory.integrations.github import (
 from factory.integrations.github.backlog_issues import GitHubBacklogIssueSink
 from factory.integrations.github.delivery import GitHubDeliveryEvidenceSource
 from factory.integrations.github.issue_completion import GitHubIssueCompletionSink
+from factory.integrations.github.owner_reports import GitHubOwnerReportSink
 from factory.integrations.github.pr_state import GitHubPullRequestStateSource
 from factory.integrations.github.project_issues import ProjectIssueSource
 from factory.integrations.openhands import (
@@ -1137,6 +1138,25 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
     )
     adapter = _build_agent_adapter(config)
     write_client = GitHubWriteClient(config.github_write_token or "", config.github.api_url)
+    owner_reports = GitHubOwnerReportSink(write_client)
+    audit_events = SqliteAuditEventStore(database.path)
+
+    def publish_owner_report(task_id: str) -> None:
+        task = tasks.get(task_id)
+        if task is None or task.source is None or task.source.provider != "github":
+            return
+        task_runs = tuple(runs.list_runs(task_id))
+        task_prs = tuple(
+            pr for run in task_runs if (pr := pull_requests.get_for_run(run.run_id)) is not None
+        )
+        owner_reports.publish(
+            task,
+            task_runs,
+            task_prs,
+            audit_events.for_task(task_id),
+            initial=not task_runs,
+        )
+
     feedback = None
     if config.project_registry is not None:
         card_feedback = (
@@ -1225,6 +1245,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         feedback=feedback,
         pool_mode=pool_mode,
         pool_backlog_links=(SqliteBacklogLinkRepository(database.path) if pool_mode else None),
+        owner_report=publish_owner_report,
         task_gate_specs=config.task_quality_gates,
         gate_runner=LocalQualityGateRunner(),
         revision_inspector=GitWorkspaceRevisionInspector(),

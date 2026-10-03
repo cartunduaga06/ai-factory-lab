@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -68,6 +69,8 @@ from factory.orchestration.recovery import FailureClass, RecoveryPolicy
 from factory.orchestration.sprint import SprintService
 from factory.orchestration.tracking import RunRefresh, RunTrackingService
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True, frozen=True)
 class RuntimeResult:
@@ -129,6 +132,7 @@ class FactoryRuntime:
         feedback: FeedbackReconciliationService | None = None,
         pool_mode: bool = False,
         pool_backlog_links: BacklogLinkRepository | None = None,
+        owner_report: Callable[[str], None] | None = None,
     ) -> None:
         self._intake = intake
         self._intake_repository = intake_repository
@@ -207,6 +211,7 @@ class FactoryRuntime:
         self._sprint = sprint
         self._recovery_policy = recovery_policy or RecoveryPolicy()
         self._pool_mode = pool_mode
+        self._owner_report = owner_report
 
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
@@ -227,6 +232,8 @@ class FactoryRuntime:
             result = self._run_once()
             if self._sprint is not None and result.task_id is not None:
                 self._sprint.observe(self._tasks.get(result.task_id))
+            if result.task_id is not None and self._owner_report is not None:
+                self._publish_owner_report(result.task_id)
             return result
         finally:
             self._pulse_status()
@@ -241,7 +248,17 @@ class FactoryRuntime:
         if self._should_reconcile_backlog():
             assert self._backlog_reconcile is not None
             self._backlog_reconcile()
-        return self._intake.intake(self._intake_repository)
+        before = {task.task_id for task in self._tasks.list()} if self._owner_report else set()
+        summary = self._intake.intake(self._intake_repository)
+        if self._owner_report is not None and summary.created:
+            for task in self._tasks.list():
+                if (
+                    task.task_id not in before
+                    and task.source is not None
+                    and task.source.provider == "github"
+                ):
+                    self._publish_owner_report(task.task_id)
+        return summary
 
     def pool_candidates(self) -> tuple[str, ...]:
         """Return unfinished task identities in recovery-first order."""
@@ -266,9 +283,25 @@ class FactoryRuntime:
         if not self._pool_allows(task):
             raise ValueError("task is not authorized for pool execution")
         try:
-            return self._run_once(selected_task=task, do_intake=False)
+            result = self._run_once(selected_task=task, do_intake=False)
+            if self._owner_report is not None:
+                self._publish_owner_report(task_id)
+            return result
         finally:
             self._pulse_status()
+
+    def _publish_owner_report(self, task_id: str) -> None:
+        """Keep a provider feedback outage from changing task execution state."""
+        if self._owner_report is None:
+            return
+        try:
+            self._owner_report(task_id)
+        except Exception as exc:  # noqa: BLE001 - provider text must not enter logs
+            logger.warning(
+                "owner report update deferred: task_id=%s error_type=%s",
+                task_id,
+                type(exc).__name__,
+            )
 
     def _run_once(
         self, selected_task: FactoryTask | None = None, *, do_intake: bool = True
@@ -277,7 +310,20 @@ class FactoryRuntime:
         if do_intake and self._should_reconcile_backlog():
             assert self._backlog_reconcile is not None
             self._backlog_reconcile()
+        before = (
+            {task.task_id for task in self._tasks.list()}
+            if do_intake and self._owner_report
+            else set()
+        )
         intake = self._intake.intake(self._intake_repository) if do_intake else IntakeSummary()
+        if self._owner_report is not None and intake.created:
+            for candidate in self._tasks.list():
+                if (
+                    candidate.task_id not in before
+                    and candidate.source is not None
+                    and candidate.source.provider == "github"
+                ):
+                    self._publish_owner_report(candidate.task_id)
         if do_intake:
             self._reconcile_human_reviews()
         task = selected_task or self._select_task()
