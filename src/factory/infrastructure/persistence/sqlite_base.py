@@ -10,6 +10,7 @@ re-instantiating it.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -284,6 +285,33 @@ class SqliteRepository:
                 yield conn
         finally:
             conn.close()
+
+    @staticmethod
+    def validate_read_only_schema(path: str, required_columns: dict[str, frozenset[str]]) -> None:
+        """Fail closed when a status database is missing required tables or columns.
+
+        This opens SQLite in URI read-only mode and performs metadata queries only;
+        it deliberately does not call repository initialization or migrations.
+        """
+        database = Path(path).expanduser().resolve()
+        if not database.is_file():
+            raise ValueError("required database schema is absent or incompatible")
+        uri = database.as_uri() + "?mode=ro"
+        try:
+            if any(re.fullmatch(r"[a-z_][a-z0-9_]*", name) is None for name in required_columns):
+                raise ValueError("invalid internal schema identifier")
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                conn.execute("PRAGMA query_only = ON")
+                for table, expected in required_columns.items():
+                    rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                    present = {str(row[1]) for row in rows}
+                    if not expected.issubset(present):
+                        raise ValueError("required database schema is absent or incompatible")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            raise ValueError("required database schema is absent or incompatible") from None
 
 
 __all__ = ["SqliteRepository"]

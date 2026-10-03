@@ -227,6 +227,56 @@ class ControlTowerTests(unittest.TestCase):
         self.assertIn(known_event.name, trace_body)
         self.assertNotIn(fallback_task.task_id, trace_body)
 
+    def test_status_startup_is_read_only_and_missing_database_is_not_created(self) -> None:
+        configured_dir = Path(self.temporary.name) / "startup"
+        configured_dir.mkdir()
+        database_path = configured_dir / "existing.sqlite"
+        tasks = SqliteTaskRepository(str(database_path))
+        runs = SqliteRunRepository(str(database_path))
+        prs = SqlitePullRequestRepository(str(database_path))
+        for repository in (tasks, runs, prs):
+            repository.initialize()
+        task = FactoryTask(
+            title="Read-only startup task",
+            target_repository="example/project",
+            source=TaskSource("github", "example/project", 118),
+            status=TaskStatus.READY,
+        )
+        tasks.save(task)
+        before = database_path.read_bytes()
+        before_stat = database_path.stat()
+        original_cwd = Path.cwd()
+        os.chdir(configured_dir)
+        self.addCleanup(os.chdir, original_cwd)
+        _InProcessStatusServer.paths = (f"/factory/status?task_id={task.task_id}",)
+        _InProcessStatusServer.responses = {}
+        with patch("factory.integrations.status_http.ThreadingHTTPServer", _InProcessStatusServer):
+            _invoke_status_cli(f"sqlite:///{database_path}", 18766)
+        self.assertEqual(database_path.read_bytes(), before)
+        self.assertEqual(database_path.stat().st_mtime_ns, before_stat.st_mtime_ns)
+        response = next(iter(_InProcessStatusServer.responses.values()))
+        self.assertIn(task.task_id, response.body.decode())
+
+        missing = configured_dir / "missing.sqlite"
+        _InProcessStatusServer.paths = ()
+        with patch.dict("os.environ", {"DATABASE_URL": f"sqlite:///{missing}"}, clear=True):
+            self.assertNotEqual(main(["status", "--serve", "--port", "18767"]), 0)
+        self.assertFalse(missing.exists())
+
+    def test_read_only_status_rejects_legacy_schema_without_migrating(self) -> None:
+        path = Path(self.temporary.name) / "legacy-status.sqlite"
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE tasks (task_id TEXT PRIMARY KEY)")
+        before = path.read_bytes()
+        with patch.dict("os.environ", {"DATABASE_URL": f"sqlite:///{path}"}, clear=True):
+            self.assertNotEqual(main(["status", "--serve", "--port", "18768"]), 0)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_status_service_unit_contract_is_loopback_only(self) -> None:
+        unit = Path("ops/control-tower/systemd/factory-control-tower.service").read_text()
+        self.assertIn("--host 127.0.0.1", unit)
+        self.assertNotIn("--host 0.0.0.0", unit)
+
     def test_config_masks_trello_credentials_and_bounds_heartbeat(self) -> None:
         config = FactoryConfig.from_env(
             {
