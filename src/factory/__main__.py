@@ -50,6 +50,7 @@ from factory.integrations.codex import CodexAdapter
 from factory.integrations.context.repository import RepositoryContextSource
 from factory.integrations.context.skill_source import ApprovedSkillSource
 from factory.integrations.database_readonly import SqliteReadonlyInspector
+from factory.integrations.docker_readonly import DockerReadonlyInspector
 from factory.integrations.gates import LocalQualityGateRunner
 from factory.integrations.github import (
     GitHubClient,
@@ -1011,6 +1012,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         and config.project_registry is None
         and config.operational_scratch_root is None
         and not config.database_readonly_targets
+        and not config.docker_inspect_targets
     ):
         raise ConfigurationError("FACTORY_TARGET_REPO is required for run")
     if (
@@ -1018,12 +1020,14 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         and config.project_registry is None
         and config.operational_scratch_root is None
         and not config.database_readonly_targets
+        and not config.docker_inspect_targets
     ):
         raise ConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
     if (
         config.github_write_token is None
         and config.operational_scratch_root is None
         and not config.database_readonly_targets
+        and not config.docker_inspect_targets
     ):
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
@@ -1085,15 +1089,19 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         else None
     )
     database_targets = dict(config.database_readonly_targets)
+    docker_targets = dict(config.docker_inspect_targets)
     operational_policy = OperationalPolicy(
         enabled=frozenset(
             ({OperationalCapability.SCRATCH} if config.operational_scratch_root else set())
             | ({OperationalCapability.DATABASE_READONLY} if database_targets else set())
+            | ({OperationalCapability.DOCKER_INSPECT} if docker_targets else set())
         ),
-        hosts=frozenset({"local"}) if database_targets else frozenset(),
-        paths=frozenset(database_targets.values()),
-        commands=frozenset({"inspect"}) if database_targets else frozenset(),
+        hosts=frozenset({"local"}) if database_targets or docker_targets else frozenset(),
+        paths=frozenset(database_targets.values())
+        | (frozenset({"docker-engine-api"}) if docker_targets else frozenset()),
+        commands=frozenset({"inspect"}) if database_targets or docker_targets else frozenset(),
         targets=frozenset(database_targets),
+        docker_targets=frozenset(docker_targets),
     )
     return FactoryRuntime(
         intake=intake,
@@ -1152,6 +1160,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         database_inspector=(
             SqliteReadonlyInspector(database_targets) if database_targets else None
         ),
+        docker_inspector=(DockerReadonlyInspector(docker_targets) if docker_targets else None),
         operational_root=config.operational_scratch_root,
         operational_acceptance=(
             ScratchAcceptance(operational_provisioner)

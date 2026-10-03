@@ -92,6 +92,38 @@ def _parse_database_targets(raw: str | None) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(value.items()))
 
 
+def _parse_docker_targets(raw: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse an exact target-id to container-id/name mapping."""
+    if not raw:
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("FACTORY_DOCKER_INSPECT_TARGETS is invalid") from None
+    if (
+        not isinstance(value, dict)
+        or not 1 <= len(value) <= 16
+        or any(
+            not isinstance(key, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", key) is None
+            or key in {".", ".."}
+            or not isinstance(container, str)
+            or not (
+                re.fullmatch(r"[A-Fa-f0-9]{64}", container)
+                or re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", container)
+            )
+            or (
+                re.fullmatch(r"[A-Fa-f0-9]{12,63}", container) is not None
+                and re.fullmatch(r"[A-Fa-f0-9]{64}", container) is None
+            )
+            for key, container in value.items()
+        )
+        or len(set(value.values())) != len(value)
+    ):
+        raise ValueError("FACTORY_DOCKER_INSPECT_TARGETS is invalid")
+    return tuple(sorted(value.items()))
+
+
 class Environment(StrEnum):
     DEVELOPMENT = "development"
     STAGING = "staging"
@@ -318,6 +350,7 @@ class FactoryConfig:
     openhands_shared_workspace_hook_command: str | None = None
     operational_scratch_root: str | None = None
     database_readonly_targets: tuple[tuple[str, str], ...] = ()
+    docker_inspect_targets: tuple[tuple[str, str], ...] = ()
     project_registry: ProjectRegistry | None = None
 
     @property
@@ -443,6 +476,9 @@ class FactoryConfig:
             database_readonly_targets=_parse_database_targets(
                 source.get("FACTORY_DATABASE_READONLY_TARGETS")
             ),
+            docker_inspect_targets=_parse_docker_targets(
+                source.get("FACTORY_DOCKER_INSPECT_TARGETS")
+            ),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -520,6 +556,7 @@ class FactoryConfig:
             ),
             "operational_scratch_root": self.operational_scratch_root,
             "database_readonly_target_ids": [name for name, _ in self.database_readonly_targets],
+            "docker_inspect_target_ids": [name for name, _ in self.docker_inspect_targets],
             "logging": {"level": self.logging.level, "format": self.logging.fmt.value},
         }
 
