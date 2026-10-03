@@ -42,33 +42,43 @@ class TrelloBacklogSource(BacklogSource):
         self,
         key: str,
         token: str,
-        sprint_list_id: str,
+        sprint_list_id: str | Sequence[str],
         ready_label_id: str,
         target_repository: str,
         transport: TrelloTransport | None = None,
         registry: ProjectRegistry | None = None,
     ) -> None:
-        if not all(
-            re.fullmatch(r"[A-Za-z0-9]+", value) for value in (sprint_list_id, ready_label_id)
+        list_ids = (sprint_list_id,) if isinstance(sprint_list_id, str) else tuple(sprint_list_id)
+        if (
+            not list_ids
+            or len(set(list_ids)) != len(list_ids)
+            or not all(
+                re.fullmatch(r"[A-Za-z0-9]+", value) for value in (*list_ids, ready_label_id)
+            )
         ):
             raise ValueError("invalid Trello list or label id")
         self._key = key
         self._token = token
-        self._list = sprint_list_id
+        self._lists = list_ids
         self._label = ready_label_id
         self._repository = target_repository
         self._registry = registry
         self._transport = transport or UrllibTrelloTransport()
 
     def list_items(self) -> Sequence[WorkItem]:
-        payload = self._get(f"lists/{self._list}/cards", {"fields": "id"})
-        if not isinstance(payload, list):
-            raise TrelloBacklogError("invalid Trello card list")
         items: list[WorkItem] = []
-        for card in payload:
-            if not isinstance(card, Mapping) or not _card_id(card.get("id")):
-                raise TrelloBacklogError("invalid Trello card identity")
-            items.append(self.get_item(str(card["id"])))
+        seen: set[str] = set()
+        for list_id in self._lists:
+            payload = self._get(f"lists/{list_id}/cards", {"fields": "id"})
+            if not isinstance(payload, list):
+                raise TrelloBacklogError("invalid Trello card list")
+            for card in payload:
+                if not isinstance(card, Mapping) or not _card_id(card.get("id")):
+                    raise TrelloBacklogError("invalid Trello card identity")
+                card_id = str(card["id"])
+                if card_id not in seen:
+                    seen.add(card_id)
+                    items.append(self.get_item(card_id))
         return items
 
     def get_item(self, external_id: str) -> WorkItem:
@@ -117,7 +127,7 @@ class TrelloBacklogSource(BacklogSource):
             target_repository=repository,
             project_id=project_id,
             eligible=(
-                card["idList"] == self._list and not card["closed"] and self._label in labels
+                card["idList"] in self._lists and not card["closed"] and self._label in labels
             ),
             dependencies_satisfied=_dependencies_satisfied(checklists),
         )

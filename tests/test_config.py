@@ -74,6 +74,20 @@ def test_real_values_are_loaded() -> None:
     assert config.logging.level == "DEBUG"
 
 
+def test_trello_list_allowlist_supports_multiple_lists_and_legacy_fallback() -> None:
+    legacy = FactoryConfig.from_env({"FACTORY_TRELLO_BACKLOG_LIST_ID": "listA"})
+    assert legacy.trello_backlog_list_ids == ("listA",)
+    configured = FactoryConfig.from_env(
+        {
+            "FACTORY_TRELLO_BACKLOG_LIST_ID": "ignored",
+            "FACTORY_TRELLO_BACKLOG_LIST_IDS": "listA, listB,listA",
+        }
+    )
+    assert configured.trello_backlog_list_ids == ("listA", "listB")
+    with pytest.raises(ValueError, match="invalid Trello backlog list ids"):
+        FactoryConfig.from_env({"FACTORY_TRELLO_BACKLOG_LIST_IDS": "listA,not-safe!"})
+
+
 def test_engine_selection_is_explicit_and_rejects_typos() -> None:
     assert (
         FactoryConfig.from_env({"FACTORY_AGENT_ENGINE": "openhands"}).agent_engine

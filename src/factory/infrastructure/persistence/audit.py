@@ -43,6 +43,9 @@ def _safe_id(value: str | None) -> str | None:
 class SqliteAuditEventStore(SqliteRepository):
     """Query the trace by task or structured Issue identity, never mutate it."""
 
+    def __init__(self, path: str, *, read_only: bool = False) -> None:
+        super().__init__(path, read_only=read_only)
+
     def for_task(self, task_id: str) -> tuple[AuditEvent, ...]:
         with self._connect() as conn:
             rows = conn.execute(

@@ -197,6 +197,37 @@ def test_trello_source_checks_sprint_ready_dependencies_and_hides_token() -> Non
         source.get_item(CARD)
 
 
+def test_trello_source_scans_allowlisted_lists_and_deduplicates_cards() -> None:
+    class MultiListTransport(TrelloFake):
+        def get_json(self, url: str, headers: dict[str, str]) -> Any:  # noqa: ANN401
+            self.requests.append((url, headers))
+            if "/checklists" in url:
+                return []
+            if "/lists/listA/cards" in url:
+                return [{"id": CARD}, {"id": "othercard"}]
+            if "/lists/listB/cards" in url:
+                return [{"id": CARD}]
+            card_id = url.split("/cards/", 1)[1].split("?", 1)[0]
+            return {
+                "id": card_id,
+                "idList": "listB" if card_id == CARD else "unauthorized",
+                "idLabels": ["ready123"],
+                "closed": False,
+                "name": "Feature",
+                "desc": "Description",
+            }
+
+    fake = MultiListTransport({}, [])
+    source = TrelloBacklogSource(
+        "key", "token", ("listA", "listB"), "ready123", "example/control", fake
+    )
+    items = source.list_items()
+    assert len(items) == 2
+    assert items[0].external_id == CARD and items[0].eligible
+    assert items[1].external_id == "othercard" and not items[1].eligible
+    assert sum("/cards/" + CARD + "?" in url for url, _ in fake.requests) == 1
+
+
 def test_trello_provider_failure_discards_secret_text() -> None:
     class FailingTransport:
         def get_json(self, url: str, headers: dict[str, str]) -> Any:  # noqa: ANN401
