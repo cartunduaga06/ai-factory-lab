@@ -46,8 +46,8 @@ from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 class SqliteTaskRepository(SqliteRepository, TaskRepository):
     """Durable task and transition storage backed by a SQLite file."""
 
-    def __init__(self, path: str, *, max_active_claims: int = 1) -> None:
-        super().__init__(path)
+    def __init__(self, path: str, *, max_active_claims: int = 1, read_only: bool = False) -> None:
+        super().__init__(path, read_only=read_only)
         if not 1 <= max_active_claims <= 2:
             raise ValueError("max_active_claims must be 1 or 2")
         self._max_active_claims = max_active_claims

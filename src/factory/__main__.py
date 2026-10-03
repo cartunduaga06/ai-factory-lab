@@ -47,6 +47,7 @@ from factory.infrastructure.persistence.feedback_sqlite import SqliteFeedbackEve
 from factory.infrastructure.persistence.metrics import SqliteSprintMetrics
 from factory.infrastructure.persistence.security import SqliteSecurityReviewGate
 from factory.infrastructure.persistence.sprint_sqlite import SqliteSprintRepository
+from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 from factory.infrastructure.persistence.status_events import SqliteStatusEventStore
 from factory.integrations.codex import CodexAdapter
 from factory.integrations.context.repository import RepositoryContextSource
@@ -536,12 +537,59 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
         return EXIT_CONFIG_ERROR
     try:
         path = config.database.path
-        tasks = SqliteTaskRepository(path)
-        runs = SqliteRunRepository(path)
-        prs = SqlitePullRequestRepository(path)
-        tasks.initialize()
-        runs.initialize()
-        prs.initialize()
+        if serve:
+            SqliteRepository.validate_read_only_schema(
+                path,
+                {
+                    "tasks": frozenset(
+                        {
+                            "task_id",
+                            "title",
+                            "status",
+                            "source_provider",
+                            "source_repository",
+                            "source_issue_number",
+                            "project_id",
+                        }
+                    ),
+                    "agent_runs": frozenset(
+                        {
+                            "run_id",
+                            "task_id",
+                            "status",
+                            "started_at",
+                            "last_heartbeat",
+                            "agent_heartbeat",
+                            "finished_at",
+                            "gates",
+                            "workspace_id",
+                        }
+                    ),
+                    "pull_requests": frozenset({"task_id", "run_id", "repository_slug", "number"}),
+                    "audit_events": frozenset(
+                        {
+                            "event_seq",
+                            "task_id",
+                            "name",
+                            "correlation_id",
+                            "run_id",
+                            "workspace_id",
+                            "pull_request_id",
+                            "causation_id",
+                            "aggregate_type",
+                            "aggregate_id",
+                            "aggregate_version",
+                            "occurred_at",
+                            "source_provider",
+                            "source_issue_number",
+                            "evidence",
+                        }
+                    ),
+                },
+            )
+        tasks = SqliteTaskRepository(path, read_only=True)
+        runs = SqliteRunRepository(path, read_only=True)
+        prs = SqlitePullRequestRepository(path, read_only=True)
         service = StatusService(
             tasks,
             runs,
@@ -550,13 +598,11 @@ def _show_status(config: FactoryConfig, *, serve: bool, host: str, port: int) ->
             missed_heartbeats=config.missed_heartbeats,
         )
         if serve:
-            publisher = _status_publisher(config)
             serve_status(
                 service,
                 host,
                 port,
-                publisher.flush if publisher else None,
-                SqliteAuditEventStore(path),
+                audit=SqliteAuditEventStore(path, read_only=True),
             )
         else:
             from dataclasses import asdict
