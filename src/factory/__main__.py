@@ -75,6 +75,7 @@ from factory.integrations.project_routing import (
     ProjectWorkspaceProvisioner,
 )
 from factory.integrations.security.review import GitSecurityInspector
+from factory.integrations.service_health import ServiceHealthChecker
 from factory.integrations.status_http import serve_status
 from factory.integrations.trello.backlog import TrelloBacklogSource
 from factory.integrations.trello.feedback import TrelloWorkItemFeedbackSink
@@ -1085,15 +1086,21 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         else None
     )
     database_targets = dict(config.database_readonly_targets)
+    service_targets = dict(config.service_health_targets)
     operational_policy = OperationalPolicy(
         enabled=frozenset(
             ({OperationalCapability.SCRATCH} if config.operational_scratch_root else set())
             | ({OperationalCapability.DATABASE_READONLY} if database_targets else set())
+            | ({OperationalCapability.SERVICE_HEALTH} if service_targets else set())
         ),
-        hosts=frozenset({"local"}) if database_targets else frozenset(),
-        paths=frozenset(database_targets.values()),
-        commands=frozenset({"inspect"}) if database_targets else frozenset(),
-        targets=frozenset(database_targets),
+        hosts=frozenset(
+            ({"local"} if database_targets else set()) | ({"https"} if service_targets else set())
+        ),
+        paths=frozenset((*database_targets.values(), *service_targets.values())),
+        commands=frozenset(
+            ({"inspect"} if database_targets else set()) | ({"get"} if service_targets else set())
+        ),
+        targets=frozenset((*database_targets.keys(), *service_targets.keys())),
     )
     return FactoryRuntime(
         intake=intake,
@@ -1152,6 +1159,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         database_inspector=(
             SqliteReadonlyInspector(database_targets) if database_targets else None
         ),
+        service_health_checker=(ServiceHealthChecker(service_targets) if service_targets else None),
         operational_root=config.operational_scratch_root,
         operational_acceptance=(
             ScratchAcceptance(operational_provisioner)

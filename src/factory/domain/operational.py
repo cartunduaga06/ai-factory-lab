@@ -60,6 +60,14 @@ class OperationalPolicy:
             and path in self.paths
             and command in self.commands
             and target in self.targets
+            and (
+                capability is OperationalCapability.DATABASE_READONLY
+                and host == "local"
+                and command in {"inspect", "read"}
+                or capability is OperationalCapability.SERVICE_HEALTH
+                and host == "https"
+                and command == "get"
+            )
         )
 
 
@@ -115,13 +123,39 @@ def parse_database_readonly(body: str) -> str:
     return value["target_id"]
 
 
+def parse_service_health(body: str) -> str:
+    """Accept only an operator-selected service id, never a URL or probe."""
+    blocks = _BLOCK.findall(body)
+    if len(blocks) != 1:
+        raise ValueError("exactly one factory-operational block is required")
+    try:
+        value = json.loads(blocks[0])
+    except json.JSONDecodeError:
+        raise ValueError("invalid operational declaration") from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"mode", "target_id"}
+        or value["mode"] != "service_health"
+        or not isinstance(value["target_id"], str)
+        or not _NAME.fullmatch(value["target_id"])
+        or value["target_id"] in {".", ".."}
+    ):
+        raise ValueError("unsupported operational declaration")
+    return value["target_id"]
+
+
 def canonical_operational_body(body: str) -> str:
     """Persist only the validated declaration from an operational Issue."""
     try:
         return canonical_scratch_body(body)
     except ValueError:
-        target_id = parse_database_readonly(body)
-        value = {"mode": "database_readonly", "target_id": target_id}
+        try:
+            target_id = parse_database_readonly(body)
+            mode = "database_readonly"
+        except ValueError:
+            target_id = parse_service_health(body)
+            mode = "service_health"
+        value = {"mode": mode, "target_id": target_id}
         return "```factory-operational\n" + json.dumps(value, sort_keys=True) + "\n```"
 
 

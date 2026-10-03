@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -31,6 +32,7 @@ from factory.domain.operational import (
     OperationalPolicy,
     parse_database_readonly,
     parse_scratch_artifact,
+    parse_service_health,
 )
 from factory.domain.ports import (
     BacklogLinkRepository,
@@ -43,6 +45,7 @@ from factory.domain.ports import (
     QualityGateRunner,
     RunRepository,
     SecurityReviewGate,
+    ServiceHealthChecker,
     TaskRepository,
     WorkspaceProvisioner,
     WorkspacePublisher,
@@ -107,6 +110,7 @@ class FactoryRuntime:
         operational_root: str | None = None,
         operational_acceptance: OperationalAcceptance | None = None,
         database_inspector: DatabaseReadonlyInspector | None = None,
+        service_health_checker: ServiceHealthChecker | None = None,
         code_capable: bool = True,
         poll_interval: float = 5.0,
         timeout: float = 1800.0,
@@ -189,6 +193,7 @@ class FactoryRuntime:
         self._pull_request_state = pull_request_state
         self._operational_policy = operational_policy or OperationalPolicy()
         self._database_inspector = database_inspector
+        self._service_health_checker = service_health_checker
         self._poll_interval = max(0.0, poll_interval)
         self._timeout = max(0.0, timeout)
         self._sleep = sleep
@@ -380,6 +385,12 @@ class FactoryRuntime:
                     target_id = None
                 if target_id is not None:
                     return self._run_database(task, target_id, intake)
+                try:
+                    service_target_id = parse_service_health(task.body)
+                except ValueError:
+                    service_target_id = None
+                if service_target_id is not None:
+                    return self._run_service_health(task, service_target_id, intake)
                 if not self._operational_policy.permits(OperationalCapability.SCRATCH):
                     blocked = self._block(task.task_id, "operational capability denied")
                     return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
@@ -593,6 +604,68 @@ class FactoryRuntime:
             else self._block(task.task_id, "database inspection rejected")
         )
         return self._result(current, run, None, outcome, intake)
+
+    def _run_service_health(
+        self, task: FactoryTask, target_id: str, intake: IntakeSummary
+    ) -> RuntimeResult:
+        """Run one allowlisted read-only service probe without agent dispatch."""
+        checker = self._service_health_checker
+        if checker is None or not self._operational_policy.permits(
+            OperationalCapability.SERVICE_HEALTH,
+            host="https",
+            path=checker.target_url(target_id),
+            command="get",
+            target=target_id,
+        ):
+            blocked = self._block(task.task_id, "operational capability denied")
+            return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
+        lifecycle = self._dispatch.lifecycle
+        lifecycle.transition(task.task_id, TaskStatus.CLAIMED)
+        lifecycle.transition(task.task_id, TaskStatus.RUNNING)
+        run = self._runs.save_run(
+            AgentRun(
+                task_id=task.task_id,
+                adapter=AgentKind.OTHER,
+                status=RunStatus.RUNNING,
+                started_at=datetime.now(UTC),
+                project_id=task.project_id,
+            )
+        )
+        evidence = checker.check(target_id)
+        try:
+            parsed_evidence = json.loads(evidence)
+            healthy = (
+                isinstance(parsed_evidence, dict)
+                and parsed_evidence.get("target_id") == target_id
+                and parsed_evidence.get("status") in {"HEALTHY", "WARNING", "CRITICAL", "UNKNOWN"}
+                and isinstance(parsed_evidence.get("observed_at"), str)
+                and isinstance(parsed_evidence.get("evidence"), str)
+            )
+        except (ValueError, TypeError):
+            healthy = False
+        run.status = RunStatus.SUCCEEDED if healthy else RunStatus.FAILED
+        run.summary = evidence if healthy else '{"status":"UNKNOWN","evidence":"invalid_result"}'
+        run.gates = (
+            QualityGate(
+                "service_health",
+                QualityGateStatus.PASSED if healthy else QualityGateStatus.FAILED,
+            ),
+        )
+        run.finished_at = datetime.now(UTC)
+        self._runs.update_run(run)
+        lifecycle.transition(task.task_id, TaskStatus.VALIDATING)
+        current = (
+            lifecycle.transition(task.task_id, TaskStatus.DONE)
+            if healthy
+            else self._block(task.task_id, "service health observation failed")
+        )
+        return self._result(
+            current,
+            run,
+            None,
+            "OPERATIONAL_DONE" if healthy else "OPERATIONAL_SERVICE_BLOCKED",
+            intake,
+        )
 
     def _reconcile_human_reviews(self) -> None:
         """Apply only provider-confirmed outcomes to durable human-review tasks."""
