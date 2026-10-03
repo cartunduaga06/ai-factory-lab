@@ -8,10 +8,20 @@ from typing import Any
 
 import pytest
 
+from factory.domain.enums import AgentKind, QualityGateStatus, RunStatus, TaskStatus
 from factory.domain.feedback import FeedbackIdentity
-from factory.domain.models import QualityGateSpec
+from factory.domain.models import (
+    AgentRun,
+    FactoryTask,
+    PullRequest,
+    QualityGate,
+    QualityGateSpec,
+    TaskSource,
+    Workspace,
+)
 from factory.domain.projects import ProjectProfile, ProjectRegistry
 from factory.integrations.github.issue_completion import GitHubIssueCompletionSink
+from factory.integrations.github.owner_reports import GitHubOwnerReportSink
 from factory.integrations.github.write_client import GitHubWriteClient
 from factory.integrations.trello.feedback import (
     TrelloFeedbackError,
@@ -46,7 +56,7 @@ class GitHubTransport:
             "state_reason": None,
             "labels": [{"name": "factory-ready"}, {"name": "other"}],
         }
-        self.comments: list[dict[str, str]] = []
+        self.comments: list[dict[str, Any]] = []
         self.writes = 0
 
     def request_json(
@@ -58,23 +68,112 @@ class GitHubTransport:
     ) -> Any:  # noqa: ANN401
         assert "/repos/example/project-a/issues/7" in url
         if method == "GET" and "/comments" in url:
-            return list(self.comments)
+            return [dict(comment, user={"login": "factory"}) for comment in self.comments]
         if method == "GET":
             result = dict(self.issue)
             if result.get("state") == "closed" and result.get("state_reason") is None:
                 result["state_reason"] = "not_planned"
             return result
         self.writes += 1
-        assert body is not None
         if method == "POST":
-            self.comments.append({"body": str(body["body"])})
+            assert body is not None
+            self.comments.append({"body": str(body["body"]), "id": len(self.comments) + 1})
             return self.comments[-1]
-        assert method == "PATCH"
+        if method == "PATCH" and "/comments/" in url:
+            assert body is not None
+            comment_id = int(url.rsplit("/", 1)[-1])
+            for comment in self.comments:
+                if comment["id"] == comment_id:
+                    comment["body"] = str(body["body"])
+                    return comment
+            raise AssertionError("missing comment")
+        assert method == "PATCH" and body is not None
         if "labels" in body:
             self.issue["labels"] = [{"name": label} for label in body["labels"]]
         else:
             self.issue.update(body)
         return dict(self.issue)
+
+
+def test_owner_report_is_idempotent_sanitized_and_never_false_passes() -> None:
+    transport = GitHubTransport()
+    sink = GitHubOwnerReportSink(GitHubWriteClient("secret", "https://api.github.com", transport))
+    task = FactoryTask(
+        title="Owner report ghp_secret",
+        target_repository="example/project-a",
+        source=TaskSource("github", "example/project-a", 7),
+        task_id="task-safe",
+    )
+    from factory.infrastructure.persistence.audit import AuditEvent
+
+    event = AuditEvent(
+        1,
+        "IssueMaterialized",
+        "task-safe",
+        "task-safe",
+        None,
+        None,
+        None,
+        "safe",
+        "task",
+        "task-safe",
+        1,
+        "2026-01-01T00:00:00Z",
+        "github",
+        7,
+        evidence={"private": "token=secret"},
+    )
+    sink.publish(task, (), (), (event,), initial=True)
+    assert len(transport.comments) == 1
+    assert "Final status: **BLOCKED**" in transport.comments[0]["body"]
+    assert "ghp_secret" not in transport.comments[0]["body"]
+    assert "token=secret" not in transport.comments[0]["body"]
+    sink.publish(task, (), (), (event,), initial=True)
+    assert len(transport.comments) == 1
+    run = AgentRun(
+        task_id=task.task_id,
+        adapter=AgentKind.CODEX,
+        run_id="run-safe",
+        status=RunStatus.SUCCEEDED,
+        workspace=Workspace(repository_slug=task.target_repository, branch="factory/task-safe/run"),
+        summary="service password=secret",
+        gates=(QualityGate("tests", QualityGateStatus.PASSED, "stdout: secret"),),
+    )
+    sink.publish(task, (run,), (), (event,), initial=False)
+    report = transport.comments[0]["body"]
+    assert "Final status: **BLOCKED**" in report
+    assert "stdout" not in report and "password" not in report and "secret" not in report
+    task.status = TaskStatus.DONE
+    merged_pr = PullRequest(
+        repository_slug="example/project-a",
+        head_branch="factory/task-safe/run",
+        base_branch="main",
+        title="Change",
+        number=17,
+        url="https://github.com/example/project-a/pull/17",
+        task_id=task.task_id,
+        run_id=run.run_id,
+        merged=True,
+        commit_sha="a" * 40,
+    )
+    delivery_event = AuditEvent(
+        2,
+        "DeliveryReconciled",
+        "task-safe",
+        "task-safe",
+        "run-safe",
+        None,
+        None,
+        "safe",
+        "task",
+        "task-safe",
+        2,
+        "2026-01-01T00:01:00Z",
+        "github",
+        7,
+    )
+    sink.publish(task, (run,), (merged_pr,), (event, delivery_event), initial=False)
+    assert "Final status: **PASS**" in transport.comments[0]["body"]
 
 
 def test_issue_completion_retries_without_duplicate_writes() -> None:
