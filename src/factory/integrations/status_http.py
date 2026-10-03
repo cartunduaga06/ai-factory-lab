@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from factory.domain.models import StatusSnapshot
 from factory.infrastructure.persistence.audit import SqliteAuditEventStore
+from factory.integrations.host_health import HostHealthCollector
 from factory.orchestration.status import StatusService
 
 
@@ -22,16 +23,37 @@ def serve_status(
     port: int = 8765,
     pulse: Callable[[], None] | None = None,
     audit: SqliteAuditEventStore | None = None,
+    host_health: HostHealthCollector | None = None,
 ) -> None:
     """Serve read-only status and trace views on the trusted operator endpoint."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
             parsed = urlsplit(self.path)
-            if parsed.path not in {"/factory/status", "/factory/trace"}:
+            if parsed.path not in {"/factory/status", "/factory/trace", "/factory/health"}:
                 self.send_error(404)
                 return
             task_id = parse_qs(parsed.query).get("task_id", [None])[0]
+            if parsed.path == "/factory/health":
+                body = json.dumps(
+                    host_health.collect()
+                    if host_health is not None
+                    else {
+                        "timestamp": None,
+                        "status": "UNKNOWN",
+                        "metrics": {},
+                        "services": [],
+                        "workers": [],
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if parsed.path == "/factory/trace":
                 if audit is None or not task_id:
                     self.send_error(404)
@@ -98,6 +120,8 @@ def render_status(snapshot: StatusSnapshot) -> str:
     escape = html.escape
     rows = (
         ("Task", snapshot.task_id),
+        ("Project", snapshot.project_id),
+        ("Repository", snapshot.repository),
         ("Agent", snapshot.agent),
         ("Run", snapshot.run_id),
         ("Workspace", snapshot.workspace_id),
@@ -109,7 +133,9 @@ def render_status(snapshot: StatusSnapshot) -> str:
         ("Last transition", snapshot.last_transition),
         ("Finished", snapshot.finished_at),
         ("Evidence", snapshot.evidence),
+        ("Blocked reason", snapshot.blocked_reason),
         ("Action", snapshot.action),
+        ("Commit", snapshot.commit_sha),
     )
     details = "".join(
         f"<dt>{escape(label)}</dt><dd>{escape(value)}</dd>"
