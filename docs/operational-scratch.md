@@ -78,18 +78,29 @@ read-only pilot is required for a real operator target.
 its host, path, command, and target allowlists start empty. The runtime checks
 that scratch is enabled before dispatch. A declaration cannot modify this
 operator-owned policy. Intake accepts only the fixed scratch or database
-declarations. The Codex adapter accepts only scratch; the Factory-owned database
-inspector is the only additional executable route. Backup is always denied
+declarations plus the fixed Docker inspection declaration. The Codex adapter
+accepts only scratch; the Factory-owned database and Docker inspectors are the
+only additional executable routes. Backup is always denied
 until its route and allowlist design and human gate are implemented and tested.
 
-Future read-only executors must use exact allowlisted hosts, paths, argv commands,
-and targets, a non-root account, bounded time and output, and sanitized evidence.
-`docker_inspect` must expose no start, stop, or recreate; `service_health` must
-read only allowlisted targets. Cutover, webhook, Meta, and destructive actions
-have no capability. Until those executors and their offline E2E tests exist,
+`docker_inspect` uses `FACTORY_DOCKER_INSPECT_TARGETS`, an operator-owned JSON
+map from task `target_id` to an exact container name or full container id. It
+uses only the Docker Engine `GET /containers/{id}/json` endpoint through the
+Factory-owned read-only proxy socket at `/run/ai-factory/docker-readonly.sock`.
+The proxy is an external prerequisite and must itself allow only the inspection
+GET route; the Factory never connects directly to the Docker daemon socket. The
+executor exposes state/health, image identity, restart count, validated port
+numbers, bounded network names, and health-output digests. It never returns
+environment values, labels, mounts, raw health output, container IDs, arbitrary
+logs, or addresses. Its response is capped at 256 KiB, normalized evidence at
+4 KiB, and each request at two seconds. The transport has no mutation method or
+Docker CLI passthrough. If the read-only proxy is absent or rejects the request,
+inspection fails closed. Unknown target ids fail closed.
+`service_health` must read only allowlisted targets. Cutover, webhook, Meta, and
+destructive actions have no capability. Until those executors and their offline E2E tests exist,
 requests for the remaining modes fail closed at intake or dispatch.
 
 Rollback is to stop the worker, restore the previous release, and leave any
 blocked task for an explicit retry after correcting policy. The scratch artifact
 is disposable under its per-run directory. The database inspector makes no
-database writes; service and Docker state is unchanged.
+database writes; Docker inspection issues GET only, and service and Docker state is unchanged.

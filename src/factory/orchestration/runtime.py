@@ -31,12 +31,14 @@ from factory.domain.operational import (
     OperationalCapability,
     OperationalPolicy,
     parse_database_readonly,
+    parse_docker_inspect,
     parse_scratch_artifact,
     parse_service_health,
 )
 from factory.domain.ports import (
     BacklogLinkRepository,
     DatabaseReadonlyInspector,
+    DockerInspector,
     OperationalAcceptance,
     PullRequestRepository,
     PullRequestSink,
@@ -111,6 +113,7 @@ class FactoryRuntime:
         operational_acceptance: OperationalAcceptance | None = None,
         database_inspector: DatabaseReadonlyInspector | None = None,
         service_health_checker: ServiceHealthChecker | None = None,
+        docker_inspector: DockerInspector | None = None,
         code_capable: bool = True,
         poll_interval: float = 5.0,
         timeout: float = 1800.0,
@@ -194,6 +197,7 @@ class FactoryRuntime:
         self._operational_policy = operational_policy or OperationalPolicy()
         self._database_inspector = database_inspector
         self._service_health_checker = service_health_checker
+        self._docker_inspector = docker_inspector
         self._poll_interval = max(0.0, poll_interval)
         self._timeout = max(0.0, timeout)
         self._sleep = sleep
@@ -391,6 +395,12 @@ class FactoryRuntime:
                     service_target_id = None
                 if service_target_id is not None:
                     return self._run_service_health(task, service_target_id, intake)
+                try:
+                    docker_target_id = parse_docker_inspect(task.body)
+                except ValueError:
+                    docker_target_id = None
+                if docker_target_id is not None:
+                    return self._run_docker(task, docker_target_id, intake)
                 if not self._operational_policy.permits(OperationalCapability.SCRATCH):
                     blocked = self._block(task.task_id, "operational capability denied")
                     return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
@@ -633,13 +643,13 @@ class FactoryRuntime:
         )
         evidence = checker.check(target_id)
         try:
-            parsed_evidence = json.loads(evidence)
+            parsed = json.loads(evidence)
             healthy = (
-                isinstance(parsed_evidence, dict)
-                and parsed_evidence.get("target_id") == target_id
-                and parsed_evidence.get("status") in {"HEALTHY", "WARNING", "CRITICAL", "UNKNOWN"}
-                and isinstance(parsed_evidence.get("observed_at"), str)
-                and isinstance(parsed_evidence.get("evidence"), str)
+                isinstance(parsed, dict)
+                and parsed.get("target_id") == target_id
+                and parsed.get("status") in {"HEALTHY", "WARNING", "CRITICAL", "UNKNOWN"}
+                and isinstance(parsed.get("observed_at"), str)
+                and isinstance(parsed.get("evidence"), str)
             )
         except (ValueError, TypeError):
             healthy = False
@@ -651,20 +661,82 @@ class FactoryRuntime:
                 QualityGateStatus.PASSED if healthy else QualityGateStatus.FAILED,
             ),
         )
+        return self._finish_operational_observation(
+            task,
+            run,
+            intake,
+            healthy,
+            "OPERATIONAL_SERVICE_BLOCKED",
+            "service health observation failed",
+        )
+
+    def _run_docker(
+        self, task: FactoryTask, target_id: str, intake: IntakeSummary
+    ) -> RuntimeResult:
+        """Run an approved fixed Docker observation directly, without agent dispatch."""
+        inspector = self._docker_inspector
+        if (
+            inspector is None
+            or not self._operational_policy.permits(
+                OperationalCapability.DOCKER_INSPECT,
+                host="local",
+                path="docker-engine-api",
+                command="inspect",
+                target=target_id,
+            )
+            or not inspector.registered_container(target_id)
+        ):
+            blocked = self._block(task.task_id, "operational capability denied")
+            return self._result(blocked, None, None, "OPERATIONAL_POLICY_BLOCKED", intake)
+        lifecycle = self._dispatch.lifecycle
+        lifecycle.transition(task.task_id, TaskStatus.CLAIMED)
+        lifecycle.transition(task.task_id, TaskStatus.RUNNING)
+        run = self._runs.save_run(
+            AgentRun(
+                task_id=task.task_id,
+                adapter=AgentKind.OTHER,
+                status=RunStatus.RUNNING,
+                started_at=datetime.now(UTC),
+                project_id=task.project_id,
+            )
+        )
+        try:
+            evidence = inspector.inspect(target_id)
+        except ValueError:
+            run.status = RunStatus.FAILED
+            run.summary = "Docker inspection rejected"
+            run.gates = (QualityGate("docker_inspect", QualityGateStatus.FAILED),)
+            succeeded = False
+        else:
+            run.status = RunStatus.SUCCEEDED
+            run.summary = evidence
+            run.gates = (QualityGate("docker_inspect", QualityGateStatus.PASSED),)
+            succeeded = True
+        return self._finish_operational_observation(
+            task, run, intake, succeeded, "OPERATIONAL_DOCKER_BLOCKED", "Docker inspection rejected"
+        )
+
+    def _finish_operational_observation(
+        self,
+        task: FactoryTask,
+        run: AgentRun,
+        intake: IntakeSummary,
+        succeeded: bool,
+        failure_outcome: str,
+        failure_reason: str,
+    ) -> RuntimeResult:
+        """Persist a direct operational observation and close its lifecycle."""
         run.finished_at = datetime.now(UTC)
         self._runs.update_run(run)
+        lifecycle = self._dispatch.lifecycle
         lifecycle.transition(task.task_id, TaskStatus.VALIDATING)
         current = (
             lifecycle.transition(task.task_id, TaskStatus.DONE)
-            if healthy
-            else self._block(task.task_id, "service health observation failed")
+            if succeeded
+            else self._block(task.task_id, failure_reason)
         )
         return self._result(
-            current,
-            run,
-            None,
-            "OPERATIONAL_DONE" if healthy else "OPERATIONAL_SERVICE_BLOCKED",
-            intake,
+            current, run, None, "OPERATIONAL_DONE" if succeeded else failure_outcome, intake
         )
 
     def _reconcile_human_reviews(self) -> None:
@@ -684,13 +756,6 @@ class FactoryRuntime:
                     self._registry.resolve(task.project_id, task.target_repository)
                 except ProjectRoutingError:
                     continue
-            if (
-                self._sprint is not None
-                and task.status is not TaskStatus.DONE
-                and not self._sprint.allows_review(task)
-                and (self._feedback is None or not self._feedback.is_github_direct(task))
-            ):
-                continue
             if task.kind is not TaskKind.CODE:
                 continue
             run = self._latest_run(task.task_id)
@@ -737,6 +802,7 @@ class FactoryRuntime:
             elif self._feedback is not None and task.status in {
                 TaskStatus.WAITING_HUMAN,
                 TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
             }:
                 self._feedback.sync(task, run, task.status.value)
             if self._feedback is not None:

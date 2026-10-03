@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import select
 import signal
-import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -50,6 +52,7 @@ from factory.integrations.codex import CodexAdapter
 from factory.integrations.context.repository import RepositoryContextSource
 from factory.integrations.context.skill_source import ApprovedSkillSource
 from factory.integrations.database_readonly import SqliteReadonlyInspector
+from factory.integrations.docker_readonly import DockerReadonlyInspector
 from factory.integrations.gates import LocalQualityGateRunner
 from factory.integrations.github import (
     GitHubClient,
@@ -959,14 +962,17 @@ def _run_pool(config: FactoryConfig) -> int:
     except Exception as exc:  # noqa: BLE001 - no provider details in output
         print(f"pool failed: {type(exc).__name__}")
         return EXIT_INTAKE_ERROR
-    stop = threading.Event()
-    previous_handlers = _install_stop_handlers(stop)
+    stop = _CooperativeStop()
+    previous_handlers, previous_wakeup_fd = _install_stop_handlers(
+        stop.request, wakeup_fd=stop.wakeup_fd
+    )
     try:
         WorkerPool(
             lambda: _build_runtime(config, pool_mode=True),
             max_concurrency=config.max_concurrency,
             idle_interval=config.watch_idle_interval,
             should_stop=stop.is_set,
+            sleep=stop.sleep,
             on_session=_print_worker_session,
         ).run()
     except Exception as exc:  # noqa: BLE001 - no provider details in output
@@ -975,6 +981,8 @@ def _run_pool(config: FactoryConfig) -> int:
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        signal.set_wakeup_fd(previous_wakeup_fd)
+        stop.close()
     return EXIT_OK
 
 
@@ -986,22 +994,92 @@ def _print_worker_session(session: WorkerSession) -> None:
         print(f"Worker {session.task_id} failed: {session.error_type}")
 
 
-def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
+class _CooperativeStop:
+    """Signal-safe stop flag with a pipe-backed idle wakeup."""
+
+    def __init__(self) -> None:
+        self._requested = False
+        self._read_fd, self._write_fd = os.pipe()
+        os.set_blocking(self._read_fd, False)
+        os.set_blocking(self._write_fd, False)
+
+    def request(self) -> None:
+        self._requested = True
+        if self._write_fd < 0:
+            return
+        try:
+            os.write(self._write_fd, b"\0")
+        except (BlockingIOError, OSError):
+            return
+
+    def is_set(self) -> bool:
+        return self._requested
+
+    @property
+    def wakeup_fd(self) -> int:
+        return self._write_fd
+
+    def sleep(self, seconds: float) -> None:
+        if self._requested:
+            return
+        timeout = max(0.0, seconds)
+        try:
+            readable, _, _ = select.select([self._read_fd], [], [], timeout)
+        except OSError:
+            return
+        if readable:
+            self._drain()
+
+    def close(self) -> None:
+        for fd in (self._read_fd, self._write_fd):
+            if fd >= 0:
+                with suppress(OSError):
+                    os.close(fd)
+        self._read_fd = -1
+        self._write_fd = -1
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                if not os.read(self._read_fd, 1024):
+                    return
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+
+
+def _install_stop_handlers(
+    request_stop: Callable[[], None], *, wakeup_fd: int | None = None
+) -> tuple[dict[int, Any], int]:
     """Install SIGINT/SIGTERM handlers that request a cooperative stop.
 
     Returns the previous handlers so the caller can restore them. A signal only
-    sets the event; the watch loop observes it between iterations, so a stop
-    request never interrupts an in-flight task or corrupts persisted state.
+    flips a lock-free flag and wakes idle sleep; the watch loop observes it
+    between iterations, so a stop request never interrupts an in-flight task or
+    corrupts persisted state.
     """
     installed: dict[int, Any] = {}
+    previous_wakeup_fd = -1
+    if wakeup_fd is not None:
+        previous_wakeup_fd = signal.set_wakeup_fd(wakeup_fd)
 
     def _request_stop(signum: int, frame: FrameType | None) -> None:
         del signum, frame
-        stop.set()
+        request_stop()
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         installed[signum] = signal.signal(signum, _request_stop)
-    return installed
+    return installed, previous_wakeup_fd
+
+
+def _stop_aware_sleep(stop: _CooperativeStop) -> Callable[[float], None]:
+    """Return an idle sleeper that wakes as soon as shutdown is requested."""
+
+    def _sleep(seconds: float) -> None:
+        stop.sleep(seconds)
+
+    return _sleep
 
 
 def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> FactoryRuntime:
@@ -1012,6 +1090,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         and config.project_registry is None
         and config.operational_scratch_root is None
         and not config.database_readonly_targets
+        and not config.docker_inspect_targets
     ):
         raise ConfigurationError("FACTORY_TARGET_REPO is required for run")
     if (
@@ -1019,12 +1098,14 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
         and config.project_registry is None
         and config.operational_scratch_root is None
         and not config.database_readonly_targets
+        and not config.docker_inspect_targets
     ):
         raise ConfigurationError("FACTORY_SOURCE_CHECKOUT is required for run")
     if (
         config.github_write_token is None
         and config.operational_scratch_root is None
         and not config.database_readonly_targets
+        and not config.docker_inspect_targets
     ):
         raise ConfigurationError("GITHUB_WRITE_TOKEN is required before publication")
 
@@ -1087,20 +1168,29 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
     )
     database_targets = dict(config.database_readonly_targets)
     service_targets = dict(config.service_health_targets)
+    docker_targets = dict(config.docker_inspect_targets)
     operational_policy = OperationalPolicy(
         enabled=frozenset(
             ({OperationalCapability.SCRATCH} if config.operational_scratch_root else set())
             | ({OperationalCapability.DATABASE_READONLY} if database_targets else set())
             | ({OperationalCapability.SERVICE_HEALTH} if service_targets else set())
+            | ({OperationalCapability.DOCKER_INSPECT} if docker_targets else set())
         ),
         hosts=frozenset(
-            ({"local"} if database_targets else set()) | ({"https"} if service_targets else set())
+            ({"local"} if database_targets or docker_targets else set())
+            | ({"https"} if service_targets else set())
         ),
-        paths=frozenset((*database_targets.values(), *service_targets.values())),
+        paths=frozenset((*database_targets.values(), *service_targets.values()))
+        | (frozenset({"docker-engine-api"}) if docker_targets else frozenset()),
         commands=frozenset(
-            ({"inspect"} if database_targets else set()) | ({"get"} if service_targets else set())
+            ({"inspect"} if database_targets or docker_targets else set())
+            | ({"read"} if database_targets else set())
+            | ({"get"} if service_targets else set())
         ),
         targets=frozenset((*database_targets.keys(), *service_targets.keys())),
+        docker_targets=frozenset(docker_targets),
+        # Service target identifiers share the general target set; their URLs
+        # are represented in paths and remain constrained to HTTPS GET.
     )
     return FactoryRuntime(
         intake=intake,
@@ -1160,6 +1250,7 @@ def _build_runtime(config: FactoryConfig, *, pool_mode: bool = False) -> Factory
             SqliteReadonlyInspector(database_targets) if database_targets else None
         ),
         service_health_checker=(ServiceHealthChecker(service_targets) if service_targets else None),
+        docker_inspector=(DockerReadonlyInspector(docker_targets) if docker_targets else None),
         operational_root=config.operational_scratch_root,
         operational_acceptance=(
             ScratchAcceptance(operational_provisioner)
