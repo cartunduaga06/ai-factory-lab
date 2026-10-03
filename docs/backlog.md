@@ -1,13 +1,15 @@
 # Trello backlog bridge
 
-Set `FACTORY_TRELLO_BACKLOG_LIST_ID` to the Sprint list ID and
+Set `FACTORY_TRELLO_BACKLOG_LIST_ID` to one Sprint list ID, or set
+`FACTORY_TRELLO_BACKLOG_LIST_IDS` to a comma-separated allowlist of Sprint list IDs. The plural
+setting replaces the singular setting when present. Set
 `FACTORY_TRELLO_READY_LABEL_ID` to the READY label ID. Both are required to
 enable the bridge. The existing `FACTORY_TRELLO_KEY` and
 `FACTORY_TRELLO_TOKEN` authenticate reads; `GITHUB_WRITE_TOKEN` must be able to
 create Issues in `FACTORY_GITHUB_REPO`. Leave the two backlog IDs unset to keep
 the existing GitHub-only intake behavior.
 
-An open card is eligible when it is in the configured Sprint list, carries the
+An open card is eligible when it is in one of the configured Sprint lists, carries the
 configured READY label, and every item in every checklist named `Dependencies`
 is checked. A card with no `Dependencies` checklist has no declared blockers.
 Malformed card or checklist data, and failed reads, stop reconciliation before

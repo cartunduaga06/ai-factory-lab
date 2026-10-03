@@ -345,15 +345,15 @@ def _run_intake(config: FactoryConfig) -> int:
 
 def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | None:
     """Build optional backlog reconciliation without changing GitHub intake."""
-    list_id = config.trello_backlog_list_id
+    list_ids = config.trello_backlog_list_ids
     label_id = config.trello_ready_label_id
-    if list_id is None and label_id is None:
+    if not list_ids and label_id is None:
         return None
-    if not all((list_id, label_id, config.trello_key, config.trello_token)):
+    if not all((list_ids, label_id, config.trello_key, config.trello_token)):
         raise ConfigurationError("Trello backlog list, READY label, key and token are required")
     if config.github.control_plane_repo is None or config.github_write_token is None:
         raise ConfigurationError("GitHub repository and write token are required for backlog")
-    assert list_id is not None and label_id is not None
+    assert label_id is not None
     assert config.trello_key is not None and config.trello_token is not None
     links = SqliteBacklogLinkRepository(config.database.path)
     links.initialize()
@@ -361,7 +361,7 @@ def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | Non
         TrelloBacklogSource(
             config.trello_key,
             config.trello_token,
-            list_id,
+            list_ids,
             label_id,
             config.github.control_plane_repo,
             registry=config.project_registry,
@@ -374,11 +374,11 @@ def _build_backlog(config: FactoryConfig) -> BacklogMaterializationService | Non
 
 def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintService | None:
     """Use E2's exact ports with an immutable, authorized source guard."""
-    if config.trello_backlog_list_id is None and config.trello_ready_label_id is None:
+    if not config.trello_backlog_list_ids and config.trello_ready_label_id is None:
         return None
     if not all(
         (
-            config.trello_backlog_list_id,
+            config.trello_backlog_list_ids,
             config.trello_ready_label_id,
             config.trello_key,
             config.trello_token,
@@ -388,11 +388,11 @@ def _build_sprint(config: FactoryConfig, tasks: SqliteTaskRepository) -> SprintS
     if config.github.control_plane_repo is None or config.github_write_token is None:
         raise ConfigurationError("GitHub repository and write token are required for backlog")
     assert config.trello_key is not None and config.trello_token is not None
-    assert config.trello_backlog_list_id is not None and config.trello_ready_label_id is not None
+    assert config.trello_backlog_list_ids and config.trello_ready_label_id is not None
     source = TrelloBacklogSource(
         config.trello_key,
         config.trello_token,
-        config.trello_backlog_list_id,
+        config.trello_backlog_list_ids,
         config.trello_ready_label_id,
         config.github.control_plane_repo,
         registry=config.project_registry,
