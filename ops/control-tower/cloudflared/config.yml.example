@@ -1,0 +1,9 @@
+# Copy to /etc/cloudflared/control-tower.yml and replace hostname/UUID.
+# Credentials are installed separately with owner-only permissions.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /etc/cloudflared/control-tower-credentials.json
+protocol: http2
+ingress:
+  - hostname: tower.example.com
+    service: http://127.0.0.1:8765
+  - service: http_status:404

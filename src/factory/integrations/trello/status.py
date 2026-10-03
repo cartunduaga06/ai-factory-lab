@@ -33,6 +33,8 @@ class TrelloStatusChannel:
         lines = [f"Factory: {snapshot.phase}"]
         for label, value in (
             ("Task", snapshot.task_id),
+            ("Project", snapshot.project_id),
+            ("Repository", snapshot.repository),
             ("Agent", snapshot.agent),
             ("Run", snapshot.run_id),
             ("Workspace", snapshot.workspace_id),
@@ -43,9 +45,11 @@ class TrelloStatusChannel:
             ("Last transition", snapshot.last_transition),
             ("Finished", snapshot.finished_at),
             ("Evidence", snapshot.evidence),
+            ("Blocked reason", snapshot.blocked_reason),
             ("Action", snapshot.action),
             ("Issue", snapshot.issue_url),
             ("Pull request", snapshot.pr_url),
+            ("Commit", snapshot.commit_sha),
         ):
             if value is not None:
                 lines.append(f"{label}: {value}")

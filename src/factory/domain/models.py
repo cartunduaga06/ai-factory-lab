@@ -370,6 +370,8 @@ class StatusSnapshot:
 
     phase: str
     task_id: str | None = None
+    project_id: str | None = None
+    repository: str | None = None
     issue_url: str | None = None
     run_id: str | None = None
     agent: str | None = None
@@ -382,6 +384,8 @@ class StatusSnapshot:
     last_transition: str | None = None
     finished_at: str | None = None
     pr_url: str | None = None
+    commit_sha: str | None = None
+    blocked_reason: str | None = None
     action: str | None = None
     evidence: str | None = None
     gates: tuple[str, ...] = ()
