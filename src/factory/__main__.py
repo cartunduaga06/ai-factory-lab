@@ -1340,6 +1340,13 @@ def _resolve_repository(config: FactoryConfig) -> Repository:
     """Validate the runtime configuration intake needs and build the repo handle."""
     if config.github.token is None:
         raise ConfigurationError("GITHUB_TOKEN is required for intake")
+    # A project registry is the explicit allowlist for multi-repository intake;
+    # in that mode the caller's placeholder repository is not an authorization.
+    if config.project_registry is not None:
+        slug = config.github.control_plane_repo
+        if slug is None:
+            slug = config.project_registry.profiles[0].repository_slug
+        return Repository(slug=slug, role=RepositoryRole.CONTROL_PLANE)
     slug = config.github.control_plane_repo
     if not slug:
         raise ConfigurationError("FACTORY_GITHUB_REPO is required for intake")
