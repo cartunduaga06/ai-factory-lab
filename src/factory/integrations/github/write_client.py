@@ -154,6 +154,10 @@ class GitHubWriteClient:
         """PATCH one existing Issue after exact identity verification by its adapter."""
         return self._call("PATCH", self._url(path), payload)
 
+    def delete(self, path: str) -> Any:  # noqa: ANN401
+        """DELETE one exact provider resource after adapter identity verification."""
+        return self._call("DELETE", self._url(path), None)
+
     def _call(self, method: str, url: str, payload: Mapping[str, Any] | None) -> Any:  # noqa: ANN401
         failed = False
         try:

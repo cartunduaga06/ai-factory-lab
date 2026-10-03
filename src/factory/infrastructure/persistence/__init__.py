@@ -6,6 +6,7 @@ local development; the orchestration layer never imports them.
 """
 
 from factory.infrastructure.persistence.backlog_sqlite import SqliteBacklogLinkRepository
+from factory.infrastructure.persistence.memory_sqlite import SqliteMemoryRepository
 from factory.infrastructure.persistence.pr_sqlite import SqlitePullRequestRepository
 from factory.infrastructure.persistence.run_sqlite import SqliteRunRepository
 from factory.infrastructure.persistence.sqlite import SqliteTaskRepository
@@ -15,4 +16,5 @@ __all__ = [
     "SqlitePullRequestRepository",
     "SqliteRunRepository",
     "SqliteTaskRepository",
+    "SqliteMemoryRepository",
 ]

@@ -220,6 +220,18 @@ def _clean(value: str | None) -> str | None:
     return stripped
 
 
+def _trello_list_ids(source: Mapping[str, str]) -> tuple[str, ...]:
+    """Parse a strict, deduplicated comma-separated Trello list allowlist."""
+    configured = _clean(source.get("FACTORY_TRELLO_BACKLOG_LIST_IDS"))
+    legacy = _clean(source.get("FACTORY_TRELLO_BACKLOG_LIST_ID"))
+    raw_ids = configured.split(",") if configured is not None else ([legacy] if legacy else [])
+    if any(
+        not item.strip() or re.fullmatch(r"[A-Za-z0-9]+", item.strip()) is None for item in raw_ids
+    ):
+        raise ValueError("invalid Trello backlog list ids")
+    return tuple(dict.fromkeys(item.strip() for item in raw_ids))
+
+
 def _duration(value: str | None, default: float) -> float:
     cleaned = _clean(value)
     if cleaned is None:
@@ -391,6 +403,7 @@ class FactoryConfig:
     trello_key: str | None = field(default=None, repr=False)
     trello_token: str | None = field(default=None, repr=False)
     trello_backlog_list_id: str | None = None
+    trello_backlog_list_ids: tuple[str, ...] = ()
     trello_ready_label_id: str | None = None
     trello_done_list_id: str | None = None
     # Command the OpenHands conversation runs as a shared-workspace hook. When
@@ -519,6 +532,7 @@ class FactoryConfig:
             trello_key=_clean(source.get("FACTORY_TRELLO_KEY")),
             trello_token=_clean(source.get("FACTORY_TRELLO_TOKEN")),
             trello_backlog_list_id=_clean(source.get("FACTORY_TRELLO_BACKLOG_LIST_ID")),
+            trello_backlog_list_ids=_trello_list_ids(source),
             trello_ready_label_id=_clean(source.get("FACTORY_TRELLO_READY_LABEL_ID")),
             trello_done_list_id=_clean(source.get("FACTORY_TRELLO_DONE_LIST_ID")),
             openhands_shared_workspace_hook_command=_clean(
@@ -604,6 +618,7 @@ class FactoryConfig:
             "trello_key": "***" if self.trello_key else None,
             "trello_token": "***" if self.trello_token else None,
             "trello_backlog_list_id": self.trello_backlog_list_id,
+            "trello_backlog_list_ids": list(self.trello_backlog_list_ids),
             "trello_ready_label_id": self.trello_ready_label_id,
             "trello_done_list_id": self.trello_done_list_id,
             "openhands_shared_workspace_hook_command": (
