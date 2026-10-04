@@ -64,9 +64,16 @@ class SqliteSprintRepository(SqliteRepository, SprintRepository):
 
     def find_for_work_item(self, project_id: str, provider: str, external_id: str) -> str | None:
         with self._connect() as conn:
-            rows = conn.execute(f"SELECT sprint_id, manifest FROM {SPRINTS_TABLE}").fetchall()
+            rows = conn.execute(
+                f"SELECT sprint_id, state, manifest FROM {SPRINTS_TABLE}"
+            ).fetchall()
         found: str | None = None
         for row in rows:
+            # A cancelled sprint may be superseded by a re-authorized sprint
+            # for the same external work item. It remains in the immutable
+            # audit history, but must not create an active identity collision.
+            if str(row["state"]) == SprintState.CANCELLED.value:
+                continue
             manifest = json.loads(str(row["manifest"]))
             if any(
                 step["item"].get("project_id", "ai-factory-lab") == project_id

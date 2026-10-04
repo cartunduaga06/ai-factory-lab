@@ -563,3 +563,49 @@ def test_find_for_work_item_accepts_pre_e7_manifest_without_project_id(tmp_path:
         SqliteSprintRepository(path).find_for_work_item("other-project", "trello", "legacy-card")
         is None
     )
+
+
+def test_find_for_work_item_ignores_cancelled_superseded_sprint(tmp_path: Path) -> None:
+    import json
+    import sqlite3
+
+    path = str(tmp_path / "factory.db")
+    sprints = SqliteSprintRepository(path)
+    sprints.initialize()
+
+    def manifest(sprint_id: str) -> str:
+        return json.dumps(
+            {
+                "sprint_id": sprint_id,
+                "steps": [
+                    {
+                        "item": {
+                            "provider": "trello",
+                            "external_id": "same-card",
+                            "title": "Same card",
+                            "description": "re-authorized",
+                            "target_repository": "cartunduaga06/ai-factory-lab",
+                            "eligible": True,
+                            "dependencies_satisfied": True,
+                        },
+                        "dependencies": [],
+                    }
+                ],
+                "wip_limit": 1,
+                "stop_conditions": ["WAITING_HUMAN"],
+                "pipeline": ["materialize_issue"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO sprints (sprint_id, manifest, state, position) VALUES (?, ?, ?, 0)",
+            [
+                ("superseded", manifest("superseded"), "CANCELLED"),
+                ("current", manifest("current"), "ACTIVE"),
+            ],
+        )
+
+    assert sprints.find_for_work_item("ai-factory-lab", "trello", "same-card") == "current"
