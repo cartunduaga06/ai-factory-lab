@@ -19,13 +19,22 @@ _PHASES = {"WAITING_HUMAN", "MERGED", "CLOSED", "FAILED", "DONE"}
 
 
 def source_description(description: str) -> str:
-    """Remove only the Factory-owned suffix from a card snapshot."""
-    if _START not in description:
+    """Remove one complete Factory feedback block from a card description."""
+    start_count = description.count(_START)
+    end_count = description.count(_END)
+    if start_count == 0 and end_count == 0:
         return description
-    prefix, marker, suffix = description.partition(_START)
-    if marker and suffix.endswith(_END) and prefix.endswith("\n\n"):
-        return prefix[:-2]
-    return description
+    if start_count != 1 or end_count != 1:
+        raise TrelloFeedbackError("invalid Trello feedback markers")
+    prefix, _, remainder = description.partition(_START)
+    block, marker, trailing = remainder.partition(_END)
+    if not marker or _START in block or _END in block:
+        raise TrelloFeedbackError("invalid Trello feedback markers")
+    if not prefix.endswith("\n\n") or not block.startswith("\n"):
+        raise TrelloFeedbackError("invalid Trello feedback block")
+    # Trello users may append text after the Factory block. Preserve that text
+    # as source content while removing only the owned block on the next write.
+    return prefix[:-2] + trailing
 
 
 class TrelloFeedbackTransport(Protocol):

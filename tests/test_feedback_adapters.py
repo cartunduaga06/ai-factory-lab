@@ -250,6 +250,49 @@ def test_trello_feedback_preserves_source_snapshot_and_project() -> None:
     assert transport.writes == 1
 
 
+def test_trello_feedback_replaces_owned_block_after_human_description_edit() -> None:
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    original = "project_id: project-a\nOriginal"
+    transport = TrelloTransport(original)
+    sink = TrelloWorkItemFeedbackSink("key", "token", registry, transport)
+    sink.sync(_identity(), "WAITING_HUMAN")
+
+    # A user appending a note after the feedback marker must not make the
+    # Factory block look like source routing data or cause another block.
+    transport.card["desc"] += "\n\nHuman note"
+    sink.sync(_identity(), "MERGED")
+
+    description = transport.card["desc"]
+    assert source_description(description) == original + "\n\nHuman note"
+    assert description.count("<!-- factory-feedback:start -->") == 1
+    assert "Factory: MERGED" in description
+    assert transport.writes == 2
+    sink.sync(_identity(), "MERGED")
+    assert transport.writes == 2
+
+
+def test_trello_feedback_fails_closed_on_ambiguous_owned_markers() -> None:
+    description = (
+        "project_id: project-a\nOriginal\n\n"
+        "<!-- factory-feedback:start -->\nFactory: WAITING_HUMAN\n"
+        "<!-- factory-feedback:end -->\n"
+        "<!-- factory-feedback:start -->\nFactory: MERGED\n"
+        "<!-- factory-feedback:end -->"
+    )
+    with pytest.raises(TrelloFeedbackError, match="invalid Trello feedback markers"):
+        source_description(description)
+
+
 class DeliveryClient:
     def __init__(self, *, missing_check: bool = False, stale_check: bool = False) -> None:
         self.paths: list[str] = []
