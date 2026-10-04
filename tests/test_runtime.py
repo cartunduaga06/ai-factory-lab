@@ -721,3 +721,24 @@ def test_legacy_validating_runtime_revalidates_without_agent_or_new_records(
         runtime.run_once()
         assert runner.calls == [("tests", workspace.path)]
         assert adapter.dispatched == [] and adapter.collected == 0
+
+def test_human_review_provider_failure_is_deferred(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    runtime = FactoryRuntime.__new__(FactoryRuntime)
+    runtime._pull_request_state = object()
+    task = SimpleNamespace(task_id="task-1")
+    pending = iter([[task], [], [], [], []])
+    runtime._tasks = SimpleNamespace(list=lambda _status: next(pending))
+    calls: list[str] = []
+
+    def fail(_task: object) -> None:
+        calls.append("task-1")
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(runtime, "_reconcile_human_review_task", fail)
+    runtime._reconcile_human_reviews()
+
+    assert calls == ["task-1"]
