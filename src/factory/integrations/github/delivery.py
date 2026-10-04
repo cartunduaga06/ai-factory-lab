@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from factory.domain.feedback import DeliveryEvidence, FeedbackIdentity
+from factory.domain.models import PullRequest
 from factory.domain.ports import DeliveryEvidenceSource
 from factory.domain.projects import ProjectRegistry, ProjectRoutingError
 from factory.integrations.github.client import GitHubClient, GitHubError, GitHubRequestError
@@ -16,6 +17,28 @@ class GitHubDeliveryEvidenceSource(DeliveryEvidenceSource):
     def __init__(self, client: GitHubClient, registry: ProjectRegistry) -> None:
         self._client = client
         self._registry = registry
+
+    def current_revision(self, pull_request: PullRequest) -> str:
+        if pull_request.number is None or pull_request.number <= 0:
+            raise ValueError("persisted pull request has no number")
+        item = self._client.get(
+            f"/repos/{pull_request.repository_slug}/pulls/{pull_request.number}"
+        )
+        if not isinstance(item, Mapping) or item.get("number") != pull_request.number:
+            raise ValueError("invalid pull request response")
+        head, base = item.get("head"), item.get("base")
+        if (
+            not isinstance(head, Mapping)
+            or not isinstance(base, Mapping)
+            or head.get("ref") != pull_request.head_branch
+            or base.get("ref") != pull_request.base_branch
+            or _repository(head) != pull_request.repository_slug
+            or _repository(base) != pull_request.repository_slug
+            or not isinstance(head.get("sha"), str)
+            or not head.get("sha")
+        ):
+            raise ValueError("pull request identity mismatch")
+        return str(head["sha"])
 
     def evidence(self, identity: FeedbackIdentity) -> DeliveryEvidence:
         merged = False

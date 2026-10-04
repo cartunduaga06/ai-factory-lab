@@ -91,6 +91,21 @@ def test_pr_persists_across_reopen(db_path: str) -> None:
     assert isinstance(stored.opened_at, datetime)
 
 
+def test_provider_revision_updates_sha_and_appends_audit_event(db_path: str) -> None:
+    _, _, task_id, run_id = _seed(db_path)
+    repo = SqlitePullRequestRepository(db_path)
+    repo.initialize()
+    original = repo.save(_pr(run_id, task_id))
+    updated = repo.record_provider_revision(original, "b" * 40)
+    assert updated.commit_sha == "b" * 40
+    assert not updated.merged
+    reopened = SqlitePullRequestRepository(db_path)
+    stored = reopened.get_for_run(run_id)
+    assert stored is not None and stored.commit_sha == "b" * 40
+    names = [event.name for event in SqliteAuditEventStore(db_path).for_task(task_id)]
+    assert names.count("PRUpdated") == 1
+
+
 def test_run_and_task_association_is_preserved(db_path: str) -> None:
     _, _, task_id, run_id = _seed(db_path)
     repo = SqlitePullRequestRepository(db_path)
