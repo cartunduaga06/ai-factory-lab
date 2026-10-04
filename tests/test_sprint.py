@@ -564,6 +564,7 @@ def test_find_for_work_item_accepts_pre_e7_manifest_without_project_id(tmp_path:
         is None
     )
 
+
 def test_find_for_work_item_ignores_cancelled_superseded_sprint(tmp_path: Path) -> None:
     import json
     import sqlite3
