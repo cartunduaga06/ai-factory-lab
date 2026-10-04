@@ -108,8 +108,12 @@ class TrelloWorkItemFeedbackSink(WorkItemFeedbackSink):
             raise TrelloFeedbackError("invalid Trello card description")
         original = source_description(raw)
         declarations = re.findall(r"(?im)^project_id\s*[:=]\s*([^\s]+)\s*$", original)
-        if declarations != [identity.project_id]:
+        if len(declarations) > 1 or (declarations and declarations[0] != identity.project_id):
             raise TrelloFeedbackError("Trello card project identity mismatch")
+        if not declarations:
+            # The persisted, registry-validated feedback identity is authoritative
+            # for a linked card whose historical description lacks its marker.
+            original = f"project_id: {identity.project_id}\n{original}"
         suffix = (
             f"{_START}\nFactory: {phase}\nProject: {identity.project_id}\n"
             f"Sprint: {identity.sprint_id or '-'}\n"

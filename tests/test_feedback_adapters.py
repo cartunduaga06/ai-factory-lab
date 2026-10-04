@@ -281,6 +281,61 @@ def test_trello_feedback_replaces_owned_block_after_human_description_edit() -> 
     assert transport.writes == 2
 
 
+def test_trello_feedback_materializes_missing_project_marker_once() -> None:
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    transport = TrelloTransport("Historical card description")
+    sink = TrelloWorkItemFeedbackSink("key", "token", registry, transport)
+
+    sink.sync(_identity(), "WAITING_HUMAN")
+    expected_source = "project_id: project-a\nHistorical card description"
+    assert source_description(transport.card["desc"]) == expected_source
+    assert transport.card["desc"].count("project_id:") == 1
+    assert transport.writes == 1
+
+    sink.sync(_identity(), "WAITING_HUMAN")
+    assert source_description(transport.card["desc"]) == expected_source
+    assert transport.card["desc"].count("<!-- factory-feedback:start -->") == 1
+    assert transport.writes == 1
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "project_id: project-b\nConflicting project",
+        "project_id: project-a\nOriginal\nproject_id: project-a",
+    ),
+)
+def test_trello_feedback_rejects_conflicting_or_duplicate_project_markers(
+    description: str,
+) -> None:
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    transport = TrelloTransport(description)
+    sink = TrelloWorkItemFeedbackSink("key", "token", registry, transport)
+    with pytest.raises(TrelloFeedbackError, match="project identity mismatch"):
+        sink.sync(_identity(), "WAITING_HUMAN")
+    assert transport.writes == 0
+
+
 def test_trello_feedback_fails_closed_on_ambiguous_owned_markers() -> None:
     description = (
         "project_id: project-a\nOriginal\n\n"
