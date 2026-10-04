@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,6 +33,10 @@ from factory.infrastructure.persistence.pr_sqlite import SqlitePullRequestReposi
 from factory.infrastructure.persistence.run_sqlite import SqliteRunRepository
 from factory.infrastructure.persistence.sprint_sqlite import SqliteSprintRepository
 from factory.infrastructure.persistence.sqlite import SqliteTaskRepository
+from factory.integrations.trello.feedback import (
+    TrelloWorkItemFeedbackSink,
+    source_description,
+)
 from factory.orchestration.feedback import FeedbackReconciliationService
 
 
@@ -73,6 +80,28 @@ class Cards(WorkItemFeedbackSink):
     def sync(self, identity: FeedbackIdentity, phase: str) -> None:
         assert identity.work_item_id is not None
         self.phases[identity.work_item_id] = phase
+
+
+class TrelloCardTransport:
+    def __init__(self, description: str) -> None:
+        self.card: dict[str, Any] = {
+            "id": "carda",
+            "desc": description,
+            "dueComplete": False,
+            "idList": "backlog",
+        }
+        self.writes = 0
+
+    def request_json(
+        self, method: str, url: str, headers: Mapping[str, str], body: bytes | None
+    ) -> Any:  # noqa: ANN401
+        assert "/cards/carda" in url
+        if method == "GET":
+            return dict(self.card)
+        assert method == "PUT" and body is not None
+        self.writes += 1
+        self.card.update(json.loads(body))
+        return dict(self.card)
 
 
 def _registry() -> ProjectRegistry:
@@ -295,6 +324,29 @@ def test_trello_task_with_lost_link_cannot_downgrade(tmp_path: Path) -> None:
     assert not SqlitePullRequestRepository(str(path)).get_for_run(run.run_id).merged  # type: ignore[union-attr]
     assert issues.closed == set()
     assert cards.phases == {}
+
+
+def test_reconciliation_repairs_historical_trello_card_without_project_marker(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "historical-card.db"
+    task, run = _records(path, "project-a", 7, "carda")
+    issues = Issues()
+    transport = TrelloCardTransport("Historical card description")
+    cards = TrelloWorkItemFeedbackSink("key", "token", _registry(), transport)
+    service = _service(path, True, issues, cards)
+
+    assert service.reconcile(task, run)
+    assert service.reconcile(task, run)
+
+    assert source_description(transport.card["desc"]) == (
+        "project_id: project-a\nHistorical card description"
+    )
+    assert transport.card["desc"].count("project_id:") == 1
+    assert transport.card["desc"].count("<!-- factory-feedback:start -->") == 1
+    assert transport.card["dueComplete"] is True
+    assert transport.writes == 1
+    assert issues.closed == {("example/project-a", 7)}
 
 
 def test_github_direct_link_mismatch_fails_closed(tmp_path: Path) -> None:

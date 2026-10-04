@@ -250,6 +250,104 @@ def test_trello_feedback_preserves_source_snapshot_and_project() -> None:
     assert transport.writes == 1
 
 
+def test_trello_feedback_replaces_owned_block_after_human_description_edit() -> None:
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    original = "project_id: project-a\nOriginal"
+    transport = TrelloTransport(original)
+    sink = TrelloWorkItemFeedbackSink("key", "token", registry, transport)
+    sink.sync(_identity(), "WAITING_HUMAN")
+
+    # A user appending a note after the feedback marker must not make the
+    # Factory block look like source routing data or cause another block.
+    transport.card["desc"] += "\n\nHuman note"
+    sink.sync(_identity(), "MERGED")
+
+    description = transport.card["desc"]
+    assert source_description(description) == original + "\n\nHuman note"
+    assert description.count("<!-- factory-feedback:start -->") == 1
+    assert "Factory: MERGED" in description
+    assert transport.writes == 2
+    sink.sync(_identity(), "MERGED")
+    assert transport.writes == 2
+
+
+def test_trello_feedback_materializes_missing_project_marker_once() -> None:
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    transport = TrelloTransport("Historical card description")
+    sink = TrelloWorkItemFeedbackSink("key", "token", registry, transport)
+
+    sink.sync(_identity(), "WAITING_HUMAN")
+    expected_source = "project_id: project-a\nHistorical card description"
+    assert source_description(transport.card["desc"]) == expected_source
+    assert transport.card["desc"].count("project_id:") == 1
+    assert transport.writes == 1
+
+    sink.sync(_identity(), "WAITING_HUMAN")
+    assert source_description(transport.card["desc"]) == expected_source
+    assert transport.card["desc"].count("<!-- factory-feedback:start -->") == 1
+    assert transport.writes == 1
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "project_id: project-b\nConflicting project",
+        "project_id: project-a\nOriginal\nproject_id: project-a",
+    ),
+)
+def test_trello_feedback_rejects_conflicting_or_duplicate_project_markers(
+    description: str,
+) -> None:
+    registry = ProjectRegistry(
+        (
+            ProjectProfile(
+                "project-a",
+                "example/project-a",
+                "/tmp/project-a",
+                "main",
+                (QualityGateSpec("tests", ("pytest",)),),
+            ),
+        )
+    )
+    transport = TrelloTransport(description)
+    sink = TrelloWorkItemFeedbackSink("key", "token", registry, transport)
+    with pytest.raises(TrelloFeedbackError, match="project identity mismatch"):
+        sink.sync(_identity(), "WAITING_HUMAN")
+    assert transport.writes == 0
+
+
+def test_trello_feedback_fails_closed_on_ambiguous_owned_markers() -> None:
+    description = (
+        "project_id: project-a\nOriginal\n\n"
+        "<!-- factory-feedback:start -->\nFactory: WAITING_HUMAN\n"
+        "<!-- factory-feedback:end -->\n"
+        "<!-- factory-feedback:start -->\nFactory: MERGED\n"
+        "<!-- factory-feedback:end -->"
+    )
+    with pytest.raises(TrelloFeedbackError, match="invalid Trello feedback markers"):
+        source_description(description)
+
+
 class DeliveryClient:
     def __init__(self, *, missing_check: bool = False, stale_check: bool = False) -> None:
         self.paths: list[str] = []
