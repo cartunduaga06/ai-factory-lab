@@ -34,9 +34,13 @@ from factory.orchestration.feedback import FeedbackReconciliationService
 
 
 class Evidence(DeliveryEvidenceSource):
-    def __init__(self, complete: bool, merged: bool = True) -> None:
+    def __init__(self, complete: bool, merged: bool = True, current_sha: str | None = None) -> None:
         self.complete = complete
         self.merged = merged
+        self.current_sha = current_sha
+
+    def current_revision(self, pull_request: PullRequest) -> str:
+        return self.current_sha or pull_request.commit_sha or ""
 
     def evidence(self, identity: FeedbackIdentity) -> DeliveryEvidence:
         return DeliveryEvidence(self.merged, True, self.complete, True)
@@ -155,14 +159,18 @@ def _records(
 
 
 def _service(
-    path: Path, complete: bool, issues: Issues, cards: Cards
+    path: Path,
+    complete: bool,
+    issues: Issues,
+    cards: Cards,
+    current_sha: str | None = None,
 ) -> FeedbackReconciliationService:
     database = str(path)
     return FeedbackReconciliationService(
         SqliteTaskRepository(database),
         SqliteRunRepository(database),
         SqlitePullRequestRepository(database),
-        Evidence(complete),
+        Evidence(complete, current_sha=current_sha),
         issues,
         cards,
         SqliteFeedbackEventRepository(database),
@@ -189,6 +197,21 @@ def test_github_direct_merge_then_complete_is_idempotent_across_restart(tmp_path
     names = [event.name for event in SqliteAuditEventStore(str(path)).for_task(task.task_id)]
     assert names.count("PRUpdated") == 1
     assert names.count("DeliveryReconciled") == 1
+
+
+def test_provider_rebase_refreshes_exact_head_before_merge(tmp_path: Path) -> None:
+    path = tmp_path / "provider-rebase.db"
+    task, run = _records(path, "project-a", 88, None)
+    issues, cards = Issues(), Cards()
+    service = _service(path, True, issues, cards, current_sha="b" * 40)
+
+    assert service.reconcile(task, run)
+    stored = SqlitePullRequestRepository(str(path)).get_for_run(run.run_id)
+    assert stored is not None
+    assert stored.commit_sha == "b" * 40
+    assert stored.merged
+    assert SqliteFeedbackEventRepository(str(path)).is_completed(task.task_id)
+    assert issues.closed == {("example/project-a", 88)}
 
 
 def test_superseded_run_cannot_reconcile_reworked_pr(tmp_path: Path) -> None:

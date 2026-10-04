@@ -624,6 +624,10 @@ class PullRequestRepository(ABC):
     def record_merged(self, pull_request: PullRequest) -> PullRequest:
         """Record a provider-verified merge for this exact persisted PR, idempotently."""
 
+    @abstractmethod
+    def record_provider_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
+        """Persist a provider-verified head change without changing task/run identity."""
+
 
 __all__ = [
     "BacklogLinkRepository",

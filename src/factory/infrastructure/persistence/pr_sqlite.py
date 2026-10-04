@@ -163,6 +163,39 @@ class SqlitePullRequestRepository(SqliteRepository, PullRequestRepository):
         assert result is not None
         return result
 
+    def record_provider_revision(self, pull_request: PullRequest, commit_sha: str) -> PullRequest:
+        if (
+            not commit_sha.strip()
+            or pull_request.run_id is None
+            or pull_request.task_id is None
+            or pull_request.number is None
+        ):
+            raise ValueError("invalid provider revision identity")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE {PULL_REQUESTS_TABLE} SET commit_sha = ?, merged = 0 "
+                "WHERE run_id = ? AND task_id = ? AND repository_slug = ? "
+                "AND head_branch = ? AND base_branch = ? AND number = ?",
+                (
+                    commit_sha,
+                    pull_request.run_id,
+                    pull_request.task_id,
+                    pull_request.repository_slug,
+                    pull_request.head_branch,
+                    pull_request.base_branch,
+                    pull_request.number,
+                ),
+            )
+            if cursor.rowcount not in {0, 1}:
+                raise ValueError("provider revision identity mismatch")
+            row = conn.execute(
+                f"SELECT * FROM {PULL_REQUESTS_TABLE} WHERE run_id = ?",
+                (pull_request.run_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("provider revision identity mismatch")
+        return _row_to_pull_request(row)
+
     def record_merged(self, pull_request: PullRequest) -> PullRequest:
         if (
             pull_request.run_id is None

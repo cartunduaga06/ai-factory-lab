@@ -234,6 +234,15 @@ class FeedbackReconciliationService:
         if not self._matches_pr(task, run, workspace.branch, pr, profile.base_ref):
             return None
         assert pr is not None and pr.number is not None and pr.commit_sha is not None
+        current_revision = getattr(self._evidence, "current_revision", None)
+        if callable(current_revision):
+            try:
+                provider_sha = current_revision(pr)
+                if provider_sha != pr.commit_sha:
+                    pr = self._prs.record_provider_revision(pr, provider_sha)
+            except (ValueError, TypeError, RuntimeError):
+                return None
+        assert pr.number is not None and pr.commit_sha is not None
         origin = self._links.reconciliation_origin(task.task_id)
         if origin is None:
             return None
