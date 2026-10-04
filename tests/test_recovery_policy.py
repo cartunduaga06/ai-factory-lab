@@ -152,6 +152,26 @@ def test_failure_classes_and_backoff_are_bounded() -> None:
         policy.delay_for(0)
 
 
+def test_context_block_can_be_requeued_without_a_run(tmp_path: Path) -> None:
+    path = str(tmp_path / "factory.db")
+    tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
+    tasks.initialize()
+    runs.initialize()
+    task = tasks.save(
+        FactoryTask(
+            "context recovery",
+            "example/target",
+            status=TaskStatus.BLOCKED,
+            blocked_reason="required context unavailable",
+        )
+    )
+
+    recovered = RetryService(tasks, runs).retry(task.task_id)
+
+    assert recovered.status is TaskStatus.READY
+    assert runs.list_runs(task.task_id) == []
+
+
 def test_explicit_retry_obeys_persisted_backoff_and_attempt_cap(tmp_path: Path) -> None:
     path = str(tmp_path / "factory.db")
     tasks, runs = SqliteTaskRepository(path), SqliteRunRepository(path)
