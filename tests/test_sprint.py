@@ -607,7 +607,4 @@ def test_find_for_work_item_ignores_cancelled_superseded_sprint(tmp_path: Path) 
             ],
         )
 
-    assert (
-        sprints.find_for_work_item("ai-factory-lab", "trello", "same-card")
-        == "current"
-    )
+    assert sprints.find_for_work_item("ai-factory-lab", "trello", "same-card") == "current"
