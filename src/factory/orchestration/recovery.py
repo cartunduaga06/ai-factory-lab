@@ -52,6 +52,15 @@ class RecoveryPolicy:
         if task.status not in {TaskStatus.BLOCKED, TaskStatus.CLAIMED}:
             return FailureClass.NON_RECOVERABLE
         if latest is None:
+            if (
+                task.status is TaskStatus.BLOCKED
+                and task.blocked_reason is not None
+                and task.blocked_reason.startswith("required context ")
+            ):
+                # Context failures happen before a run exists. An operator may
+                # safely requeue after fixing the materialized source, while
+                # unrelated runless blocks remain non-recoverable.
+                return FailureClass.CORRECTABLE
             return FailureClass.TRANSIENT
         if latest.status is RunStatus.FAILED:
             return FailureClass.CORRECTABLE
