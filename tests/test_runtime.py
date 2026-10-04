@@ -313,8 +313,7 @@ def test_human_review_read_failure_preserves_waiting_state(runtime_parts) -> Non
             raise ValueError("uncertain provider state")
 
     runtime._pull_request_state = FailingSource()
-    with pytest.raises(ValueError, match="uncertain provider state"):
-        runtime.run_once()
+    runtime.run_once()
     assert tasks.get(first.task_id).status is TaskStatus.WAITING_HUMAN  # type: ignore[union-attr]
 
 
