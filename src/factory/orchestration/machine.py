@@ -9,17 +9,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from factory.domain.enums import TaskStatus
+from factory.domain.errors import InvalidTransitionError
 from factory.domain.models import FactoryTask
 from factory.orchestration.lifecycle import TERMINAL_STATES, TRANSITIONS, can_transition
-
-
-class InvalidTransitionError(ValueError):
-    """Raised when a task is asked to move to a disallowed status."""
-
-    def __init__(self, source: TaskStatus, target: TaskStatus) -> None:
-        super().__init__(f"illegal task transition: {source.value} -> {target.value}")
-        self.source = source
-        self.target = target
 
 
 class TaskStateMachine:
