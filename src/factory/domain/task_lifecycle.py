@@ -54,6 +54,24 @@ def next_states(status: TaskStatus) -> frozenset[TaskStatus]:
     return TRANSITIONS[status]
 
 
+PERSISTENCE_ONLY_TRANSITIONS: MappingProxyType[TaskStatus, frozenset[TaskStatus]] = MappingProxyType(
+    {
+        # Recovery/reconciliation adapters emit these explicit durable paths;
+        # normal orchestration still uses the stricter state-machine graph.
+        TaskStatus.READY: frozenset({TaskStatus.WAITING_HUMAN}),
+        TaskStatus.RUNNING: frozenset({TaskStatus.WAITING_HUMAN}),
+        TaskStatus.FAILED: frozenset({TaskStatus.READY}),
+    }
+)
+
+
 def can_transition(source: TaskStatus, target: TaskStatus) -> bool:
-    """Return whether ``source -> target`` is a legal lifecycle transition."""
+    """Return whether source -> target is a normal lifecycle transition."""
     return target in TRANSITIONS[source]
+
+
+def can_persist_transition(source: TaskStatus, target: TaskStatus) -> bool:
+    """Return whether a durable adapter may apply this explicit transition."""
+    return can_transition(source, target) or target in PERSISTENCE_ONLY_TRANSITIONS.get(
+        source, frozenset()
+    )
