@@ -228,9 +228,7 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
     ) -> FactoryTask:
         return self._apply_transition(task_id, expected_from, target)
 
-    def apply_terminal_resolution(
-        self, task_id: str, expected_from: TaskStatus
-    ) -> FactoryTask:
+    def apply_terminal_resolution(self, task_id: str, expected_from: TaskStatus) -> FactoryTask:
         """Apply the explicit provider-reconciliation terminal resolution."""
         if expected_from not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
             raise ValueError("provider reconciliation requires a terminal failure state")
