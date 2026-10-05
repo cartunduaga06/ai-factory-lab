@@ -21,9 +21,6 @@ class TaskStateMachine:
     trivially safe to share and easy to replace with a persisted variant later.
     """
 
-__all__ = ["InvalidTransitionError", "TaskStateMachine"]
-
-
     def can_apply(self, task: FactoryTask, target: TaskStatus) -> bool:
         return can_transition(task.status, target)
 
@@ -46,3 +43,6 @@ __all__ = ["InvalidTransitionError", "TaskStateMachine"]
     @staticmethod
     def legal_targets(status: TaskStatus) -> frozenset[TaskStatus]:
         return TRANSITIONS[status]
+
+
+__all__ = ["InvalidTransitionError", "TaskStateMachine"]
