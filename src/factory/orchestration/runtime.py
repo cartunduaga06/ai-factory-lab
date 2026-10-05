@@ -829,8 +829,11 @@ class FactoryRuntime:
             if self._feedback is not None:
                 self._feedback.reconcile_provider_closure(task, run)
             return
+        state_source = self._pull_request_state
+        if state_source is None:
+            return
         try:
-            state = self._pull_request_state.state(pr)
+            state = state_source.state(pr)
         except Exception:
             if self._feedback is not None:
                 self._feedback.reconcile_provider_closure(task, run)
