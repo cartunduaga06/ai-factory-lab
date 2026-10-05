@@ -73,6 +73,9 @@ class TaskLifecycleService:
         """
         if expected_from not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
             raise ValueError("provider reconciliation requires a terminal failure state")
+        resolver = getattr(self._repository, "apply_terminal_resolution", None)
+        if resolver is not None:
+            return resolver(task_id, expected_from)
         return self._repository.apply_transition(task_id, expected_from, TaskStatus.DONE)
 
 
