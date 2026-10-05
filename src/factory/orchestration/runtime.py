@@ -797,62 +797,70 @@ class FactoryRuntime:
             *self._tasks.list(TaskStatus.CANCELLED),
         ]
         for task in review_tasks:
-            if self._registry is not None:
-                try:
-                    self._registry.resolve(task.project_id, task.target_repository)
-                except ProjectRoutingError:
-                    continue
-            if task.kind is not TaskKind.CODE:
-                continue
-            run = self._latest_run(task.task_id)
-            if run is None or run.project_id != task.project_id:
-                continue
-            pr = self._pull_requests.get_for_run(run.run_id)
-            if pr is None and run.workspace is not None:
-                pr = self._pull_requests.find_by_branch(
-                    run.workspace.repository_slug, run.workspace.branch
-                )
-            if (
-                pr is None
-                or pr.task_id != task.task_id
-                or pr.repository_slug != task.target_repository
-            ):
-                continue
-            if task.status is TaskStatus.CANCELLED:
-                if self._feedback is not None:
-                    self._feedback.reconcile_provider_closure(task, run)
-                continue
             try:
-                state = self._pull_request_state.state(pr)
-            except Exception:
-                if self._feedback is not None:
-                    self._feedback.reconcile_provider_closure(task, run)
-                    continue
-                raise
-            if state is PullRequestState.MERGED:
-                if self._feedback is not None:
-                    self._feedback.reconcile_external(task, run)
-                elif task.status in {TaskStatus.WAITING_HUMAN, TaskStatus.VALIDATING}:
-                    self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
-            elif state is PullRequestState.CLOSED and task.status in {
-                TaskStatus.WAITING_HUMAN,
-                TaskStatus.VALIDATING,
-            }:
-                cancelled = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
-                cancelled.blocked_reason = (
-                    "pull request closed without merge; human review required"
+                self._reconcile_human_review_task(task)
+            except Exception as exc:  # noqa: BLE001 - provider outages are deferred
+                logger.warning(
+                    "human review reconciliation deferred: task_id=%s error_type=%s",
+                    task.task_id,
+                    type(exc).__name__,
                 )
-                self._tasks.update(cancelled)
-                if self._feedback is not None:
-                    self._feedback.sync(task, run, "CLOSED")
-            elif self._feedback is not None and task.status in {
-                TaskStatus.WAITING_HUMAN,
-                TaskStatus.FAILED,
-                TaskStatus.CANCELLED,
-            }:
-                self._feedback.sync(task, run, task.status.value)
+
+    def _reconcile_human_review_task(self, task: FactoryTask) -> None:
+        """Reconcile one task without letting a provider outage stop the pool."""
+        if self._registry is not None:
+            try:
+                self._registry.resolve(task.project_id, task.target_repository)
+            except ProjectRoutingError:
+                return
+        if task.kind is not TaskKind.CODE:
+            return
+        run = self._latest_run(task.task_id)
+        if run is None or run.project_id != task.project_id:
+            return
+        pr = self._pull_requests.get_for_run(run.run_id)
+        if pr is None and run.workspace is not None:
+            pr = self._pull_requests.find_by_branch(
+                run.workspace.repository_slug, run.workspace.branch
+            )
+        if pr is None or pr.task_id != task.task_id or pr.repository_slug != task.target_repository:
+            return
+        if task.status is TaskStatus.CANCELLED:
             if self._feedback is not None:
                 self._feedback.reconcile_provider_closure(task, run)
+            return
+        state_source = self._pull_request_state
+        if state_source is None:
+            return
+        try:
+            state = state_source.state(pr)
+        except Exception:
+            if self._feedback is not None:
+                self._feedback.reconcile_provider_closure(task, run)
+                return
+            raise
+        if state is PullRequestState.MERGED:
+            if self._feedback is not None:
+                self._feedback.reconcile_external(task, run)
+            elif task.status in {TaskStatus.WAITING_HUMAN, TaskStatus.VALIDATING}:
+                self._dispatch.lifecycle.transition(task.task_id, TaskStatus.DONE)
+        elif state is PullRequestState.CLOSED and task.status in {
+            TaskStatus.WAITING_HUMAN,
+            TaskStatus.VALIDATING,
+        }:
+            cancelled = self._dispatch.lifecycle.transition(task.task_id, TaskStatus.CANCELLED)
+            cancelled.blocked_reason = "pull request closed without merge; human review required"
+            self._tasks.update(cancelled)
+            if self._feedback is not None:
+                self._feedback.sync(task, run, "CLOSED")
+        elif self._feedback is not None and task.status in {
+            TaskStatus.WAITING_HUMAN,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }:
+            self._feedback.sync(task, run, task.status.value)
+        if self._feedback is not None:
+            self._feedback.reconcile_provider_closure(task, run)
 
     def _select_task(self) -> FactoryTask | None:
         # Recovery states take precedence over new work; ordering within each
