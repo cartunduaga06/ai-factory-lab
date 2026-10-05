@@ -823,11 +823,7 @@ class FactoryRuntime:
             pr = self._pull_requests.find_by_branch(
                 run.workspace.repository_slug, run.workspace.branch
             )
-        if (
-            pr is None
-            or pr.task_id != task.task_id
-            or pr.repository_slug != task.target_repository
-        ):
+        if pr is None or pr.task_id != task.task_id or pr.repository_slug != task.target_repository:
             return
         if task.status is TaskStatus.CANCELLED:
             if self._feedback is not None:
