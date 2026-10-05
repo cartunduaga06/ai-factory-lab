@@ -721,6 +721,7 @@ def test_legacy_validating_runtime_revalidates_without_agent_or_new_records(
         assert runner.calls == [("tests", workspace.path)]
         assert adapter.dispatched == [] and adapter.collected == 0
 
+
 def test_human_review_provider_failure_is_deferred(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
