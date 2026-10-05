@@ -54,7 +54,9 @@ def next_states(status: TaskStatus) -> frozenset[TaskStatus]:
     return TRANSITIONS[status]
 
 
-PERSISTENCE_ONLY_TRANSITIONS: MappingProxyType[TaskStatus, frozenset[TaskStatus]] = MappingProxyType(
+PERSISTENCE_ONLY_TRANSITIONS: MappingProxyType[
+    TaskStatus, frozenset[TaskStatus]
+] = MappingProxyType(
     {
         # Recovery/reconciliation adapters emit these explicit durable paths;
         # normal orchestration still uses the stricter state-machine graph.
