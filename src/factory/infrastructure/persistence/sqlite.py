@@ -26,9 +26,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from factory.domain.enums import TaskKind, TaskStatus
-from factory.domain.errors import DuplicateTaskError, TaskStateChangedError
+from factory.domain.errors import DuplicateTaskError, InvalidTransitionError, TaskStateChangedError
 from factory.domain.models import FactoryTask, TaskSource, TaskTransition
 from factory.domain.ports import TaskRepository
+from factory.domain.task_lifecycle import can_transition
 from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
 from factory.infrastructure.persistence.schema import (
     AGENT_RUNS_TABLE,
@@ -235,6 +236,9 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         history insert share one transaction, so a failure in either leaves both
         untouched.
         """
+        if not can_transition(expected_from, target):
+            raise InvalidTransitionError(expected_from, target)
+
         now = datetime.now(UTC)
         timestamp = encode_datetime(now)
         with self._connect() as conn:
