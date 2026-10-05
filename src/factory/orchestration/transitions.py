@@ -52,6 +52,8 @@ class TaskLifecycleService:
         current = task.status
         if expected_from is not None and current is not expected_from:
             raise TaskStateChangedError(task_id, expected_from, current)
+        if current is target and expected_from is None:
+            return task
         if not self._state_machine.can_apply(task, target):
             raise InvalidTransitionError(current, target)
 

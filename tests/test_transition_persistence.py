@@ -69,6 +69,24 @@ def test_valid_transition_writes_history(repo: SqliteTaskRepository) -> None:
     assert history[0].task_id == task.task_id
 
 
+def test_repeating_transition_is_idempotent(repo: SqliteTaskRepository) -> None:
+    task = _saved(repo)
+    service = _service(repo)
+    first = service.transition(task.task_id, TaskStatus.READY)
+    second = service.transition(task.task_id, TaskStatus.READY)
+    assert first.status is second.status is TaskStatus.READY
+    assert len(repo.history(task.task_id)) == 1
+
+
+def test_repository_rejects_illegal_transition(repo: SqliteTaskRepository) -> None:
+    task = _saved(repo)
+    with pytest.raises(InvalidTransitionError):
+        _service(repo).transition(task.task_id, TaskStatus.DONE)
+    stored = repo.get(task.task_id)
+    assert stored is not None and stored.status is TaskStatus.DISCOVERED
+    assert repo.history(task.task_id) == []
+
+
 def test_history_preserves_full_chain(repo: SqliteTaskRepository) -> None:
     task = _saved(repo)
     service = _service(repo)
