@@ -29,6 +29,9 @@ port 8865. No Docker/host/production modifications were made.
 ## Isolation sprint validation
 
 - Branch: `factory-vnext/isolation-stable-runtime`
+- RC candidate commit: `f26a4ba74ef0ad7a6a6c88d19b511da7cec0120f`.
+- Clean-tree `ops/release/prepare-rc` result: **READY FOR PRODUCTION
+  PROMOTION — HUMAN GATE REQUIRED**.
 - Staging health smoke: `FACTORY_PYTHON=/tmp/pr54-qa-venv/bin/python
   ops/staging/health` — passed, status `IDLE`, database at
   `/srv/ai-factory/staging/state/factory.db`.
@@ -55,8 +58,8 @@ port 8865. No Docker/host/production modifications were made.
 - Run heartbeat is not proof of worker process liveness. Ownership metadata is
   for attribution; orphan recovery still requires the separate explicit
   operator-authorized fail-closed procedure.
-- Exact implementation and report commit SHAs are recorded in the final
-  response. The RC command emits the candidate SHA and gate summary.
+- The report-only follow-up commit records these results; the RC candidate SHA
+  above remains the exact code commit tested by `prepare-rc`.
 
 ## Intermittent SIGTERM Root Cause
 
