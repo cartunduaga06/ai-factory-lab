@@ -63,3 +63,18 @@ The report may say READY FOR PRODUCTION PROMOTION only after all required gates
 are green and the RC record identifies the exact commit. It does not authorize
 promotion, merge or deployment. Any missing gate or E2E evidence means NOT
 READY.
+
+## Staging lifecycle
+
+The reproducible lifecycle is:
+
+    ops/staging/start       # starts the staging watcher; PID is persisted in staging/state/factory.pid
+    ops/staging/status      # reports process state and durable factory state
+    ops/staging/restart     # graceful stop followed by a new staging process
+    ops/staging/stop        # SIGTERM with bounded wait; never sends SIGKILL
+    ops/staging/health      # config/database/status smoke check
+
+The lifecycle scripts hard-code the staging state, workspace, log and port roots
+and set FACTORY_ENV=staging. Provider credentials are intentionally not stored
+in vnext.env; a provider-backed watcher therefore fails closed when credentials
+are absent, while local fake-provider E2E and all quality gates remain runnable.

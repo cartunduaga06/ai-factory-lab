@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=/srv/ai-factory/staging
+REPO="$ROOT/ai-factory-lab-vnext"
+PID_FILE="$ROOT/state/factory.pid"
+LOG="$ROOT/logs/factory.log"
+PYTHON="${FACTORY_PYTHON:-$REPO/.venv/bin/python}"
+[[ -f "$ROOT/vnext.env" ]] || { echo "staging config missing" >&2; exit 2; }
+[[ -x "$PYTHON" ]] || { echo "staging Python environment missing" >&2; exit 2; }
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  echo "staging already running pid=$(cat "$PID_FILE")"
+  exit 0
+fi
+mkdir -p "$ROOT/state" "$ROOT/workspaces" "$ROOT/logs"
+set -a
+source "$ROOT/vnext.env"
+set +a
+export FACTORY_ENV=staging
+export DATABASE_URL="sqlite:////${ROOT#/}/state/factory.db"
+export FACTORY_WORKSPACE_ROOT="$ROOT/workspaces"
+export OPENHANDS_WORKSPACE_ROOT="$ROOT/workspaces"
+export FACTORY_STATUS_PORT=8865
+export PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+cd "$REPO"
+COMMAND="${FACTORY_STAGING_COMMAND:-watch}"
+nohup "$PYTHON" -m factory "$COMMAND" >>"$LOG" 2>&1 &
+PID=$!
+printf '%s\n' "$PID" >"$PID_FILE"
+echo "staging started pid=$PID command=$COMMAND log=$LOG"

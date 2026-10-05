@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=/srv/ai-factory/staging
+PID_FILE="$ROOT/state/factory.pid"
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  echo "process=RUNNING pid=$(cat "$PID_FILE")"
+else
+  echo "process=STOPPED"
+fi
+FACTORY_PYTHON="${FACTORY_PYTHON:-$ROOT/ai-factory-lab-vnext/.venv/bin/python}"
+if [[ -x "$FACTORY_PYTHON" ]]; then
+  cd "$ROOT/ai-factory-lab-vnext"
+  FACTORY_ENV=staging DATABASE_URL="sqlite:////${ROOT#/}/state/factory.db"     FACTORY_WORKSPACE_ROOT="$ROOT/workspaces" OPENHANDS_WORKSPACE_ROOT="$ROOT/workspaces"     PYTHONPATH="$ROOT/ai-factory-lab-vnext/src" "$FACTORY_PYTHON" -m factory status
+fi
