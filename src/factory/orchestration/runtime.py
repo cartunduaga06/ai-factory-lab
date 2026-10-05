@@ -218,14 +218,28 @@ class FactoryRuntime:
         try:
             self._reconciliation.reconcile()
             self._reconcile_human_reviews()
-            if self._sprint is not None and self._sprint.is_paused():
-                self._sprint.resume_completed()
-                if self._sprint.is_paused():
+            if self._sprint is not None and self._sprint.is_paused_for(
+                self._project_for_repository(self._intake_repository.slug)
+            ):
+                self._sprint.resume_completed_for(
+                    self._project_for_repository(self._intake_repository.slug)
+                )
+                if self._sprint.is_paused_for(
+                    self._project_for_repository(self._intake_repository.slug)
+                ):
                     return RuntimeResult(
                         None, None, None, None, None, None, None, "SPRINT_PAUSED", IntakeSummary()
                     )
-            if self._sprint is not None and not self._sprint.prepare():
-                outcome = "SPRINT_PAUSED" if self._sprint.is_paused() else "NO_ELIGIBLE_TASK"
+            if self._sprint is not None and not self._sprint.prepare_for_project(
+                self._project_for_repository(self._intake_repository.slug)
+            ):
+                outcome = (
+                    "SPRINT_PAUSED"
+                    if self._sprint.is_paused_for(
+                        self._project_for_repository(self._intake_repository.slug)
+                    )
+                    else "NO_ELIGIBLE_TASK"
+                )
                 return RuntimeResult(
                     None, None, None, None, None, None, None, outcome, IntakeSummary()
                 )
@@ -243,8 +257,14 @@ class FactoryRuntime:
         self._reconciliation.reconcile()
         self._reconcile_human_reviews()
         if self._sprint is not None:
-            self._sprint.resume_completed()
-            self._sprint.prepare()
+            prepare_for_project = getattr(self._sprint, "prepare_for_project", None)
+            if prepare_for_project is None:
+                self._sprint.resume_completed()
+                self._sprint.prepare()
+            else:
+                for project_id in self._project_ids():
+                    self._sprint.resume_completed_for(project_id)
+                    prepare_for_project(project_id)
         if self._should_reconcile_backlog():
             assert self._backlog_reconcile is not None
             self._backlog_reconcile()
@@ -938,7 +958,7 @@ class FactoryRuntime:
         return (
             self._sprint.allows(task)
             or (
-                not self._sprint.has_live_sprint()
+                not self._sprint.has_live_sprint_for(task.project_id)
                 and task.source is not None
                 and task.source.provider == "github"
                 and provenance is not None
@@ -955,8 +975,33 @@ class FactoryRuntime:
 
     def _should_reconcile_backlog(self) -> bool:
         return self._backlog_reconcile is not None and (
-            self._sprint is None or not self._sprint.has_live_sprint()
+            self._sprint is None
+            or not self._sprint.has_live_sprint_for(
+                self._project_for_repository(self._intake_repository.slug)
+            )
         )
+
+    def _project_for_repository(self, repository: str) -> str:
+        if self._registry is not None:
+            try:
+                return self._registry.for_repository(repository).project_id
+            except ProjectRoutingError:
+                return "ai-factory-lab"
+        matching = {
+            task.project_id for task in self._tasks.list() if task.target_repository == repository
+        }
+        return next(iter(matching)) if len(matching) == 1 else "ai-factory-lab"
+
+    def _project_ids(self) -> tuple[str, ...]:
+        projects = {task.project_id for task in self._tasks.list()}
+        if self._sprint is not None:
+            live_projects = getattr(self._sprint, "live_projects", None)
+            if live_projects is not None:
+                projects.update(live_projects())
+        if self._registry is not None:
+            projects.update(profile.project_id for profile in self._registry.profiles)
+        projects.add(self._project_for_repository(self._intake_repository.slug))
+        return tuple(sorted(projects))
 
     def _selectable(self, status: TaskStatus, *, pool: bool = False) -> list[FactoryTask]:
         return [

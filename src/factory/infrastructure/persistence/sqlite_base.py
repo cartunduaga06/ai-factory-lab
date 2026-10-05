@@ -22,6 +22,7 @@ from factory.infrastructure.persistence.schema import (
     MIGRATION_STATEMENTS,
     PULL_REQUESTS_TABLE,
     SCHEMA_STATEMENTS,
+    SPRINTS_TABLE,
     TASKS_TABLE,
     TRANSITIONS_TABLE,
 )
@@ -56,6 +57,9 @@ class SqliteRepository:
         if self._path != ":memory:":
             Path(self._path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            # Sprint authorization is project-scoped; remove the pre-205 global index
+            # before creating the replacement index below.
+            conn.execute(f"DROP INDEX IF EXISTS uq_{SPRINTS_TABLE}_live")
             # Rework runs are sequential attempts on the same reviewed checkout.
             # The active-task index still forbids concurrent writers.
             conn.execute("DROP INDEX IF EXISTS uq_agent_runs_workspace")

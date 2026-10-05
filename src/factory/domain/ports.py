@@ -181,6 +181,16 @@ class SprintRepository(ABC):
         """Return the current authorization, state and ordered position."""
 
     @abstractmethod
+    def current_for_project(
+        self, project_id: str
+    ) -> tuple[SprintManifest, SprintState, int] | None:
+        """Return the latest non-cancelled authorization owning this project."""
+
+    @abstractmethod
+    def live_projects(self) -> tuple[str, ...]:
+        """Return project identities with an ACTIVE or PAUSED authorization."""
+
+    @abstractmethod
     def move(self, sprint_id: str, state: SprintState, position: int, event: str) -> None:
         """Atomically update position/state and append one E1 event."""
 

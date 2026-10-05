@@ -35,20 +35,33 @@ class AuthorizedBacklogSource(BacklogSource):
         self._sprints = sprints
 
     def list_items(self) -> tuple[WorkItem, ...]:
-        current = self._sprints.current()
-        if current is None or current[1] is not SprintState.ACTIVE:
-            return ()
-        manifest, _, position = current
-        return (
-            (self.get_item(manifest.steps[position].item.external_id),)
-            if position < len(manifest.steps)
-            else ()
-        )
+        items: list[WorkItem] = []
+        for project_id in self._sprints.live_projects():
+            current = self._sprints.current_for_project(project_id)
+            if current is None or current[1] is not SprintState.ACTIVE:
+                continue
+            manifest, _, position = current
+            if position >= len(manifest.steps):
+                continue
+            snapshot = manifest.steps[position].item
+            actual = self._source.get_item(snapshot.external_id)
+            if actual == snapshot:
+                items.append(actual)
+        return tuple(items)
 
     def get_item(self, external_id: str) -> WorkItem:
-        current = self._sprints.current()
-        if current is None or current[1] is not SprintState.ACTIVE:
+        projects = self._sprints.live_projects()
+        matches = [
+            current
+            for project_id in projects
+            if (current := self._sprints.current_for_project(project_id)) is not None
+            and current[1] is SprintState.ACTIVE
+            and current[2] < len(current[0].steps)
+            and current[0].steps[current[2]].item.external_id == external_id
+        ]
+        if len(matches) != 1:
             raise ValueError("sprint is not active")
+        current = matches[0]
         manifest, _, position = current
         if position >= len(manifest.steps):
             raise ValueError("sprint is complete")
@@ -56,7 +69,7 @@ class AuthorizedBacklogSource(BacklogSource):
         if external_id != snapshot.external_id:
             raise ValueError("work item is outside the authorized sprint position")
         actual = self._source.get_item(external_id)
-        if actual != snapshot:
+        if actual != snapshot or actual.project_id != snapshot.project_id:
             raise ValueError("authorized work item snapshot changed")
         return actual
 
@@ -126,23 +139,31 @@ class SprintService:
     def plan(self, manifest: SprintManifest) -> tuple[SprintPlanRow, ...]:
         """Describe eligibility and blockers without writes or provider mutation."""
         rows: list[SprintPlanRow] = []
-        current = self._sprints.current()
+        current = self._sprints.current_for_project(manifest.steps[0].item.project_id)
         live_other = (
             current is not None
             and current[1] in {SprintState.ACTIVE, SprintState.PAUSED}
             and current[0].sprint_id != manifest.sprint_id
         )
-        pending_human = bool(self._tasks.list(TaskStatus.WAITING_HUMAN))
+        project_id = manifest.steps[0].item.project_id
+        pending_human = any(
+            task.project_id == project_id for task in self._tasks.list(TaskStatus.WAITING_HUMAN)
+        )
         busy = any(
-            self._tasks.list(status)
+            task.project_id == project_id
             for status in (
                 TaskStatus.CLAIMED,
                 TaskStatus.RUNNING,
                 TaskStatus.VALIDATING,
                 TaskStatus.PR_OPEN,
             )
+            for task in self._tasks.list(status)
         )
-        scope = (manifest.steps[0].item.provider, manifest.steps[0].item.target_repository)
+        scope = (
+            manifest.steps[0].item.project_id,
+            manifest.steps[0].item.provider,
+            manifest.steps[0].item.target_repository,
+        )
         seen: set[str] = set()
         for position, step in enumerate(manifest.steps):
             blockers: list[str] = []
@@ -151,7 +172,7 @@ class SprintService:
                 blockers.append("duplicate_work_item")
             if (
                 self._registry is None
-                and (step.item.provider, step.item.target_repository) != scope
+                and (step.item.project_id, step.item.provider, step.item.target_repository) != scope
             ):
                 blockers.append("outside_scope")
             if self._registry is not None:
@@ -180,7 +201,10 @@ class SprintService:
         return tuple(rows)
 
     def authorize(self, manifest: SprintManifest) -> None:
-        current = self._sprints.current()
+        project_ids = {step.item.project_id for step in manifest.steps}
+        if len(project_ids) != 1:
+            raise ValueError("sprint manifest must be scoped to one project")
+        current = self._sprints.current_for_project(manifest.steps[0].item.project_id)
         if current is not None and current[0].sprint_id == manifest.sprint_id:
             self._sprints.authorize(manifest)
             return
@@ -197,6 +221,13 @@ class SprintService:
     def prepare(self) -> bool:
         """Select only the current authorized step and materialize via E2."""
         current = self._sprints.current()
+        if current is None:
+            return False
+        return self.prepare_for_project(current[0].steps[0].item.project_id)
+
+    def prepare_for_project(self, project_id: str) -> bool:
+        """Select the current authorized step for one routed project."""
+        current = self._sprints.current_for_project(project_id)
         if current is None or current[1] is not SprintState.ACTIVE:
             return False
         manifest, _, position = current
@@ -248,19 +279,25 @@ class SprintService:
         return False
 
     def allows(self, task: FactoryTask) -> bool:
-        current = self._sprints.current()
+        current = self._sprints.current_for_project(task.project_id)
         if current is None or current[1] is not SprintState.ACTIVE:
             return False
         return self._matches_current(task, current)
 
     def has_live_sprint(self) -> bool:
         """Whether ACTIVE or PAUSED sprint authorization owns backlog intake."""
-        current = self._sprints.current()
+        return bool(self._sprints.live_projects())
+
+    def has_live_sprint_for(self, project_id: str) -> bool:
+        current = self._sprints.current_for_project(project_id)
         return current is not None and current[1] in {SprintState.ACTIVE, SprintState.PAUSED}
+
+    def live_projects(self) -> tuple[str, ...]:
+        return self._sprints.live_projects()
 
     def allows_review(self, task: FactoryTask) -> bool:
         """Let a paused sprint observe its own PR decision without dispatch."""
-        current = self._sprints.current()
+        current = self._sprints.current_for_project(task.project_id)
         if current is None or current[1] not in {SprintState.ACTIVE, SprintState.PAUSED}:
             return False
         return self._matches_current(task, current)
@@ -276,6 +313,7 @@ class SprintService:
         )
         return (
             issue is not None
+            and manifest.steps[position].item.project_id == task.project_id
             and task.source.provider == "github"
             and task.source.repository_slug == issue.repository_slug
             and task.source.issue_number == issue.number
@@ -284,7 +322,7 @@ class SprintService:
     def observe(self, task: FactoryTask | None) -> None:
         if task is None or not self.allows(task):
             return
-        current = self._sprints.current()
+        current = self._sprints.current_for_project(task.project_id)
         assert current is not None
         manifest, _, position = current
         if task.status in {
@@ -296,7 +334,7 @@ class SprintService:
             self._sprints.move(manifest.sprint_id, SprintState.PAUSED, position, "SprintPaused")
 
     def resume(self, sprint_id: str) -> None:
-        current = self._sprints.current()
+        current = self._current_by_id(sprint_id)
         if (
             current is None
             or current[0].sprint_id != sprint_id
@@ -321,26 +359,26 @@ class SprintService:
 
     def resume_completed(self) -> None:
         """Release the human gate after verified completion of the current step."""
-        current = self._sprints.current()
+        for project_id in self._sprints.live_projects():
+            self.resume_completed_for(project_id)
+
+    def resume_completed_for(self, project_id: str) -> None:
+        current = self._sprints.current_for_project(project_id)
         if current is None or current[1] is not SprintState.PAUSED:
             return
         manifest, _, position = current
-        if position < len(manifest.steps):
-            task = self._task_for(manifest.steps[position].item)
-            if (
-                task is not None
-                and task.status is TaskStatus.DONE
-                and (
-                    self._feedback_events is None
-                    or self._feedback_events.is_completed(task.task_id)
-                )
-            ):
-                self._sprints.move(
-                    manifest.sprint_id, SprintState.ACTIVE, position, "SprintResumed"
-                )
+        if position >= len(manifest.steps):
+            return
+        task = self._task_for(manifest.steps[position].item)
+        if (
+            task is not None
+            and task.status is TaskStatus.DONE
+            and (self._feedback_events is None or self._feedback_events.is_completed(task.task_id))
+        ):
+            self._sprints.move(manifest.sprint_id, SprintState.ACTIVE, position, "SprintResumed")
 
     def cancel(self, sprint_id: str) -> None:
-        current = self._sprints.current()
+        current = self._current_by_id(sprint_id)
         if (
             current is None
             or current[0].sprint_id != sprint_id
@@ -350,7 +388,7 @@ class SprintService:
         self._sprints.move(sprint_id, SprintState.CANCELLED, current[2], "SprintCancelled")
 
     def pause(self, sprint_id: str) -> None:
-        current = self._sprints.current()
+        current = self._current_by_id(sprint_id)
         if (
             current is None
             or current[0].sprint_id != sprint_id
@@ -360,8 +398,18 @@ class SprintService:
         self._sprints.move(sprint_id, SprintState.PAUSED, current[2], "SprintPaused")
 
     def is_paused(self) -> bool:
-        current = self._sprints.current()
+        return any(self.is_paused_for(project_id) for project_id in self._sprints.live_projects())
+
+    def is_paused_for(self, project_id: str) -> bool:
+        current = self._sprints.current_for_project(project_id)
         return current is not None and current[1] is SprintState.PAUSED
+
+    def _current_by_id(self, sprint_id: str) -> tuple[SprintManifest, SprintState, int] | None:
+        for project_id in self._sprints.live_projects():
+            current = self._sprints.current_for_project(project_id)
+            if current is not None and current[0].sprint_id == sprint_id:
+                return current
+        return None
 
     def _task_for(self, item: WorkItem) -> FactoryTask | None:
         issue = self._links.get_issue(item.provider, item.external_id)
