@@ -11,6 +11,9 @@ status plus its history row. Neither responsibility leaks into the other.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import cast
+
 from factory.domain.enums import TaskStatus
 from factory.domain.errors import TaskStateChangedError
 from factory.domain.models import FactoryTask, TaskTransition
@@ -73,7 +76,10 @@ class TaskLifecycleService:
         """
         if expected_from not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
             raise ValueError("provider reconciliation requires a terminal failure state")
-        resolver = getattr(self._repository, "apply_terminal_resolution", None)
+        resolver = cast(
+            Callable[[str, TaskStatus], FactoryTask] | None,
+            getattr(self._repository, "apply_terminal_resolution", None),
+        )
         if resolver is not None:
             return resolver(task_id, expected_from)
         return self._repository.apply_transition(task_id, expected_from, TaskStatus.DONE)
