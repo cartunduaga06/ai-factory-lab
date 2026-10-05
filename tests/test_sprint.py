@@ -609,3 +609,68 @@ def test_find_for_work_item_ignores_cancelled_superseded_sprint(tmp_path: Path) 
         )
 
     assert sprints.find_for_work_item("ai-factory-lab", "trello", "same-card") == "current"
+
+
+def test_paused_project_sprint_does_not_block_independent_project(tmp_path: Path) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    source.items["a"] = replace(source.items["a"], project_id="ai-factory-lab")
+    source.items["b"] = replace(source.items["b"], project_id="finanza-ia")
+    sprint, tasks = _service(path, source, sink)
+    manifest_a = sprint.draft("sprint-a", (("a", ()),))
+    sprint.authorize(manifest_a)
+    sprint.pause("sprint-a")
+    manifest_b = sprint.draft("sprint-b", (("b", ()),))
+    sprint.authorize(manifest_b)
+    assert sprint.is_paused_for("ai-factory-lab")
+    assert not sprint.is_paused_for("finanza-ia")
+    assert sprint.prepare_for_project("finanza-ia") is True
+
+
+def test_paused_project_rejects_its_task_and_keeps_review_authorized(tmp_path: Path) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    sprint, tasks = _service(path, source, sink)
+    sprint.authorize(sprint.draft("sprint-a", (("a", ()),)))
+    assert sprint.prepare_for_project("ai-factory-lab")
+    task = tasks.save(
+        FactoryTask(
+            "Project A task",
+            "example/product",
+            source=TaskSource("github", "example/control", 1),
+            status=TaskStatus.READY,
+        )
+    )
+    sprint.pause("sprint-a")
+    assert not sprint.allows(task)
+    assert sprint.allows_review(task)
+
+
+@pytest.mark.parametrize(
+    "status, blocker",
+    [(TaskStatus.WAITING_HUMAN, "pending_human_gate"), (TaskStatus.RUNNING, "wip_busy")],
+)
+def test_same_project_human_and_wip_block_new_sprint(
+    tmp_path: Path, status: TaskStatus, blocker: str
+) -> None:
+    source, sink = Source(), Sink()
+    sprint, tasks = _service(tmp_path / "factory.db", source, sink)
+    tasks.save(FactoryTask("Busy", "example/control", status=status))
+    row = sprint.plan(sprint.draft("blocked", (("a", ()),)))[0]
+    assert blocker in row.blockers
+
+
+def test_project_identity_isolation_and_legacy_default(tmp_path: Path) -> None:
+    path = tmp_path / "factory.db"
+    source, sink = Source(), Sink()
+    source.items["a"] = replace(source.items["a"], project_id="ai-factory-lab")
+    source.items["b"] = replace(source.items["b"], project_id="finanza-ia")
+    sprint, _ = _service(path, source, sink)
+    sprint.authorize(sprint.draft("a", (("a", ()),)))
+    sprint.authorize(sprint.draft("b", (("b", ()),)))
+    repository = SqliteSprintRepository(str(path))
+    assert repository.current_for_project("ai-factory-lab")[0].sprint_id == "a"  # type: ignore[index]
+    assert repository.current_for_project("finanza-ia")[0].sprint_id == "b"  # type: ignore[index]
+    assert repository.current_for_project("unknown") is None
+    legacy = WorkItem("trello", "legacy", "Legacy", "body", "example/control", True, True)
+    assert legacy.project_id == "ai-factory-lab"

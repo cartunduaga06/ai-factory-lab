@@ -10,7 +10,10 @@ from datetime import UTC, datetime
 from factory.domain.backlog import WorkItem
 from factory.domain.ports import SprintRepository
 from factory.domain.sprint import SprintManifest, SprintState, SprintStep
-from factory.infrastructure.persistence.schema import AUDIT_EVENTS_TABLE, SPRINTS_TABLE
+from factory.infrastructure.persistence.schema import (
+    AUDIT_EVENTS_TABLE,
+    SPRINTS_TABLE,
+)
 from factory.infrastructure.persistence.sqlite_base import SqliteRepository
 
 
@@ -26,19 +29,24 @@ class SqliteSprintRepository(SqliteRepository, SprintRepository):
             if existing is not None:
                 if existing["manifest"] != encoded:
                     raise ValueError("sprint authorization is immutable")
-                latest = conn.execute(
-                    f"SELECT sprint_id FROM {SPRINTS_TABLE} ORDER BY rowid DESC LIMIT 1"
-                ).fetchone()
-                if latest is None or latest["sprint_id"] != manifest.sprint_id:
-                    raise ValueError("sprint is no longer current")
                 return
+            live = conn.execute(
+                f"SELECT * FROM {SPRINTS_TABLE} WHERE state IN (?, ?)",
+                (SprintState.ACTIVE.value, SprintState.PAUSED.value),
+            ).fetchall()
+            project_ids = {step.item.project_id for step in manifest.steps}
+            for row in live:
+                other = self._decode(row)[0]
+                if project_ids.intersection(step.item.project_id for step in other.steps):
+                    raise ValueError("another sprint is active for this project")
+            conn.execute("BEGIN IMMEDIATE")
             try:
                 conn.execute(
                     f"INSERT INTO {SPRINTS_TABLE} VALUES (?, ?, 'ACTIVE', 0)",
                     (manifest.sprint_id, encoded),
                 )
             except sqlite3.IntegrityError:
-                raise ValueError("another sprint is active") from None
+                raise ValueError("another sprint is active for this project") from None
             self._event(conn, manifest.sprint_id, "SprintAuthorized", "authorize")
 
     def current(self) -> tuple[SprintManifest, SprintState, int] | None:
@@ -46,8 +54,34 @@ class SqliteSprintRepository(SqliteRepository, SprintRepository):
             row = conn.execute(
                 f"SELECT * FROM {SPRINTS_TABLE} ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
-        if row is None:
-            return None
+        return self._decode(row) if row is not None else None
+
+    def current_for_project(
+        self, project_id: str
+    ) -> tuple[SprintManifest, SprintState, int] | None:
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT * FROM {SPRINTS_TABLE} ORDER BY rowid DESC").fetchall()
+        for row in rows:
+            decoded = self._decode(row)
+            manifest = decoded[0]
+            if decoded[1] is not SprintState.CANCELLED and any(
+                step.item.project_id == project_id for step in manifest.steps
+            ):
+                return decoded
+        return None
+
+    def live_projects(self) -> tuple[str, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM {SPRINTS_TABLE} WHERE state IN (?, ?)",
+                (SprintState.ACTIVE.value, SprintState.PAUSED.value),
+            ).fetchall()
+        return tuple(
+            sorted({step.item.project_id for row in rows for step in self._decode(row)[0].steps})
+        )
+
+    @staticmethod
+    def _decode(row: sqlite3.Row) -> tuple[SprintManifest, SprintState, int]:
         raw = json.loads(str(row["manifest"]))
         steps = tuple(
             SprintStep(WorkItem(**step["item"]), tuple(step["dependencies"]))
