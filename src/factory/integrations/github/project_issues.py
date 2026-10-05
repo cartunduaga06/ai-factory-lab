@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import replace
 
 from factory.domain.enums import RepositoryRole
+from factory.domain.errors import ProviderRequestError
 from factory.domain.models import FactoryTask, Repository, TaskSource
 from factory.domain.ports import IssueSource
 from factory.domain.projects import ProjectRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectIssueSource(IssueSource):
@@ -23,7 +27,16 @@ class ProjectIssueSource(IssueSource):
         tasks: list[FactoryTask] = []
         for profile in self._registry.profiles:
             repo = Repository(profile.repository_slug, role=RepositoryRole.TARGET)
-            for task in self._source.list_open_tasks(repo):
+            try:
+                source_tasks = self._source.list_open_tasks(repo)
+            except ProviderRequestError as exc:
+                logger.warning(
+                    "project intake deferred: project_id=%s error_type=%s",
+                    profile.project_id,
+                    type(exc).__name__,
+                )
+                continue
+            for task in source_tasks:
                 if task.source is None or task.source.repository_slug != profile.repository_slug:
                     if task.source is not None:
                         # Keep rejected routing evidence specific and auditable.

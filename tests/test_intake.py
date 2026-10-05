@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from factory.domain.enums import RepositoryRole, TaskStatus
+from factory.domain.errors import ProviderRequestError
 from factory.domain.models import FactoryTask, QualityGateSpec, Repository, TaskSource
 from factory.domain.ports import IssueSource
 from factory.domain.projects import ProjectProfile, ProjectRegistry
@@ -191,6 +192,54 @@ def test_registered_multi_repo_intake_routes_and_is_idempotent(repo: SqliteTaskR
     assert (first.discovered, first.created, second.created, second.existing) == (1, 1, 0, 1)
     assert saved is not None
     assert (saved.project_id, saved.target_repository) == ("finanza-ia", slug)
+
+
+def test_registered_intake_defers_one_unavailable_project(
+    repo: SqliteTaskRepository, caplog: pytest.LogCaptureFixture
+) -> None:
+    available = "cartunduaga06/ai-factory-lab"
+    unavailable = "cartunduaga06/finanza-ia"
+    incoming = FactoryTask(
+        title="Available issue",
+        target_repository=available,
+        source=TaskSource("github", available, 150),
+        labels=("factory-ready",),
+    )
+
+    class PartiallyUnavailableSource(FakeIssueSource):
+        def list_open_tasks(self, repository: Repository) -> list[FactoryTask]:
+            if repository.slug == unavailable:
+                raise ProviderRequestError("provider unavailable")
+            return [incoming] if repository.slug == available else []
+
+    profiles = (
+        ProjectProfile(
+            project_id="ai-factory-lab",
+            repository_slug=available,
+            source_checkout="/work/ai-factory-lab",
+            base_ref="main",
+            gates=(QualityGateSpec("pytest", ("pytest",), True),),
+        ),
+        ProjectProfile(
+            project_id="finanza-ia",
+            repository_slug=unavailable,
+            source_checkout="/work/finanza-ia",
+            base_ref="main",
+            gates=(QualityGateSpec("pytest", ("pytest",), True),),
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        summary = IssueIntakeService(
+            ProjectIssueSource(PartiallyUnavailableSource([]), ProjectRegistry(profiles)), repo
+        ).intake(REPO)
+
+    saved = repo.find_by_source(incoming.source)
+    assert (summary.discovered, summary.created, summary.errors) == (1, 1, 0)
+    assert saved is not None
+    assert saved.project_id == "ai-factory-lab"
+    assert "project intake deferred: project_id=finanza-ia" in caplog.text
+    assert "error_type=ProviderRequestError" in caplog.text
 
 
 def test_registered_intake_rejects_unregistered_source(repo: SqliteTaskRepository) -> None:
