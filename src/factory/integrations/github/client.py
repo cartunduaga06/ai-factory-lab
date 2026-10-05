@@ -20,6 +20,8 @@ import urllib.request
 from collections.abc import Mapping
 from typing import Any, Protocol
 
+from factory.domain.errors import ProviderRequestError
+
 
 class GitHubError(RuntimeError):
     """Base class for GitHub integration failures."""
@@ -29,7 +31,7 @@ class GitHubAuthError(GitHubError):
     """The token is missing, invalid or lacks the required permission."""
 
 
-class GitHubRequestError(GitHubError):
+class GitHubRequestError(GitHubError, ProviderRequestError):
     """The API returned an unexpected error response."""
 
     def __init__(self, status: int, message: str) -> None:

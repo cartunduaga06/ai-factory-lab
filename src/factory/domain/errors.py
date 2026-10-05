@@ -15,6 +15,10 @@ class FactoryError(Exception):
     """Base class for every error the factory raises deliberately."""
 
 
+class ProviderRequestError(FactoryError):
+    """A transient external-provider request prevented one safe retryable pass."""
+
+
 class PersistenceError(FactoryError):
     """A persistence operation failed for a reason other than a known conflict."""
 
@@ -324,6 +328,7 @@ __all__ = [
     "DuplicateRunError",
     "DuplicateTaskError",
     "FactoryError",
+    "ProviderRequestError",
     "PersistenceError",
     "PublicationError",
     "RetryNotAllowedError",

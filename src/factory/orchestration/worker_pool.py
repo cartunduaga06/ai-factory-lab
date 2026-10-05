@@ -8,13 +8,21 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
-from factory.domain.errors import DuplicateTaskError, TaskStateChangedError
+from factory.domain.errors import (
+    DuplicateTaskError,
+    ProviderRequestError,
+    TaskStateChangedError,
+)
 from factory.domain.models import AgentAdapter, AgentRun
 from factory.orchestration.runtime import FactoryRuntime, RuntimeResult
 
 logger = logging.getLogger(__name__)
 
-_RECOVERABLE_PREPARATION_ERRORS = (DuplicateTaskError, TaskStateChangedError)
+_RECOVERABLE_PREPARATION_ERRORS = (
+    DuplicateTaskError,
+    ProviderRequestError,
+    TaskStateChangedError,
+)
 
 
 @dataclass(frozen=True, slots=True)
