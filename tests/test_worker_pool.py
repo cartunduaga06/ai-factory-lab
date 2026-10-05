@@ -17,6 +17,7 @@ import pytest
 from factory.domain.enums import AgentKind, RepositoryRole, RunStatus, TaskStatus, ValidationOutcome
 from factory.domain.errors import (
     DuplicateTaskError,
+    ProviderRequestError,
     RetryNotAllowedError,
     RevisionNotPublishableError,
 )
@@ -124,6 +125,22 @@ def test_pool_continues_after_recoverable_pass_preparation_error(
 
     assert prepared == 2
     assert "pool pass recovered during preparation: DuplicateTaskError" in caplog.text
+
+
+def test_pool_defers_provider_request_error_during_preparation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class UnavailableCoordinator:
+        def prepare_pool(self) -> None:
+            raise ProviderRequestError("provider unavailable")
+
+        def pool_candidates(self) -> tuple[str, ...]:
+            return ()
+
+    with caplog.at_level("ERROR"):
+        assert WorkerPool(lambda: cast("FactoryRuntime", UnavailableCoordinator())).run_pass() == ()
+
+    assert "pool pass recovered during preparation: ProviderRequestError" in caplog.text
 
 
 def test_pool_preparation_programming_error_fails_closed() -> None:
