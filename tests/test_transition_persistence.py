@@ -82,6 +82,12 @@ def test_repository_rejects_illegal_transition(repo: SqliteTaskRepository) -> No
     task = _saved(repo)
     with pytest.raises(InvalidTransitionError):
         _service(repo).transition(task.task_id, TaskStatus.DONE)
+
+
+def test_repository_boundary_rejects_illegal_transition(repo: SqliteTaskRepository) -> None:
+    task = _saved(repo)
+    with pytest.raises(InvalidTransitionError):
+        repo.apply_transition(task.task_id, TaskStatus.DISCOVERED, TaskStatus.DONE)
     stored = repo.get(task.task_id)
     assert stored is not None and stored.status is TaskStatus.DISCOVERED
     assert repo.history(task.task_id) == []
