@@ -275,8 +275,9 @@ class TaskRepository(ABC):
         compare-and-swap guard: it turns a lost update into an explicit error
         instead of silently applying a transition to an unexpected state.
 
-        Transition *legality* is validated by the orchestration layer before
-        this call; this method is the durable, atomic write.
+        Implementations must also reject transitions that are absent from the
+        authoritative domain lifecycle graph, so direct adapter callers cannot
+        bypass state-machine legality.
 
         Raises:
             KeyError: if the task is unknown.

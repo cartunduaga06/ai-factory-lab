@@ -26,9 +26,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from factory.domain.enums import TaskKind, TaskStatus
-from factory.domain.errors import DuplicateTaskError, TaskStateChangedError
+from factory.domain.errors import DuplicateTaskError, InvalidTransitionError, TaskStateChangedError
 from factory.domain.models import FactoryTask, TaskSource, TaskTransition
 from factory.domain.ports import TaskRepository
+from factory.domain.task_lifecycle import can_persist_transition
 from factory.infrastructure.persistence.codec import decode_datetime, encode_datetime
 from factory.infrastructure.persistence.schema import (
     AGENT_RUNS_TABLE,
@@ -225,6 +226,24 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
     def apply_transition(
         self, task_id: str, expected_from: TaskStatus, target: TaskStatus
     ) -> FactoryTask:
+        return self._apply_transition(task_id, expected_from, target)
+
+    def apply_terminal_resolution(self, task_id: str, expected_from: TaskStatus) -> FactoryTask:
+        """Apply the explicit provider-reconciliation terminal resolution."""
+        if expected_from not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+            raise ValueError("provider reconciliation requires a terminal failure state")
+        return self._apply_transition(
+            task_id, expected_from, TaskStatus.DONE, allow_terminal_resolution=True
+        )
+
+    def _apply_transition(
+        self,
+        task_id: str,
+        expected_from: TaskStatus,
+        target: TaskStatus,
+        *,
+        allow_terminal_resolution: bool = False,
+    ) -> FactoryTask:
         """Atomically apply ``expected_from -> target`` and record history.
 
         The compare-and-swap is a single conditional ``UPDATE`` whose predicate
@@ -238,6 +257,22 @@ class SqliteTaskRepository(SqliteRepository, TaskRepository):
         now = datetime.now(UTC)
         timestamp = encode_datetime(now)
         with self._connect() as conn:
+            current = conn.execute(
+                f"SELECT status FROM {TASKS_TABLE} WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(task_id)
+            actual = TaskStatus(current["status"])
+            if actual is not expected_from:
+                raise TaskStateChangedError(task_id, expected_from, actual)
+            allowed = (
+                allow_terminal_resolution
+                and expected_from in {TaskStatus.FAILED, TaskStatus.CANCELLED}
+                and target is TaskStatus.DONE
+            ) or can_persist_transition(actual, target)
+            if not allowed:
+                raise InvalidTransitionError(actual, target)
+
             # Count distinct task identities, including orphaned active runs.
             # The count and transition share SQLite's serialized write transaction.
             idle_guard = (

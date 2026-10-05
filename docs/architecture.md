@@ -268,7 +268,9 @@ Design intent:
      may also move to FAILED or CANCELLED (terminal sinks)
 ```
 
-Transition table (authoritative: `factory/orchestration/lifecycle.py`):
+Transition table (authoritative in the pure domain module
+`factory/domain/task_lifecycle.py`; orchestration re-exports it for compatibility,
+and SQLite validates it at the durable write boundary):
 
 | From | Allowed next |
 |---|---|

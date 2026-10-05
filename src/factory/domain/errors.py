@@ -43,6 +43,15 @@ class DuplicateTaskError(FactoryError):
         self.source = source
 
 
+class InvalidTransitionError(FactoryError, ValueError):
+    """Raised when a requested lifecycle transition is not allowed."""
+
+    def __init__(self, source: TaskStatus, target: TaskStatus) -> None:
+        super().__init__(f"illegal task transition: {source.value} -> {target.value}")
+        self.source = source
+        self.target = target
+
+
 class TaskStateChangedError(FactoryError):
     """A stored task was not in the status a transition expected.
 
@@ -328,6 +337,7 @@ __all__ = [
     "DuplicateRunError",
     "DuplicateTaskError",
     "FactoryError",
+    "InvalidTransitionError",
     "ProviderRequestError",
     "PersistenceError",
     "PublicationError",
