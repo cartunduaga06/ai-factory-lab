@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /srv/ai-factory/staging/ai-factory-lab-vnext
+export FACTORY_ENV=staging
+PYTHON="${FACTORY_PYTHON:-.venv/bin/python}"
+"$PYTHON" -m pytest -q \
+  tests/test_parallel_persistence.py \
+  tests/test_worker_pool.py::test_two_sessions_overlap_and_failure_does_not_stop_peer \
+  tests/test_run_persistence.py

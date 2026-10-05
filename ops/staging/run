@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=/srv/ai-factory/staging
+REPO="$ROOT/ai-factory-lab-vnext"
+ENV_FILE="$ROOT/vnext.env"
+STATE="$ROOT/state"
+WORKSPACES="$ROOT/workspaces"
+LOGS="$ROOT/logs"
+FACTORY_PYTHON="${FACTORY_PYTHON:-$REPO/.venv/bin/python}"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "staging config missing: $ENV_FILE" >&2
+  exit 2
+fi
+mkdir -p "$STATE" "$WORKSPACES" "$LOGS"
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+export FACTORY_ENV=staging
+export DATABASE_URL="sqlite:////${STATE#/}/factory.db"
+export FACTORY_WORKSPACE_ROOT="$WORKSPACES"
+export OPENHANDS_WORKSPACE_ROOT="$WORKSPACES"
+export FACTORY_STATUS_PORT=8865
+cd "$REPO"
+export PYTHONPATH="$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+if [[ ! -x "$FACTORY_PYTHON" ]]; then
+  echo "staging Python environment missing; set FACTORY_PYTHON or create .venv and install -e '.[dev]'" >&2
+  exit 2
+fi
+exec > >(tee -a "$LOGS/factory.log") 2>&1
+exec "$FACTORY_PYTHON" -m factory "$@"

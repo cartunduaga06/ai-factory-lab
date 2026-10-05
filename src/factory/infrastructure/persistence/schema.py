@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # ruff: noqa: E501 - SQL trigger expressions are kept intact for review.
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 TASKS_TABLE = "tasks"
 TRANSITIONS_TABLE = "transitions"
@@ -346,6 +346,8 @@ CREATE TABLE IF NOT EXISTS {AGENT_RUNS_TABLE} (
     gates         TEXT NOT NULL DEFAULT '[]',
     validated_revision TEXT,
     context_pack TEXT,
+    worker_id TEXT,
+    session_id TEXT,
     created_at    TEXT NOT NULL,
     CONSTRAINT fk_agent_runs_task
         FOREIGN KEY (task_id) REFERENCES {TASKS_TABLE} (task_id) ON DELETE CASCADE,
@@ -469,6 +471,8 @@ MIGRATION_STATEMENTS: tuple[str, ...] = (
     f"ALTER TABLE {WORKSPACES_TABLE} ADD COLUMN kind TEXT NOT NULL DEFAULT 'CODE';",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
     f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
+    f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN worker_id TEXT;",
+    f"ALTER TABLE {AGENT_RUNS_TABLE} ADD COLUMN session_id TEXT;",
     f"ALTER TABLE {BACKLOG_LINKS_TABLE} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'ai-factory-lab';",
     f"ALTER TABLE {PULL_REQUESTS_TABLE} ADD COLUMN commit_sha TEXT;",
     f"ALTER TABLE {TASKS_TABLE} ADD COLUMN reconciliation_origin TEXT;",

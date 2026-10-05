@@ -2,7 +2,61 @@
 
 ## Branch
 
-`hardening/worker-a-watcher-worker-a-watch-20261002T201407Z-2789209`
+`factory-vnext/isolation-stable-runtime`
+
+## Isolation sprint status
+
+Implemented production-path refusal for non-production config, configurable
+status port, staging process wrappers, a read-only health entrypoint, durable
+nullable worker/session ownership fields for runs, and a staging-only local
+soak harness. Existing SQLite active-run and active-workspace uniqueness and
+the worker pool's independent exception boundary remain the enforcement base.
+
+Staging defaults are documented in `docs/isolation-sprint.md`; wrappers pin
+runtime artifacts to `/srv/ai-factory/staging/{state,workspaces,logs}` and use
+port 8865. No Docker/host/production modifications were made.
+
+## Technical debt
+
+- The current run heartbeat is a runtime liveness hint, not an OS-process
+  liveness proof. Automated orphan recovery remains explicit and fail-closed;
+  a durable worker/session id improves attribution but does not prove a live
+  agent process.
+- Historical worktrees are intentionally not cleaned up.
+- Staging credentials and provider configuration remain operator-managed in
+  `/srv/ai-factory/staging/vnext.env`; no secret is stored in the repository.
+
+## Isolation sprint validation
+
+- Branch: `factory-vnext/isolation-stable-runtime`
+- Staging health smoke: `FACTORY_PYTHON=/tmp/pr54-qa-venv/bin/python
+  ops/staging/health` — passed, status `IDLE`, database at
+  `/srv/ai-factory/staging/state/factory.db`.
+- Full pytest: **1,054 passed, 1 skipped**.
+- `ruff check .`: passed.
+- `ruff format --check .`: passed (182 files).
+- `mypy`: passed (110 source files).
+- `git diff --check`: passed.
+- Existing concurrent runtime test demonstrates distinct active workspaces and
+  one failed task `BLOCKED` while its unrelated peer reaches `WAITING_HUMAN`.
+  `ops/harness/soak` captures this local fake-provider suite for repeat runs.
+- `ops/release/prepare-rc` is the clean-tree check and exact-SHA RC record
+  command. RC verdict is **READY FOR PRODUCTION PROMOTION — HUMAN GATE REQUIRED**
+  after it succeeds on the committed SHA. No merge or deployment is authorized
+  or performed by this worker.
+
+## Remaining blockers and evidence limits
+
+- No live-provider or Finanza IA E2E was run; it is explicitly deferred. The
+  staging-only E2E commands and evidence checklist are in
+  `docs/isolation-sprint.md`.
+- No production promotion, merge or deployment was performed. Human approval
+  remains required.
+- Run heartbeat is not proof of worker process liveness. Ownership metadata is
+  for attribution; orphan recovery still requires the separate explicit
+  operator-authorized fail-closed procedure.
+- Exact implementation and report commit SHAs are recorded in the final
+  response. The RC command emits the candidate SHA and gate summary.
 
 ## Intermittent SIGTERM Root Cause
 

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=/srv/ai-factory/staging
+STATE="$ROOT/state"
+WORKSPACES="$ROOT/workspaces"
+LOGS="$ROOT/logs"
+FACTORY_PYTHON="${FACTORY_PYTHON:-/srv/ai-factory/staging/ai-factory-lab-vnext/.venv/bin/python}"
+[[ -f "$ROOT/vnext.env" ]] || { echo "staging config missing" >&2; exit 2; }
+mkdir -p "$STATE" "$WORKSPACES" "$LOGS"
+export FACTORY_ENV=staging
+export DATABASE_URL="sqlite:////${STATE#/}/factory.db"
+export FACTORY_WORKSPACE_ROOT="$WORKSPACES"
+export OPENHANDS_WORKSPACE_ROOT="$WORKSPACES"
+export FACTORY_STATUS_PORT=8865
+cd /srv/ai-factory/staging/ai-factory-lab-vnext
+export PYTHONPATH="/srv/ai-factory/staging/ai-factory-lab-vnext/src${PYTHONPATH:+:$PYTHONPATH}"
+[[ -x "$FACTORY_PYTHON" ]] || { echo "staging Python environment missing" >&2; exit 2; }
+"$FACTORY_PYTHON" -m factory --show-config >/dev/null
+"$FACTORY_PYTHON" -c 'from factory.infrastructure.config import FactoryConfig; from factory.infrastructure.persistence import SqliteTaskRepository; SqliteTaskRepository(FactoryConfig.from_env().database.path).initialize()'
+"$FACTORY_PYTHON" -m factory status
+if [[ "${1:-}" == "--serve" ]]; then
+  exec "$FACTORY_PYTHON" -m factory status --serve --port 8865
+fi

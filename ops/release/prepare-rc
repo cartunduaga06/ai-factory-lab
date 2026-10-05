@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+REPO=$(git rev-parse --show-toplevel)
+cd "$REPO"
+BRANCH=$(git branch --show-current)
+if [[ "$BRANCH" == main || -z "$BRANCH" ]]; then
+  echo "refusing release candidate from main or detached HEAD" >&2
+  exit 2
+fi
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "release candidate requires a clean committed checkout" >&2
+  exit 2
+fi
+PYTHON=${FACTORY_PYTHON:-.venv/bin/python}
+"$PYTHON" -m pytest
+"$PYTHON" -m ruff check .
+"$PYTHON" -m ruff format --check .
+"$PYTHON" -m mypy
+git diff --check
+COMMIT=$(git rev-parse HEAD)
+printf '\nRC commit: %s\nBranch: %s\nChecks: pytest, ruff check, ruff format --check, mypy, git diff --check: PASS\n' "$COMMIT" "$BRANCH"
+printf 'Status: READY FOR PRODUCTION PROMOTION — HUMAN GATE REQUIRED; no merge or deployment performed.\n'

@@ -86,6 +86,15 @@ class DispatchService:
         self._lifecycle = TaskLifecycleService(tasks, state_machine)
         self._workspace_root = workspace_root.rstrip("/")
         self._context_builder = context_builder or ContextPackBuilder()
+        self._worker_id: str | None = None
+        self._session_id: str | None = None
+
+    def set_worker_owner(self, worker_id: str, session_id: str) -> None:
+        """Bind the next dispatch to its durable worker/session owner."""
+        if not worker_id.strip() or not session_id.strip():
+            raise ValueError("worker and session identity are required")
+        self._worker_id = worker_id
+        self._session_id = session_id
 
     @property
     def lifecycle(self) -> TaskLifecycleService:
@@ -248,6 +257,8 @@ class DispatchService:
             finished_at=produced.finished_at,
             gates=produced.gates,
             context_pack=pack,
+            worker_id=self._worker_id,
+            session_id=self._session_id,
         )
         return self._persist_run(run)
 

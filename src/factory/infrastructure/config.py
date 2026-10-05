@@ -18,6 +18,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from factory.domain.models import QualityGateSpec
@@ -220,6 +221,63 @@ def _clean(value: str | None) -> str | None:
     return stripped
 
 
+_PRODUCTION_PATHS = (
+    Path("/srv/ai-factory/control-plane"),
+    Path("/srv/ai-factory/production"),
+    Path("/srv/ai-factory/state"),
+    Path("/srv/ai-factory/workspaces"),
+    Path("/srv/ai-factory/logs"),
+)
+
+
+def _status_port(raw: str | None) -> int:
+    value = _clean(raw)
+    if value is None:
+        return 8765
+    try:
+        port = int(value)
+    except ValueError:
+        raise ValueError("FACTORY_STATUS_PORT must be an integer from 1 to 65535") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("FACTORY_STATUS_PORT must be an integer from 1 to 65535")
+    return port
+
+
+def _guard_runtime_paths(environment: Environment, env: Mapping[str, str]) -> None:
+    """Refuse known production storage/source paths outside production mode."""
+    if environment is Environment.PRODUCTION:
+        return
+    candidates = {
+        "DATABASE_URL": _database_path(_clean(env.get("DATABASE_URL"))),
+        "FACTORY_WORKSPACE_ROOT": _clean(env.get("FACTORY_WORKSPACE_ROOT")),
+        "OPENHANDS_WORKSPACE_ROOT": _clean(env.get("OPENHANDS_WORKSPACE_ROOT")),
+        "FACTORY_SOURCE_CHECKOUT": _clean(env.get("FACTORY_SOURCE_CHECKOUT")),
+        "FACTORY_OPERATIONAL_SCRATCH_ROOT": _clean(env.get("FACTORY_OPERATIONAL_SCRATCH_ROOT")),
+    }
+    for key, raw_path in candidates.items():
+        if raw_path is None or raw_path == ":memory:":
+            continue
+        _guard_path(key, raw_path)
+
+
+def _guard_path(key: str, raw_path: str) -> None:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    resolved = path.resolve(strict=False)
+    if any(resolved == blocked or blocked in resolved.parents for blocked in _PRODUCTION_PATHS):
+        raise ValueError(f"{key} points to a protected production path")
+
+
+def _database_path(url: str | None) -> str | None:
+    if url is None:
+        return None
+    try:
+        return DatabaseConfig.from_url(url).path
+    except UnsupportedDatabaseError:
+        return None
+
+
 def _trello_list_ids(source: Mapping[str, str]) -> tuple[str, ...]:
     """Parse a strict, deduplicated comma-separated Trello list allowlist."""
     configured = _clean(source.get("FACTORY_TRELLO_BACKLOG_LIST_IDS"))
@@ -417,6 +475,7 @@ class FactoryConfig:
     service_health_targets: tuple[tuple[str, str], ...] = ()
     docker_inspect_targets: tuple[tuple[str, str], ...] = ()
     project_registry: ProjectRegistry | None = None
+    status_port: int = 8765
 
     @property
     def database(self) -> DatabaseConfig:
@@ -459,9 +518,13 @@ class FactoryConfig:
             environment = Environment(raw_env)
         except ValueError:
             environment = Environment.DEVELOPMENT
+        _guard_runtime_paths(environment, source)
         quality_gates = parse_gate_specs(source.get("FACTORY_QUALITY_GATES"))
         raw_projects = _clean(source.get("FACTORY_PROJECTS"))
         project_registry = _parse_projects(raw_projects) if raw_projects else None
+        if project_registry is not None and environment is not Environment.PRODUCTION:
+            for project in project_registry.profiles:
+                _guard_path("FACTORY_PROJECTS", project.source_checkout)
         task_quality_gates = parse_task_gate_specs(source.get("FACTORY_TASK_QUALITY_GATES"))
         common_names = {spec.name for spec in quality_gates}
         if any(
@@ -548,6 +611,7 @@ class FactoryConfig:
             docker_inspect_targets=_parse_docker_targets(
                 source.get("FACTORY_DOCKER_INSPECT_TARGETS")
             ),
+            status_port=_status_port(source.get("FACTORY_STATUS_PORT")),
         )
 
     def redacted(self) -> dict[str, object]:
@@ -557,6 +621,7 @@ class FactoryConfig:
         """
         return {
             "environment": self.environment.value,
+            "status_port": self.status_port,
             "github": {
                 "api_url": self.github.api_url,
                 "control_plane_repo": self.github.control_plane_repo,
