@@ -14,6 +14,9 @@ fi
 mkdir -p "$ROOT/state" "$ROOT/workspaces" "$ROOT/logs"
 set -a
 source "$ROOT/vnext.env"
+if [[ -f "$ROOT/runtime-nonsecret.env" ]]; then
+  source "$ROOT/runtime-nonsecret.env"
+fi
 set +a
 export FACTORY_ENV=staging
 export DATABASE_URL="sqlite:////${ROOT#/}/state/factory.db"
