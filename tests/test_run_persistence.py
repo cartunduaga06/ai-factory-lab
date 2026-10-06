@@ -105,6 +105,8 @@ def test_run_round_trips_with_workspace(db_path: str) -> None:
     repository = _runs(db_path)
 
     run = _run(task.task_id)
+    run.worker_id = "worker-a"
+    run.session_id = "session-a"
     repository.save_run(run)
 
     loaded = repository.get_run(run.run_id)
@@ -116,6 +118,20 @@ def test_run_round_trips_with_workspace(db_path: str) -> None:
     assert loaded.started_at == WHEN
     assert loaded.finished_at is None
     assert loaded.workspace == run.workspace
+    assert loaded.worker_id == "worker-a"
+    assert loaded.session_id == "session-a"
+
+
+def test_run_owner_is_immutable(db_path: str) -> None:
+    task = _tasks(db_path).save(_task())
+    repository = _runs(db_path)
+    run = _run(task.task_id)
+    run.worker_id = "worker-a"
+    run.session_id = "session-a"
+    repository.save_run(run)
+    run.worker_id = "worker-b"
+    with pytest.raises(PersistenceError, match="cannot change its owner"):
+        repository.update_run(run)
 
 
 def test_run_without_workspace_round_trips(db_path: str) -> None:

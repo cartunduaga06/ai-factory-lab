@@ -213,6 +213,12 @@ class FactoryRuntime:
         self._pool_mode = pool_mode
         self._owner_report = owner_report
 
+    def set_worker_owner(self, worker_id: str, session_id: str) -> None:
+        """Bind dispatches from this isolated runtime to a worker session."""
+        self._dispatch.set_worker_owner(worker_id, session_id)
+        if self._operational_dispatch is not None:
+            self._operational_dispatch.set_worker_owner(worker_id, session_id)
+
     def run_once(self) -> RuntimeResult:
         """Run intake and reconcile exactly one task, never merging or deploying."""
         try:

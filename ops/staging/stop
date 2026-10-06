@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=/srv/ai-factory/staging
+PID_FILE="$ROOT/state/factory.pid"
+[[ -f "$PID_FILE" ]] || { echo "staging already stopped"; exit 0; }
+PID="$(cat "$PID_FILE")"
+if ! kill -0 "$PID" 2>/dev/null; then
+  rm -f "$PID_FILE"
+  echo "staging already stopped (stale pid)"
+  exit 0
+fi
+kill -TERM "$PID"
+for _ in $(seq 1 30); do
+  if ! kill -0 "$PID" 2>/dev/null; then
+    rm -f "$PID_FILE"
+    echo "staging stopped gracefully pid=$PID"
+    exit 0
+  fi
+  sleep 1
+done
+echo "staging did not stop within 30s; no SIGKILL issued" >&2
+exit 1

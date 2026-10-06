@@ -38,6 +38,53 @@ def test_defaults_are_safe_with_empty_environment() -> None:
     assert config.logging.fmt is LogFormat.TEXT
     assert config.watch_idle_interval == DEFAULT_WATCH_IDLE_INTERVAL
     assert config.watch_idle_interval > 0
+    assert config.status_port == 8765
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("DATABASE_URL", "sqlite:////srv/ai-factory/control-plane/state/factory.db"),
+        ("FACTORY_WORKSPACE_ROOT", "/srv/ai-factory/workspaces/run"),
+        ("OPENHANDS_WORKSPACE_ROOT", "/srv/ai-factory/workspaces"),
+        ("FACTORY_SOURCE_CHECKOUT", "/srv/ai-factory/control-plane"),
+    ],
+)
+def test_nonproduction_config_rejects_production_paths(key: str, value: str) -> None:
+    with pytest.raises(ValueError, match="protected production path"):
+        FactoryConfig.from_env({key: value})
+
+
+def test_nonproduction_config_allows_staging_roots_and_configures_port() -> None:
+    config = FactoryConfig.from_env(
+        {
+            "FACTORY_ENV": "staging",
+            "DATABASE_URL": "sqlite:////srv/ai-factory/staging/state/factory.db",
+            "FACTORY_WORKSPACE_ROOT": "/srv/ai-factory/staging/workspaces",
+            "FACTORY_STATUS_PORT": "8865",
+        }
+    )
+    assert config.status_port == 8865
+
+
+def test_nonproduction_project_registry_rejects_production_source_checkout() -> None:
+    with pytest.raises(ValueError, match="FACTORY_PROJECTS.*protected production path"):
+        FactoryConfig.from_env(
+            {
+                "FACTORY_PROJECTS": (
+                    '[{"project_id":"demo","repository":"owner/repo",'
+                    '"source_checkout":"/srv/ai-factory/control-plane",'
+                    '"base_ref":"main","context_profile":"repository",'
+                    '"deploy_policy":"human-only","gates":[{"name":"pytest",'
+                    '"argv":["pytest"]}]}]'
+                )
+            }
+        )
+
+
+def test_status_port_is_validated() -> None:
+    with pytest.raises(ValueError, match="FACTORY_STATUS_PORT"):
+        FactoryConfig.from_env({"FACTORY_STATUS_PORT": "8765;bad"})
 
 
 def test_placeholders_are_treated_as_unset() -> None:

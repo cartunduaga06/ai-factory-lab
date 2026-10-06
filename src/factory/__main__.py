@@ -147,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Read the current factory status.")
     status.add_argument("--serve", action="store_true", help="Serve a read-only phone view.")
     status.add_argument("--host", default="127.0.0.1")
-    status.add_argument("--port", type=int, default=8765)
+    status.add_argument("--port", type=int, default=None)
     subparsers.add_parser("sync-status", help="Deliver queued status events to Trello.")
     subparsers.add_parser(
         "metrics", help="Read deterministic global and per-project sprint metrics."
@@ -267,7 +267,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "pool":
         return _run_pool(config)
     if args.command == "status":
-        return _show_status(config, serve=args.serve, host=args.host, port=args.port)
+        return _show_status(
+            config,
+            serve=args.serve,
+            host=args.host,
+            port=args.port if args.port is not None else config.status_port,
+        )
     if args.command == "sync-status":
         try:
             if config.project_registry is not None:

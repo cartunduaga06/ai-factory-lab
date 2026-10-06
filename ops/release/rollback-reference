@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# != 1 ]]; then
+  echo "usage: $0 <immutable-tag-or-commit>" >&2
+  exit 2
+fi
+ref=$1
+repo=/srv/ai-factory/staging/ai-factory-lab-vnext
+commit=$(git -C "$repo" rev-parse --verify "$ref^{commit}")
+printf 'Rollback candidate: %s\n' "$commit"
+printf 'Reference: %s\n' "$ref"
+printf 'This script only resolves immutable repository history. Human operator action is required for any rollback.\n'

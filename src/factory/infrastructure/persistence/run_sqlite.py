@@ -102,8 +102,8 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                     INSERT INTO {AGENT_RUNS_TABLE} (
                         run_id, task_id, project_id, adapter, status, workspace_id,
                         summary, started_at, last_heartbeat, agent_heartbeat, finished_at, gates,
-                        validated_revision, context_pack, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        validated_revision, context_pack, worker_id, session_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
@@ -122,6 +122,8 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                         json.dumps(run.context_pack.metadata(), sort_keys=True)
                         if run.context_pack
                         else None,
+                        run.worker_id,
+                        run.session_id,
                         created_at,
                     ),
                 )
@@ -152,7 +154,8 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
         with self._connect() as conn:
             existing = conn.execute(
                 f"""
-                SELECT task_id, project_id, workspace_id, created_at, context_pack
+                  SELECT task_id, project_id, workspace_id, created_at, context_pack,
+                         worker_id, session_id
                   FROM {AGENT_RUNS_TABLE} WHERE run_id = ?
                 """,
                 (run.run_id,),
@@ -161,6 +164,8 @@ class SqliteRunRepository(SqliteRepository, RunRepository):
                 raise KeyError(run.run_id)
             if existing["task_id"] != run.task_id or existing["project_id"] != run.project_id:
                 raise PersistenceError(f"run {run.run_id} belongs to another task")
+            if existing["worker_id"] != run.worker_id or existing["session_id"] != run.session_id:
+                raise PersistenceError(f"run {run.run_id} cannot change its owner")
 
             new_workspace_id = run.workspace.workspace_id if run.workspace is not None else None
             if new_workspace_id != existing["workspace_id"]:
@@ -365,6 +370,8 @@ def _row_to_run(row: sqlite3.Row, workspace: Workspace | None) -> AgentRun:
         gates=_decode_gates(row["gates"]),
         validated_revision=row["validated_revision"],
         context_pack=pack_from_metadata(row["context_pack"]) if row["context_pack"] else None,
+        worker_id=row["worker_id"],
+        session_id=row["session_id"],
     )
 
 

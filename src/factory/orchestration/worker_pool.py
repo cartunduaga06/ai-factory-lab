@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -90,6 +91,10 @@ class WorkerPool:
                     if task_id is None:
                         break
                     runtime = self._factory()
+                    session_id = str(uuid.uuid4())
+                    set_owner = getattr(runtime, "set_worker_owner", None)
+                    if callable(set_owner):
+                        set_owner(f"worker-{session_id[:8]}", session_id)
                     active[executor.submit(runtime.run_task, task_id)] = _ActiveSession(
                         task_id, runtime
                     )

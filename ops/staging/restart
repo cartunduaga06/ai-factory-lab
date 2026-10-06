@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=/srv/ai-factory/staging
+"$ROOT/ai-factory-lab-vnext/ops/staging/stop"
+"$ROOT/ai-factory-lab-vnext/ops/staging/start"

@@ -310,6 +310,8 @@ class AgentRun:
     validated_revision: str | None = None
     context_pack: ContextPack | None = None
     project_id: str = "ai-factory-lab"
+    worker_id: str | None = None
+    session_id: str | None = None
 
     @property
     def is_terminal(self) -> bool:
